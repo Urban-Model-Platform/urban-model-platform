@@ -42,7 +42,7 @@ ARG USER_UID=1000
 ARG USERNAME=pythonuser
 ARG USER_GID=2000
 ARG SOURCE_COMMIT
-ARG IMAGE_TAG=2.0.0
+ARG IMAGE_TAG
 
 LABEL maintainer="Urban Data Analytics" \
     name="analytics/urban-model-platform" \
