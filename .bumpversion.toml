@@ -4,12 +4,12 @@ commit = true
 tag = true
 tag_name = "v{new_version}"
 
-[[bumpversion.files]]
+[[tool.bumpversion.files]]
 filename = "pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
-[[bumpversion.files]]
+[[tool.bumpversion.files]]
 filename = ".env"
 search = 'IMAGE_TAG={current_version}'
 replace = 'IMAGE_TAG={new_version}'
