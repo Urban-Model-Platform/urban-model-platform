@@ -33,8 +33,9 @@ submission_request_timeout = aiohttp.ClientTimeout(
     connect=10,
     sock_connect=10,
     sock_read=120,
-    sock_write=120,
 )
+
+submission_post_timeout_seconds = 300
 
 
 # TODO: this is not an OGC API Process in a strict sense,
@@ -392,7 +393,8 @@ class Process:
                 response = await self._submit_remote_job(
                     session, str(provider.server_url),
                     request_body, provider_auth,
-                    headers
+                    headers,
+                    max_submit_seconds=max(submission_post_timeout_seconds, provider.timeout),
                 )
 
                 response_content = await fetch_response_content(response)
@@ -442,6 +444,9 @@ class Process:
                     )
                 ) from e
 
+            except OGCProcessException:
+                raise
+
             except Exception as e:
                 logger.exception("Unexpected error during job submission: \n%s", e)
 
@@ -462,16 +467,57 @@ class Process:
         request_body: dict,
         auth: remote_auth.ProviderAuth,
         headers: dict | None = None,
+        max_submit_seconds: int = submission_post_timeout_seconds,
     ) -> aiohttp.ClientResponse:
-        
-
-
-        response = await session.post(
-            f"{url}processes/{self.process_id}/execution",
-            json=request_body,
-            auth=auth.auth,
-            headers=headers
-        )
+        try:
+            response = await asyncio.wait_for(
+                session.post(
+                    f"{url}processes/{self.process_id}/execution",
+                    json=request_body,
+                    auth=auth.auth,
+                    headers=headers,
+                ),
+                timeout=max_submit_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank",
+                    title="Remote job submission timed out",
+                    status=504,
+                    detail=(
+                        "Submitting the job to the remote server exceeded "
+                        f"the timeout of {max_submit_seconds} seconds."
+                    ),
+                    instance=f"/processes/{self.process_id_with_prefix}/execution",
+                )
+            ) from e
+        except aiohttp.ServerDisconnectedError as e:
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank",
+                    title="Remote server disconnected during submission",
+                    status=502,
+                    detail=(
+                        "The remote server closed the connection while "
+                        "the job submission request was in progress."
+                    ),
+                    instance=f"/processes/{self.process_id_with_prefix}/execution",
+                )
+            ) from e
+        except aiohttp.ClientError as e:
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank",
+                    title="Remote server communication failed",
+                    status=502,
+                    detail=(
+                        "Failed to submit the job to the remote server due "
+                        f"to a transport error: {e}"
+                    ),
+                    instance=f"/processes/{self.process_id_with_prefix}/execution",
+                )
+            ) from e
 
         if response.headers or response.content_type == "application/json":
             return response
