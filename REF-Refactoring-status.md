@@ -204,6 +204,49 @@ Design trade-offs accepted in Step 1:
 Next incremental enhancements (suggested order): implement /jobs endpoints → inputs separation & endpoint → SQLModel repo & migrations → status history/events → auth gating of job resources.
 
 
+Large input data: implementation strategies
+
+When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there are two primary approaches; the key constraint is **the receiving server must support the chosen approach**:
+
+**Option 1: Chunked Transfer Encoding (automatic)**
+- How it works: aiohttp automatically chunks large request bodies; no client-side code changes needed.
+  ```python
+  # aiohttp handles chunking transparently for large payloads
+  async with session.post(url, json=large_dict) as resp:
+      ...
+  ```
+- Receiving side requirement: ANY standard HTTP server automatically reassembles chunks (RFC 7230). OGC API Processes servers support this natively with no modifications.
+- Pros: transparent, works with existing servers, no schema changes.
+- Cons: no progress visibility from client; doesn't reduce memory footprint of the UMP pod during ingestion (still parses full body into Python dict).
+
+**Option 2: URL/Href Referencing (OGC-native)**
+- How it works: instead of embedding large data inline, reference it by URL.
+  ```json
+  {
+    "inputs": {
+      "geospatial_data": { "href": "http://s3.../buildings.json" }
+    }
+  }
+  ```
+- Receiving side requirement: the OGC API Processes server MUST implement the `href` reference pattern (most modern servers do, including pygeoapi). Server fetches the referenced data on-demand.
+- Pros: minimal payload size, server-driven retrieval, can validate checksums, supports range requests.
+- Cons: requires remote server capability; adds latency for reference resolution; requires stable external storage.
+
+**Memory impact mitigation:**
+- Option 1 still loads full JSON into Python memory (360–600MB for 120MB raw). Mitigate by:
+  - Using a streaming JSON parser (e.g., `ijson`) instead of `request.json` to avoid full deserialization.
+  - Storing large inputs temporarily and passing a URL reference instead.
+- Option 2 avoids local memory spike entirely by outsourcing data hosting.
+
+**Recommendation for Step 2:**
+- Keep chunked transfer (Option 1) as the baseline; aiohttp handles it automatically.
+- Investigate adding an input pre-processor that detects payloads above a threshold (e.g., >100MB) and automatically:
+  - Stores large input objects in a temporary location (local, S3, or GCS).
+  - Replaces inline data with `href` references before forwarding to the provider.
+  - Cleans up temporary storage after the job completes or expires.
+- This hybrid approach avoids memory pressure while remaining transparent to callers.
+
+
 Event sourcing, CQRS, and job history: design decision
 
 - For now, we will not implement full CQRS or event sourcing. Instead, we will:
