@@ -21,4 +21,6 @@
     "ruff.importStrategy": "fromEnvironment",
     "black-formatter.importStrategy": "fromEnvironment",
     "python.analysis.typeCheckingMode": "basic",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
 }
