@@ -1,5 +1,5 @@
 [bumpversion]
-current_version = "2.1.0rc1+fix-error-handling"
+current_version = "2.2.1"
 commit = true
 tag = true
 tag_name = "v{new_version}"
