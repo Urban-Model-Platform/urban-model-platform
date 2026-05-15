@@ -20,11 +20,19 @@ from ump.utils import fetch_json, fetch_response_content
 
 logger = logging.getLogger(__name__)
 
-client_timeout = aiohttp.ClientTimeout(
-    total=5,  # Set a reasonable timeout for the requests
-    connect=2,  # Connection timeout
-    sock_connect=2,  # Socket connection timeout
-    sock_read=5,  # Socket read timeout
+metadata_request_timeout = aiohttp.ClientTimeout(
+    total=5,
+    connect=2,
+    sock_connect=2,
+    sock_read=5,
+)
+
+# Submission requests can carry very large payloads, so do not cap total duration.
+submission_request_timeout = aiohttp.ClientTimeout(
+    total=None,
+    connect=10,
+    sock_connect=10,
+    sock_read=60,
 )
 
 
@@ -196,7 +204,7 @@ class Process:
         auth_strategy = remote_auth.get_auth_strategy(provider_config.authentication)
         provider_auth = auth_strategy.get_auth()
 
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with aiohttp.ClientSession(timeout=metadata_request_timeout) as session:
             process_details = await fetch_json(
                 session=session,
                 url=f"{provider_config.server_url}processes/{self.process_id}",
@@ -378,7 +386,7 @@ class Process:
 
         # TODO: if a server decides to ignore the Prefer header, response contains results, not job status info
         # need to adress this case!
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with aiohttp.ClientSession(timeout=submission_request_timeout) as session:
             try:
                 response = await self._submit_remote_job(
                     session, str(provider.server_url),
@@ -600,7 +608,7 @@ class Process:
 
         headers.update(provider_auth.headers)
 
-        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with aiohttp.ClientSession(timeout=metadata_request_timeout) as session:
 
             while True:
                 status_info = await self._fetch_remote_job_status(
