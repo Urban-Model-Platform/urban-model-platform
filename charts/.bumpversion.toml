@@ -1,10 +1,10 @@
-[bumpversion]
+[tool.bumpversion]
 current_version = "0.7.0"
 commit = true
 tag = true
 tag_name = "chart-v{new_version}"
 
-[[bumpversion.files]]
+[[tool.bumpversion.files]]
 filename = "urban-model-platform/Chart.yaml"
 search = 'version: {current_version}'
 replace = 'version: {new_version}'
