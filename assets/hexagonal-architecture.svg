@@ -1,535 +1,1639 @@
-<svg width="1500" height="1180" viewBox="0 0 1500 1180" xmlns="http://www.w3.org/2000/svg"
-     font-family="Segoe UI, Helvetica, Arial, sans-serif">
-
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="1500"
+   height="1180"
+   viewBox="0 0 1500 1180"
+   font-family="Segoe UI, Helvetica, Arial, sans-serif"
+   version="1.1"
+   id="svg134"
+   sodipodi:docname="hexagonal-architecture.svg"
+   inkscape:version="1.4.3 (0d15f75, 2025-12-25)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview134"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="0.88389833"
+     inkscape:cx="346.19366"
+     inkscape:cy="503.45157"
+     inkscape:window-width="1587"
+     inkscape:window-height="1182"
+     inkscape:window-x="1701"
+     inkscape:window-y="151"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="layer9" />
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- DEFINITIONS                                              -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <defs>
-    <marker id="arr" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#546e7a"/></marker>
-    <marker id="arr-g" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#2e7d32"/></marker>
-    <marker id="arr-o" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#e65100"/></marker>
-    <marker id="arr-p" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#5e35b1"/></marker>
-    <marker id="arr-grey" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-      <polygon points="0 0,8 3,0 6" fill="#9e9e9e"/></marker>
-    <pattern id="core-bg" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse">
-      <rect width="20" height="20" fill="#e0f2f1"/>
-      <circle cx="10" cy="10" r="0.6" fill="#b2dfdb"/>
+  <defs
+     id="defs5">
+    <marker
+       id="arr"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0,8 3,0 6"
+         fill="#546e7a"
+         id="polygon1" />
+    </marker>
+    <marker
+       id="arr-g"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0,8 3,0 6"
+         fill="#2e7d32"
+         id="polygon2" />
+    </marker>
+    <marker
+       id="arr-o"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0,8 3,0 6"
+         fill="#e65100"
+         id="polygon3" />
+    </marker>
+    <marker
+       id="arr-p"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0,8 3,0 6"
+         fill="#5e35b1"
+         id="polygon4" />
+    </marker>
+    <marker
+       id="arr-grey"
+       markerWidth="8"
+       markerHeight="6"
+       refX="8"
+       refY="3"
+       orient="auto">
+      <polygon
+         points="0 0,8 3,0 6"
+         fill="#9e9e9e"
+         id="polygon5" />
+    </marker>
+    <pattern
+       id="core-bg"
+       x="0"
+       y="0"
+       width="20"
+       height="20"
+       patternUnits="userSpaceOnUse">
+      <rect
+         width="20"
+         height="20"
+         fill="#e0f2f1"
+         id="rect5" />
+      <circle
+         cx="10"
+         cy="10"
+         r="0.6"
+         fill="#b2dfdb"
+         id="circle5" />
     </pattern>
   </defs>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 1 · Title                                          -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-title">
-    <text x="750" y="35" font-size="25" font-weight="700" fill="#263238"
-          text-anchor="middle">Urban Model Platform — Hexagonal Architecture</text>
-    <text x="750" y="58" font-size="12.5" fill="#78909c" text-anchor="middle"
-          >Core depends only on ports (interfaces). Adapters implement ports and are injected via the composition root (main.py).</text>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 2 · Hexagonal Core                                 -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-core">
-    <!-- Hex shape  (walls x 335–1065, y 235–605) -->
-    <polygon points="700,75 1065,235 1065,605 700,765 335,605 335,235"
-             fill="url(#core-bg)" stroke="#00838f" stroke-width="3"/>
-
-    <!-- Core title (narrow hex top — keep text compact) -->
-    <text x="700" y="110" font-size="17" font-weight="700" fill="#00695c"
-          text-anchor="middle">Hexagonal Core</text>
-    <text x="700" y="127" font-size="10" fill="#00897b"
-          text-anchor="middle">src/ump/core/</text>
-    <text x="700" y="143" font-size="10" fill="#00897b"
-          text-anchor="middle">Pure business logic — no I/O, no frameworks</text>
-
-    <!-- ── Domain Models card ── -->
-    <g id="core-models">
-      <rect x="530" y="155" width="340" height="112" rx="10"
-            fill="#fff" fill-opacity="0.88" stroke="#00897b" stroke-width="1.4"/>
-      <text x="700" y="175" font-size="13" font-weight="700" fill="#004d40"
-            text-anchor="middle">Domain Models</text>
-      <text x="700" y="190" font-size="9.5" fill="#607d8b"
-            text-anchor="middle">core/models/</text>
-
-      <text x="548" y="210" font-size="11" fill="#263238" font-weight="600">Job</text>
-      <text x="583" y="210" font-size="10" fill="#546e7a"
-            >— UUID, status, statusInfo snapshots, remote tracking</text>
-
-      <text x="548" y="228" font-size="11" fill="#263238" font-weight="600">Process / ProcessSummary</text>
-      <text x="548" y="242" font-size="10" fill="#546e7a"
-            >— OGC API Processes descriptions &amp; pagination</text>
-
-      <text x="548" y="260" font-size="11" fill="#263238" font-weight="600">ExecuteRequest</text>
-      <text x="670" y="260" font-size="10" fill="#546e7a"
-            >— normalized inputs, outputs, response mode</text>
-    </g>
-
-    <!-- ── Managers &amp; Services card ── -->
-    <g id="core-managers">
-      <rect x="390" y="282" width="620" height="155" rx="10"
-            fill="#fff" fill-opacity="0.88" stroke="#00897b" stroke-width="1.4"/>
-      <text x="700" y="303" font-size="13" font-weight="700" fill="#004d40"
-            text-anchor="middle">Managers &amp; Services (Business Logic)</text>
-      <text x="700" y="317" font-size="9.5" fill="#607d8b"
-            text-anchor="middle">core/managers/</text>
-
-      <text x="408" y="338" font-size="11" fill="#263238" font-weight="600">ProcessManager</text>
-      <text x="408" y="353" font-size="10" fill="#546e7a"
-            >Fetch, cache &amp; transform remote processes via handler pipeline</text>
-      <text x="408" y="366" font-size="9.5" fill="#90a4ae"
-            >(enforce ID → fill defaults → sanitize metadata → rewrite links)</text>
-
-      <text x="408" y="386" font-size="11" fill="#263238" font-weight="600">JobManager</text>
-      <text x="408" y="400" font-size="10" fill="#546e7a"
-            >Create local jobs, forward execution, derive status, schedule polling, notify observers</text>
-
-      <text x="408" y="420" font-size="11" fill="#263238" font-weight="600">StatusDerivationOrchestrator + Strategies</text>
-      <text x="408" y="433" font-size="10" fill="#546e7a"
-            >Direct → ImmediateResults → LocationFollowup → FallbackFailed</text>
-    </g>
-
-    <!-- ── Ports (Interfaces) card ── -->
-    <g id="core-ports">
-      <rect x="390" y="453" width="620" height="140" rx="10"
-            fill="#fff" fill-opacity="0.88" stroke="#00838f" stroke-width="1.4"
-            stroke-dasharray="6,3"/>
-      <text x="700" y="474" font-size="13" font-weight="700" fill="#006064"
-            text-anchor="middle">Ports (Interfaces)</text>
-      <text x="700" y="489" font-size="9.5" fill="#607d8b"
-            text-anchor="middle">core/interfaces/ — abstract contracts the core depends on</text>
-
-      <!-- Two-column port list -->
-      <g font-size="10.5" fill="#004d40">
-        <!-- Left column -->
-        <circle cx="415" cy="508" r="3.5" fill="#4db6ac"/>
-        <text x="424" y="512" font-weight="600">ProvidersPort</text>
-
-        <circle cx="415" cy="526" r="3.5" fill="#4db6ac"/>
-        <text x="424" y="530" font-weight="600">HttpClientPort</text>
-
-        <circle cx="415" cy="544" r="3.5" fill="#4db6ac"/>
-        <text x="424" y="548" font-weight="600">JobRepositoryPort</text>
-
-        <circle cx="415" cy="562" r="3.5" fill="#4db6ac"/>
-        <text x="424" y="566" font-weight="600">ProcessIdValidatorPort</text>
-
-        <circle cx="415" cy="580" r="3.5" fill="#4db6ac"/>
-        <text x="424" y="584" font-weight="600">RetryPort</text>
-
-        <!-- Right column -->
-        <circle cx="690" cy="508" r="3.5" fill="#4db6ac"/>
-        <text x="699" y="512" font-weight="600">ProcessesPort</text>
-
-        <circle cx="690" cy="526" r="3.5" fill="#4db6ac"/>
-        <text x="699" y="530" font-weight="600">SiteInfoPort</text>
-
-        <circle cx="690" cy="544" r="3.5" fill="#4db6ac"/>
-        <text x="699" y="548" font-weight="600">StatusDerivationStrategy</text>
-
-        <circle cx="690" cy="562" r="3.5" fill="#4db6ac"/>
-        <text x="699" y="566" font-weight="600">JobStateObserver</text>
-
-        <circle cx="690" cy="580" r="3.5" fill="#4db6ac"/>
-        <text x="699" y="584" font-weight="600">LoggingPort</text>
-      </g>
-    </g>
-
-    <!-- Supporting pieces (inside hex, below ports card) -->
-    <text x="700" y="610" font-size="9.5" fill="#78909c" text-anchor="middle"
-          >+ ProcessCache · LinkRewriter · OGCProcessException · UmpSettings · JobManagerConfig</text>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 3 · Driving Adapter (left)                         -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-driving-adapter">
-    <!-- Client -->
-    <g id="external-client">
-      <rect x="55" y="170" width="170" height="38" rx="8"
-            fill="#f1f8e9" stroke="#689f38" stroke-width="1.5"/>
-      <text x="140" y="194" font-size="12" font-weight="600" fill="#33691e"
-            text-anchor="middle">Client / Browser</text>
-    </g>
-
-    <!-- FastAPI adapter panel -->
-    <g id="fastapi-adapter">
-      <rect x="20" y="240" width="280" height="290" rx="12"
-            fill="#e8f5e9" stroke="#2e7d32" stroke-width="2"/>
-      <text x="160" y="264" font-size="15" font-weight="700" fill="#1b5e20"
-            text-anchor="middle">Driving Adapter</text>
-      <text x="160" y="279" font-size="10" fill="#4caf50"
-            text-anchor="middle">(inbound — calls into core)</text>
-
-      <!-- Inner FastAPI box -->
-      <rect x="38" y="292" width="244" height="44" rx="7"
-            fill="#c8e6c9" stroke="#388e3c" stroke-width="1.4"/>
-      <text x="160" y="311" font-size="12.5" font-weight="600" fill="#1b5e20"
-            text-anchor="middle">FastAPI Web Adapter</text>
-      <text x="160" y="326" font-size="9.5" fill="#33691e"
-            text-anchor="middle">adapters/web/fastapi.py</text>
-
-      <!-- Feature list -->
-      <g font-size="10" fill="#37474f">
-        <text x="42" y="356">• Routes: /processes, /jobs, /execution</text>
-        <text x="42" y="372">• Versioned sub-apps (/v1.0/, /v1.1/…)</text>
-        <text x="42" y="388">• Landing page (Jinja2 HTML + JSON)</text>
-        <text x="42" y="404">• Correlation ID middleware</text>
-        <text x="42" y="420">• OpenAPI docs per API version</text>
-        <text x="42" y="436">• Templates &amp; static assets</text>
-        <text x="42" y="452">• Receives factories from main.py</text>
-      </g>
-    </g>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 4 · Driven Adapters — Existing (right)             -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-driven-existing">
-    <rect x="1100" y="125" width="375" height="375" rx="12"
-          fill="#fff3e0" stroke="#e65100" stroke-width="2"/>
-    <text x="1287" y="150" font-size="15" font-weight="700" fill="#bf360c"
-          text-anchor="middle">Driven Adapters (outbound)</text>
-    <text x="1287" y="166" font-size="10" fill="#e65100"
-          text-anchor="middle">Implement ports — injected into core · adapters/</text>
-
-    <g font-size="10">
-      <!-- 1: AioHttp -->
-      <rect x="1118" y="180" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="197" font-size="11.5" font-weight="600" fill="#e65100"
-            >AioHttpClientAdapter</text>
-      <text x="1132" y="211" fill="#795548"
-            >→ HttpClientPort · async GET/POST, error mapping</text>
-
-      <!-- 2: ProviderConfig -->
-      <rect x="1118" y="223" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="240" font-size="11.5" font-weight="600" fill="#e65100"
-            >ProviderConfigFileAdapter</text>
-      <text x="1132" y="254" fill="#795548"
-            >→ ProvidersPort · YAML config, file watcher</text>
-
-      <!-- 3: InMemoryRepo -->
-      <rect x="1118" y="266" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="283" font-size="11.5" font-weight="600" fill="#e65100"
-            >InMemoryJobRepository</text>
-      <text x="1132" y="297" fill="#795548"
-            >→ JobRepositoryPort · dict store, JSON dump</text>
-
-      <!-- 4: ColonProcessId -->
-      <rect x="1118" y="309" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="326" font-size="11.5" font-weight="600" fill="#e65100"
-            >ColonProcessId</text>
-      <text x="1132" y="340" fill="#795548"
-            >→ ProcessIdValidatorPort · provider:id regex</text>
-
-      <!-- 5: Logging -->
-      <rect x="1118" y="352" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="369" font-size="11.5" font-weight="600" fill="#e65100"
-            >LoggingAdapter</text>
-      <text x="1132" y="383" fill="#795548"
-            >→ LoggingPort · Python stdlib + correlation ID</text>
-
-      <!-- 6: Tenacity -->
-      <rect x="1118" y="395" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="412" font-size="11.5" font-weight="600" fill="#e65100"
-            >TenacityRetryAdapter</text>
-      <text x="1132" y="426" fill="#795548"
-            >→ RetryPort · exponential backoff</text>
-
-      <!-- 7: StaticSiteInfo -->
-      <rect x="1118" y="438" width="340" height="37" rx="6"
-            fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.2"/>
-      <text x="1132" y="455" font-size="11.5" font-weight="600" fill="#e65100"
-            >StaticSiteInfoAdapter</text>
-      <text x="1132" y="469" fill="#795548"
-            >→ SiteInfoPort · landing page metadata</text>
-    </g>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 5 · Driven Adapters — Planned (right, below)       -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-driven-planned">
-    <rect x="1100" y="520" width="375" height="224" rx="12"
-          fill="#fafafa" stroke="#9e9e9e" stroke-width="2" stroke-dasharray="8,4"/>
-    <text x="1287" y="544" font-size="15" font-weight="700" fill="#616161"
-          text-anchor="middle">Planned Adapters</text>
-    <text x="1287" y="559" font-size="10" fill="#9e9e9e"
-          text-anchor="middle">Not yet implemented — will fulfill existing or new ports</text>
-
-    <g font-size="10">
-      <!-- 1: SQLModel -->
-      <rect x="1118" y="572" width="340" height="35" rx="6"
-            fill="#f5f5f5" stroke="#bdbdbd" stroke-width="1.2" stroke-dasharray="4,2"/>
-      <text x="1132" y="588" font-size="11.5" font-weight="600" fill="#757575"
-            >SQLModel JobRepository</text>
-      <text x="1132" y="601" fill="#9e9e9e"
-            >→ JobRepositoryPort · PostgreSQL + Alembic</text>
-
-      <!-- 2: GeoServer -->
-      <rect x="1118" y="614" width="340" height="35" rx="6"
-            fill="#f5f5f5" stroke="#bdbdbd" stroke-width="1.2" stroke-dasharray="4,2"/>
-      <text x="1132" y="630" font-size="11.5" font-weight="600" fill="#757575"
-            >GeoServer Result Storage</text>
-      <text x="1132" y="643" fill="#9e9e9e"
-            >→ ResultStoragePort (new) · WFS/WMS publish</text>
-
-      <!-- 3: ldproxy -->
-      <rect x="1118" y="656" width="340" height="35" rx="6"
-            fill="#f5f5f5" stroke="#bdbdbd" stroke-width="1.2" stroke-dasharray="4,2"/>
-      <text x="1132" y="672" font-size="11.5" font-weight="600" fill="#757575"
-            >ldproxy Result Storage</text>
-      <text x="1132" y="685" fill="#9e9e9e"
-            >→ ResultStoragePort (new) · OGC API Features</text>
-
-      <!-- 4: Keycloak -->
-      <rect x="1118" y="698" width="340" height="35" rx="6"
-            fill="#f5f5f5" stroke="#bdbdbd" stroke-width="1.2" stroke-dasharray="4,2"/>
-      <text x="1132" y="714" font-size="11.5" font-weight="600" fill="#757575"
-            >Keycloak Auth Adapter</text>
-      <text x="1132" y="727" fill="#9e9e9e"
-            >→ AuthorizationPort (new) · JWT, realm roles</text>
-    </g>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 6 · External Systems                               -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-external-systems">
-    <rect x="1100" y="762" width="375" height="50" rx="10"
-          fill="#eceff1" stroke="#90a4ae" stroke-width="1.2"/>
-    <text x="1287" y="779" font-size="11" font-weight="700" fill="#455a64"
-          text-anchor="middle">External Systems</text>
-
-    <g font-size="9.5" text-anchor="middle">
-      <rect x="1110" y="786" width="112" height="19" rx="4"
-            fill="#e3f2fd" stroke="#1976d2" stroke-width="0.8"/>
-      <text x="1166" y="799" fill="#0d47a1" font-weight="600">OGC API Providers</text>
-
-      <rect x="1232" y="786" width="90" height="19" rx="4"
-            fill="#fff8e1" stroke="#fbc02d" stroke-width="0.8"/>
-      <text x="1277" y="799" fill="#f57f17" font-weight="600">GeoServer</text>
-
-      <rect x="1332" y="786" width="133" height="19" rx="4"
-            fill="#f3e5f5" stroke="#ab47bc" stroke-width="0.8"/>
-      <text x="1398" y="799" fill="#6a1b9a" font-weight="600">Keycloak / PostgreSQL</text>
-    </g>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 7 · Composition Root                               -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-composition-root">
-    <rect x="170" y="790" width="880" height="100" rx="12"
-          fill="#ede7f6" stroke="#5e35b1" stroke-width="2"/>
-    <text x="610" y="816" font-size="15" font-weight="700" fill="#311b92"
-          text-anchor="middle">Composition Root — main.py</text>
-    <text x="610" y="833" font-size="10" fill="#5e35b1"
-          text-anchor="middle">Outermost layer: wires all adapters, creates factories, starts Uvicorn</text>
-
-    <g font-size="10" fill="#37474f">
-      <text x="195" y="855"
-            >1. Instantiate adapters (ProviderConfig, AioHttp, ColonProcessId, InMemoryRepo, SiteInfo, Logging)</text>
-      <text x="195" y="870"
-            >2. Build factories: process_manager_factory, job_manager_factory → passed to create_app()</text>
-      <text x="195" y="885"
-            >3. FastAPI lifespan wires managers, attaches observers (StatusHistory, Polling, ResultsVerification)</text>
-    </g>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 8 · Connections                                    -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-connections">
-    <!-- Client → Driving adapter -->
-    <line x1="140" y1="208" x2="140" y2="238"
-          stroke="#689f38" stroke-width="1.8" marker-end="url(#arr-g)"/>
-    <text x="150" y="228" font-size="8.5" fill="#689f38">HTTP</text>
-
-    <!-- Driving adapter → Core hex (left wall at x=335) -->
-    <line x1="300" y1="400" x2="333" y2="400"
-          stroke="#2e7d32" stroke-width="2.2" marker-end="url(#arr-g)"/>
-    <text x="316" y="393" font-size="8.5" fill="#2e7d32" text-anchor="middle">calls</text>
-
-    <!-- Core hex → Driven adapters existing (right wall at x=1065) -->
-    <line x1="1067" y1="390" x2="1098" y2="390"
-          stroke="#e65100" stroke-width="2.2" marker-end="url(#arr-o)"/>
-    <text x="1082" y="383" font-size="8.5" fill="#e65100" text-anchor="middle">uses</text>
-
-    <!-- Core hex → Planned adapters (dashed, angled) -->
-    <line x1="1067" y1="550" x2="1098" y2="620"
-          stroke="#9e9e9e" stroke-width="1.5" stroke-dasharray="6,3"
-          marker-end="url(#arr-grey)"/>
-    <text x="1098" y="578" font-size="8" fill="#9e9e9e">future</text>
-
-    <!-- Driven → External systems -->
-    <line x1="1287" y1="500" x2="1287" y2="518"
-          stroke="#90a4ae" stroke-width="1" stroke-dasharray="3,3"/>
-    <line x1="1287" y1="744" x2="1287" y2="760"
-          stroke="#90a4ae" stroke-width="1.2" marker-end="url(#arr)"/>
-
-    <!-- Composition root → Core hex (up to hex bottom vertex) -->
-    <line x1="610" y1="790" x2="660" y2="767"
-          stroke="#5e35b1" stroke-width="1.8" marker-end="url(#arr-p)"/>
-    <text x="650" y="785" font-size="8.5" fill="#5e35b1">injects</text>
-
-    <!-- Composition root → Driving adapter (left curve, avoids hex) -->
-    <path d="M 195,830 C 90,830 60,600 130,532"
-          fill="none" stroke="#5e35b1" stroke-width="1.4" stroke-dasharray="5,3"
-          marker-end="url(#arr-p)"/>
-    <text x="65" y="700" font-size="8" fill="#5e35b1">passes</text>
-    <text x="55" y="712" font-size="8" fill="#5e35b1">factories</text>
-
-    <!-- Composition root → Driven adapters (right curve) -->
-    <path d="M 1050,840 C 1140,840 1095,530 1098,503"
-          fill="none" stroke="#5e35b1" stroke-width="1.4" stroke-dasharray="5,3"
-          marker-end="url(#arr-p)"/>
-    <text x="1104" y="690" font-size="8" fill="#5e35b1">creates</text>
-  </g>
-
   <!-- ════════════════════════════════════════════════════════ -->
   <!-- LAYER 9 · Legend                                         -->
   <!-- ════════════════════════════════════════════════════════ -->
-  <g id="layer-legend">
-
-    <!-- ── Design Patterns ── -->
-    <g id="legend-patterns">
-      <rect x="25" y="930" width="410" height="230" rx="10"
-            fill="#fafafa" stroke="#cfd8dc" stroke-width="1.4"/>
-      <text x="230" y="955" font-size="14" font-weight="700" fill="#37474f"
-            text-anchor="middle">Design Patterns in Use</text>
-
-      <g font-size="10.5">
-        <text x="45" y="978" fill="#263238" font-weight="600">Ports &amp; Adapters</text>
-        <text x="45" y="993" fill="#546e7a" font-size="10"
-              >Core depends on abstract ports; adapters are swappable</text>
-
-        <text x="45" y="1014" fill="#263238" font-weight="600">Strategy Pattern</text>
-        <text x="45" y="1029" fill="#546e7a" font-size="10"
-              >StatusDerivation strategies evaluated in priority order</text>
-
-        <text x="45" y="1050" fill="#263238" font-weight="600">Observer Pattern</text>
-        <text x="45" y="1065" fill="#546e7a" font-size="10"
-              >JobStateObservers decouple polling, history, verification</text>
-
-        <text x="45" y="1086" fill="#263238" font-weight="600">Handler Pipeline</text>
-        <text x="45" y="1101" fill="#546e7a" font-size="10"
-              >ProcessManager: ID → defaults → sanitize → rewrite</text>
-
-        <text x="45" y="1122" fill="#263238" font-weight="600">Dependency Injection</text>
-        <text x="45" y="1137" fill="#546e7a" font-size="10"
-              >Constructor injection; factories from composition root</text>
-
-        <text x="45" y="1152" fill="#263238" font-weight="600">Async Context Manager</text>
-        <text x="215" y="1152" fill="#546e7a" font-size="10"
-              >— HttpClientPort lifecycle</text>
+  <g
+     inkscape:groupmode="layer"
+     id="layer1"
+     inkscape:label="legend">
+    <g
+       id="layer-legend"
+       inkscape:label="layer-legend">
+      <!-- ── Design Patterns ── -->
+      <g
+         id="legend-patterns">
+        <rect
+           x="25"
+           y="930"
+           width="410"
+           height="230"
+           rx="10"
+           fill="#fafafa"
+           stroke="#cfd8dc"
+           stroke-width="1.4"
+           id="rect95" />
+        <text
+           x="230"
+           y="955"
+           font-size="14"
+           font-weight="700"
+           fill="#37474f"
+           text-anchor="middle"
+           id="text96">Design Patterns in Use</text>
+        <g
+           font-size="10.5"
+           id="g108">
+          <text
+             x="45"
+             y="978"
+             fill="#263238"
+             font-weight="600"
+             id="text97">Ports &amp; Adapters</text>
+          <text
+             x="45"
+             y="993"
+             fill="#546e7a"
+             font-size="10"
+             id="text98">Core depends on abstract ports; adapters are swappable</text>
+          <text
+             x="45"
+             y="1014"
+             fill="#263238"
+             font-weight="600"
+             id="text99">Strategy Pattern</text>
+          <text
+             x="45"
+             y="1029"
+             fill="#546e7a"
+             font-size="10"
+             id="text100">StatusDerivation strategies evaluated in priority order</text>
+          <text
+             x="45"
+             y="1050"
+             fill="#263238"
+             font-weight="600"
+             id="text101">Observer Pattern</text>
+          <text
+             x="45"
+             y="1065"
+             fill="#546e7a"
+             font-size="10"
+             id="text102">JobStateObservers decouple polling, history, verification</text>
+          <text
+             x="45"
+             y="1086"
+             fill="#263238"
+             font-weight="600"
+             id="text103">Handler Pipeline</text>
+          <text
+             x="45"
+             y="1101"
+             fill="#546e7a"
+             font-size="10"
+             id="text104">ProcessManager: ID → defaults → sanitize → rewrite</text>
+          <text
+             x="45"
+             y="1122"
+             fill="#263238"
+             font-weight="600"
+             id="text105">Dependency Injection</text>
+          <text
+             x="45"
+             y="1137"
+             fill="#546e7a"
+             font-size="10"
+             id="text106">Constructor injection; factories from composition root</text>
+          <text
+             x="45"
+             y="1152"
+             fill="#263238"
+             font-weight="600"
+             id="text107">Async Context Manager</text>
+          <text
+             x="215"
+             y="1152"
+             fill="#546e7a"
+             font-size="10"
+             id="text108">— HttpClientPort lifecycle</text>
+        </g>
+      </g>
+      <!-- ── Color Legend ── -->
+      <g
+         id="legend-colors">
+        <rect
+           x="460"
+           y="930"
+           width="505"
+           height="230"
+           rx="10"
+           fill="#fafafa"
+           stroke="#cfd8dc"
+           stroke-width="1.4"
+           id="rect108" />
+        <text
+           x="712"
+           y="955"
+           font-size="14"
+           font-weight="700"
+           fill="#37474f"
+           text-anchor="middle"
+           id="text109">Color Legend</text>
+        <g
+           font-size="10.5"
+           id="g121">
+          <rect
+             x="480"
+             y="968"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#e0f2f1"
+             stroke="#00838f"
+             stroke-width="1.3"
+             id="rect109" />
+          <text
+             x="503"
+             y="979"
+             fill="#263238"
+             font-weight="600"
+             id="text110">Core</text>
+          <text
+             x="533"
+             y="979"
+             fill="#546e7a"
+             font-size="10"
+             id="text111">— Business rules, domain models, ports. No I/O.</text>
+          <rect
+             x="480"
+             y="992"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#e8f5e9"
+             stroke="#2e7d32"
+             stroke-width="1.3"
+             id="rect111" />
+          <text
+             x="503"
+             y="1003"
+             fill="#263238"
+             font-weight="600"
+             id="text112">Driving adapter</text>
+          <text
+             x="600"
+             y="1003"
+             fill="#546e7a"
+             font-size="10"
+             id="text113">— Receives external requests, calls into core.</text>
+          <rect
+             x="480"
+             y="1016"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#ffe0b2"
+             stroke="#ef6c00"
+             stroke-width="1.3"
+             id="rect113" />
+          <text
+             x="503"
+             y="1027"
+             fill="#263238"
+             font-weight="600"
+             id="text114">Driven adapter</text>
+          <text
+             x="600"
+             y="1027"
+             fill="#546e7a"
+             font-size="10"
+             id="text115">— Implements a port; core calls it for infra.</text>
+          <rect
+             x="480"
+             y="1040"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#f5f5f5"
+             stroke="#bdbdbd"
+             stroke-width="1.3"
+             stroke-dasharray="3,1.5"
+             id="rect115" />
+          <text
+             x="503"
+             y="1051"
+             fill="#263238"
+             font-weight="600"
+             id="text116">Planned adapter</text>
+          <text
+             x="608"
+             y="1051"
+             fill="#546e7a"
+             font-size="10"
+             id="text117">— Not yet implemented.</text>
+          <rect
+             x="480"
+             y="1064"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#ede7f6"
+             stroke="#5e35b1"
+             stroke-width="1.3"
+             id="rect117" />
+          <text
+             x="503"
+             y="1075"
+             fill="#263238"
+             font-weight="600"
+             id="text118">Composition root</text>
+          <text
+             x="618"
+             y="1075"
+             fill="#546e7a"
+             font-size="10"
+             id="text119">— Creates adapters, injects them.</text>
+          <rect
+             x="480"
+             y="1088"
+             width="16"
+             height="13"
+             rx="3"
+             fill="#eceff1"
+             stroke="#90a4ae"
+             stroke-width="1.3"
+             id="rect119" />
+          <text
+             x="503"
+             y="1099"
+             fill="#263238"
+             font-weight="600"
+             id="text120">External system</text>
+          <text
+             x="610"
+             y="1099"
+             fill="#546e7a"
+             font-size="10"
+             id="text121">— Infrastructure outside the application.</text>
+        </g>
+        <!-- Arrow direction key -->
+        <g
+           transform="translate(480,1118)"
+           font-size="10"
+           id="g123">
+          <line
+             x1="0"
+             y1="8"
+             x2="30"
+             y2="8"
+             stroke="#2e7d32"
+             stroke-width="1.8"
+             marker-end="url(#arr-g)"
+             id="line121" />
+          <text
+             x="38"
+             y="12"
+             fill="#546e7a"
+             id="text122">Driving (inbound call)</text>
+          <line
+             x1="0"
+             y1="28"
+             x2="30"
+             y2="28"
+             stroke="#e65100"
+             stroke-width="1.8"
+             marker-end="url(#arr-o)"
+             id="line122" />
+          <text
+             x="38"
+             y="32"
+             fill="#546e7a"
+             id="text123">Driven (outbound dependency)</text>
+        </g>
+      </g>
+      <!-- ── Decision Rule ── -->
+      <g
+         id="legend-decision-rule">
+        <rect
+           x="990"
+           y="930"
+           width="485"
+           height="230"
+           rx="10"
+           fill="#fafafa"
+           stroke="#cfd8dc"
+           stroke-width="1.4"
+           id="rect123" />
+        <text
+           x="1232"
+           y="955"
+           font-size="14"
+           font-weight="700"
+           fill="#37474f"
+           text-anchor="middle"
+           id="text124">What makes something an adapter?</text>
+        <g
+           font-size="10.5"
+           id="g134">
+          <text
+             x="1012"
+             y="980"
+             fill="#546e7a"
+             id="text125">A piece of code is an adapter (not core) if it:</text>
+          <text
+             x="1020"
+             y="1004"
+             fill="#37474f"
+             id="text126">• Imports a framework or library</text>
+          <text
+             x="1030"
+             y="1019"
+             fill="#90a4ae"
+             font-size="9.5"
+             id="text127">(aiohttp, FastAPI, SQLModel, tenacity, Jinja2 …)</text>
+          <text
+             x="1020"
+             y="1042"
+             fill="#37474f"
+             id="text128">• Performs I/O of any kind</text>
+          <text
+             x="1030"
+             y="1057"
+             fill="#90a4ae"
+             font-size="9.5"
+             id="text129">(network, file system, database, stdout)</text>
+          <text
+             x="1020"
+             y="1080"
+             fill="#37474f"
+             id="text130">• Translates between infrastructure formats</text>
+          <text
+             x="1030"
+             y="1095"
+             fill="#90a4ae"
+             font-size="9.5"
+             id="text131">and domain models</text>
+          <text
+             x="1020"
+             y="1118"
+             fill="#37474f"
+             id="text132">• Could be swapped for an alternative without</text>
+          <text
+             x="1030"
+             y="1133"
+             fill="#90a4ae"
+             font-size="9.5"
+             id="text133">changing business logic</text>
+          <rect
+             x="1010"
+             y="1144"
+             width="448"
+             height="2"
+             rx="1"
+             fill="#e0e0e0"
+             id="rect133" />
+          <text
+             x="1232"
+             y="1158"
+             font-size="11"
+             font-weight="700"
+             fill="#004d40"
+             text-anchor="middle"
+             id="text134">If none of the above apply → it belongs in core.</text>
+        </g>
       </g>
     </g>
-
-    <!-- ── Color Legend ── -->
-    <g id="legend-colors">
-      <rect x="460" y="930" width="505" height="230" rx="10"
-            fill="#fafafa" stroke="#cfd8dc" stroke-width="1.4"/>
-      <text x="712" y="955" font-size="14" font-weight="700" fill="#37474f"
-            text-anchor="middle">Color Legend</text>
-
-      <g font-size="10.5">
-        <rect x="480" y="968" width="16" height="13" rx="3"
-              fill="#e0f2f1" stroke="#00838f" stroke-width="1.3"/>
-        <text x="503" y="979" fill="#263238" font-weight="600">Core</text>
-        <text x="533" y="979" fill="#546e7a" font-size="10"
-              >— Business rules, domain models, ports. No I/O.</text>
-
-        <rect x="480" y="992" width="16" height="13" rx="3"
-              fill="#e8f5e9" stroke="#2e7d32" stroke-width="1.3"/>
-        <text x="503" y="1003" fill="#263238" font-weight="600">Driving adapter</text>
-        <text x="600" y="1003" fill="#546e7a" font-size="10"
-              >— Receives external requests, calls into core.</text>
-
-        <rect x="480" y="1016" width="16" height="13" rx="3"
-              fill="#ffe0b2" stroke="#ef6c00" stroke-width="1.3"/>
-        <text x="503" y="1027" fill="#263238" font-weight="600">Driven adapter</text>
-        <text x="600" y="1027" fill="#546e7a" font-size="10"
-              >— Implements a port; core calls it for infra.</text>
-
-        <rect x="480" y="1040" width="16" height="13" rx="3"
-              fill="#f5f5f5" stroke="#bdbdbd" stroke-width="1.3" stroke-dasharray="3,1.5"/>
-        <text x="503" y="1051" fill="#263238" font-weight="600">Planned adapter</text>
-        <text x="608" y="1051" fill="#546e7a" font-size="10"
-              >— Not yet implemented.</text>
-
-        <rect x="480" y="1064" width="16" height="13" rx="3"
-              fill="#ede7f6" stroke="#5e35b1" stroke-width="1.3"/>
-        <text x="503" y="1075" fill="#263238" font-weight="600">Composition root</text>
-        <text x="618" y="1075" fill="#546e7a" font-size="10"
-              >— Creates adapters, injects them.</text>
-
-        <rect x="480" y="1088" width="16" height="13" rx="3"
-              fill="#eceff1" stroke="#90a4ae" stroke-width="1.3"/>
-        <text x="503" y="1099" fill="#263238" font-weight="600">External system</text>
-        <text x="610" y="1099" fill="#546e7a" font-size="10"
-              >— Infrastructure outside the application.</text>
-      </g>
-
-      <!-- Arrow direction key -->
-      <g transform="translate(480,1118)" font-size="10">
-        <line x1="0" y1="8" x2="30" y2="8"
-              stroke="#2e7d32" stroke-width="1.8" marker-end="url(#arr-g)"/>
-        <text x="38" y="12" fill="#546e7a">Driving (inbound call)</text>
-
-        <line x1="0" y1="28" x2="30" y2="28"
-              stroke="#e65100" stroke-width="1.8" marker-end="url(#arr-o)"/>
-        <text x="38" y="32" fill="#546e7a">Driven (outbound dependency)</text>
-      </g>
-    </g>
-
-    <!-- ── Decision Rule ── -->
-    <g id="legend-decision-rule">
-      <rect x="990" y="930" width="485" height="230" rx="10"
-            fill="#fafafa" stroke="#cfd8dc" stroke-width="1.4"/>
-      <text x="1232" y="955" font-size="14" font-weight="700" fill="#37474f"
-            text-anchor="middle">What makes something an adapter?</text>
-
-      <g font-size="10.5">
-        <text x="1012" y="980" fill="#546e7a"
-              >A piece of code is an adapter (not core) if it:</text>
-
-        <text x="1020" y="1004" fill="#37474f"
-              >• Imports a framework or library</text>
-        <text x="1030" y="1019" fill="#90a4ae" font-size="9.5"
-              >(aiohttp, FastAPI, SQLModel, tenacity, Jinja2 …)</text>
-
-        <text x="1020" y="1042" fill="#37474f"
-              >• Performs I/O of any kind</text>
-        <text x="1030" y="1057" fill="#90a4ae" font-size="9.5"
-              >(network, file system, database, stdout)</text>
-
-        <text x="1020" y="1080" fill="#37474f"
-              >• Translates between infrastructure formats</text>
-        <text x="1030" y="1095" fill="#90a4ae" font-size="9.5"
-              >and domain models</text>
-
-        <text x="1020" y="1118" fill="#37474f"
-              >• Could be swapped for an alternative without</text>
-        <text x="1030" y="1133" fill="#90a4ae" font-size="9.5"
-              >changing business logic</text>
-
-        <rect x="1010" y="1144" width="448" height="2" rx="1" fill="#e0e0e0"/>
-        <text x="1232" y="1158" font-size="11" font-weight="700" fill="#004d40"
-              text-anchor="middle">If none of the above apply → it belongs in core.</text>
-      </g>
-    </g>
-
   </g>
-
+  <g
+     inkscape:groupmode="layer"
+     id="layer3"
+     inkscape:label="composition-root">
+    <g
+       id="layer-composition-root">
+      <rect
+         x="325.90536"
+         y="789.90802"
+         width="724.18665"
+         height="100.18401"
+         rx="9.8752718"
+         fill="#ede7f6"
+         stroke="#5e35b1"
+         stroke-width="1.81599"
+         id="rect81" />
+      <text
+         x="687.70569"
+         y="816"
+         font-size="15px"
+         font-weight="700"
+         fill="#311b92"
+         text-anchor="middle"
+         id="text82">Composition Root — main.py</text>
+      <text
+         x="688.11829"
+         y="833"
+         font-size="10px"
+         fill="#5e35b1"
+         text-anchor="middle"
+         id="text83">Outermost layer: wires all adapters, creates factories, starts Uvicorn</text>
+      <g
+         font-size="10"
+         fill="#37474f"
+         id="g86">
+        <text
+           x="345"
+           y="851"
+           id="text84">1. Instantiate adapters (ProviderConfig, AioHttp, ColonProcessId, InMemoryRepo, SiteInfo, Logging)</text>
+        <text
+           x="345"
+           y="866"
+           id="text85">2. Build factories: process_manager_factory, job_manager_factory → passed to create_app()</text>
+        <text
+           x="345"
+           y="881"
+           id="text86">3. FastAPI lifespan wires managers, attaches observers (StatusHistory, Polling, ResultsVerification)</text>
+      </g>
+    </g>
+    <g
+       id="g1"
+       inkscape:label="g1">
+      <path
+         d="M 325.90536,840.00003 C 293.02119,873.21127 129.61565,709.26907 130,532"
+         fill="none"
+         stroke="#5e35b1"
+         stroke-width="1.4"
+         stroke-dasharray="5, 3"
+         marker-end="url(#arr-p)"
+         id="path92"
+         sodipodi:nodetypes="cc"
+         inkscape:label="c: root-&gt;driving-adapters" />
+      <text
+         x="201"
+         y="698"
+         font-size="8px"
+         fill="#5e35b1"
+         id="text93"
+         inkscape:label="passes">passes</text>
+      <text
+         x="191"
+         y="710"
+         font-size="8px"
+         fill="#5e35b1"
+         id="text94"
+         inkscape:label="factories">factories</text>
+    </g>
+    <g
+       id="g3">
+      <path
+         d="m 1050,840 c 82.4484,1.89579 109.9348,-33.42964 109.999,-57.80389"
+         fill="none"
+         stroke="#5e35b1"
+         stroke-width="1.4"
+         stroke-dasharray="5, 3"
+         marker-end="url(#arr-p)"
+         id="path94"
+         sodipodi:nodetypes="cc"
+         inkscape:label="c: root-driven-adapters" />
+      <text
+         x="1098"
+         y="824"
+         font-size="8px"
+         fill="#5e35b1"
+         id="text95"
+         inkscape:label="creates">creates</text>
+    </g>
+    <g
+       id="g2">
+      <line
+         x1="1067"
+         y1="390"
+         x2="1098"
+         y2="390"
+         stroke="#e65100"
+         stroke-width="2.2"
+         marker-end="url(#arr-o)"
+         id="line88"
+         inkscape:label="c: hexagon-&gt;driven-adapters" />
+      <text
+         x="1082"
+         y="383"
+         font-size="8.5"
+         fill="#e65100"
+         text-anchor="middle"
+         id="text89"
+         inkscape:label="uses">uses</text>
+    </g>
+    <g
+       id="g4">
+      <line
+         x1="300"
+         y1="400"
+         x2="333"
+         y2="400"
+         stroke="#2e7d32"
+         stroke-width="2.2"
+         marker-end="url(#arr-g)"
+         id="line87"
+         inkscape:label="c: driving-adapters-&gt;hexagon" />
+      <text
+         x="316"
+         y="393"
+         font-size="8.5"
+         fill="#2e7d32"
+         text-anchor="middle"
+         id="text88"
+         inkscape:label="calls">calls</text>
+    </g>
+    <g
+       id="g5">
+      <path
+         id="line92"
+         style="stroke:#5e35b1;stroke-width:1.8;marker-end:url(#arr-p)"
+         d="M 499.20186,789.90802 524.306,687.98345"
+         sodipodi:nodetypes="cc"
+         inkscape:label="c: root-&gt;hexagon" />
+      <text
+         x="519.50781"
+         y="749.40057"
+         font-size="8.5px"
+         fill="#5e35b1"
+         id="text92"
+         inkscape:label="injects">injects</text>
+    </g>
+    <g
+       id="g6">
+      <line
+         x1="140"
+         y1="208"
+         x2="140"
+         y2="238"
+         stroke="#689f38"
+         stroke-width="1.8"
+         marker-end="url(#arr-g)"
+         id="line86"
+         inkscape:label="c: client-&gt;driving-adapter" />
+      <text
+         x="150"
+         y="228"
+         font-size="8.5px"
+         fill="#689f38"
+         id="text87"
+         inkscape:label="calls via http">calls via http</text>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer4"
+     inkscape:label="external-systems">
+    <g
+       id="layer-external-systems"
+       transform="rotate(89.729064,1568.4527,683.37415)">
+      <rect
+         x="1005.5286"
+         y="758.94568"
+         width="618.55896"
+         height="64.270897"
+         rx="16.494907"
+         fill="#eceff1"
+         stroke="#90a4ae"
+         stroke-width="1.74734"
+         id="rect77"
+         transform="matrix(0.99999667,0.00257923,0.00567387,0.9999839,0,0)" />
+      <text
+         x="1287"
+         y="779"
+         font-size="11px"
+         font-weight="700"
+         fill="#455a64"
+         text-anchor="middle"
+         id="text78">External Systems</text>
+      <g
+         font-size="9.5px"
+         text-anchor="middle"
+         id="g81">
+        <rect
+           x="1028.0007"
+           y="785.61212"
+           width="112"
+           height="19"
+           rx="4"
+           fill="#e3f2fd"
+           stroke="#1976d2"
+           stroke-width="0.8"
+           id="rect78" />
+        <text
+           x="1084.0007"
+           y="798.61212"
+           fill="#0d47a1"
+           font-weight="600"
+           id="text79">Processes Servers</text>
+        <rect
+           x="1150.0007"
+           y="785.61212"
+           width="90"
+           height="19"
+           rx="4"
+           fill="#fff8e1"
+           stroke="#fbc02d"
+           stroke-width="0.8"
+           id="rect79" />
+        <text
+           x="1195.0007"
+           y="798.61212"
+           fill="#f57f17"
+           font-weight="600"
+           id="text80">GeoServer</text>
+        <rect
+           x="1250.0007"
+           y="785.61212"
+           width="133"
+           height="19"
+           rx="4"
+           fill="#f3e5f5"
+           stroke="#ab47bc"
+           stroke-width="0.8"
+           id="rect80" />
+        <text
+           x="1316.0007"
+           y="798.61212"
+           fill="#6a1b9a"
+           font-weight="600"
+           id="text81">Databases (Job Storage)</text>
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer6"
+     inkscape:label="adapter-driven">
+    <g
+       id="layer-driven-existing">
+      <rect
+         x="1100.1992"
+         y="125.19919"
+         width="307.80276"
+         height="656.99689"
+         rx="9.8496876"
+         fill="#fff3e0"
+         stroke="#e65100"
+         stroke-width="2.39838"
+         id="rect51" />
+      <text
+         x="1261"
+         y="150"
+         font-size="15px"
+         font-weight="700"
+         fill="#bf360c"
+         text-anchor="middle"
+         id="text52">Driven Adapters (outbound)</text>
+      <text
+         x="1261"
+         y="166"
+         font-size="10px"
+         fill="#e65100"
+         text-anchor="middle"
+         id="text53">Implement ports — injected into core · adapters/</text>
+      <g
+         font-size="10"
+         id="g67">
+        <!-- 1: AioHttp -->
+        <rect
+           x="1114.7096"
+           y="179.93433"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect53" />
+        <text
+           x="1132"
+           y="197"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text54">AioHttpClientAdapter</text>
+        <text
+           x="1132"
+           y="211"
+           fill="#795548"
+           id="text55">→ HttpClientPort · async GET/POST, error mapping</text>
+        <!-- 2: ProviderConfig -->
+        <rect
+           x="1114.7096"
+           y="222.95564"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect55" />
+        <text
+           x="1132"
+           y="240"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text56">ProviderConfigFileAdapter</text>
+        <text
+           x="1132"
+           y="254"
+           fill="#795548"
+           id="text57">→ ProvidersPort · YAML config, file watcher</text>
+        <!-- 3: InMemoryRepo -->
+        <rect
+           x="1114.7096"
+           y="265.97696"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect57" />
+        <text
+           x="1132"
+           y="283"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text58">InMemoryJobRepository</text>
+        <text
+           x="1132"
+           y="297"
+           fill="#795548"
+           id="text59">→ JobRepositoryPort · dict store, JSON dump</text>
+        <!-- 4: ColonProcessId -->
+        <rect
+           x="1114.7096"
+           y="308.99826"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect59" />
+        <text
+           x="1132"
+           y="326"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text60">ColonProcessId</text>
+        <text
+           x="1132"
+           y="340"
+           fill="#795548"
+           id="text61">→ ProcessIdValidatorPort · provider:id regex</text>
+        <!-- 5: Logging -->
+        <rect
+           x="1114.7096"
+           y="352.01959"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect61" />
+        <text
+           x="1132"
+           y="369"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text62">LoggingAdapter</text>
+        <text
+           x="1132"
+           y="383"
+           fill="#795548"
+           id="text63">→ LoggingPort · Python stdlib + correlation ID</text>
+        <!-- 6: Tenacity -->
+        <rect
+           x="1114.7096"
+           y="395.04089"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect63" />
+        <text
+           x="1132"
+           y="412"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text64">TenacityRetryAdapter</text>
+        <text
+           x="1132"
+           y="426"
+           fill="#795548"
+           id="text65">→ RetryPort · exponential backoff</text>
+        <!-- 7: StaticSiteInfo -->
+        <rect
+           x="1114.7096"
+           y="438.06219"
+           width="279.60419"
+           height="37.018337"
+           rx="4.9341917"
+           fill="#ffe0b2"
+           stroke="#ef6c00"
+           stroke-width="1.08848"
+           id="rect65" />
+        <text
+           x="1132"
+           y="455"
+           font-size="11.5"
+           font-weight="600"
+           fill="#e65100"
+           id="text66">StaticSiteInfoAdapter</text>
+        <text
+           x="1132"
+           y="469"
+           fill="#795548"
+           id="text67">→ SiteInfoPort · landing page metadata</text>
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer5"
+     inkscape:label="adapter-driven-planned">
+    <g
+       id="layer-driven-planned">
+      <rect
+         x="1099.9061"
+         y="519.90594"
+         width="307.58887"
+         height="262.29016"
+         rx="9.842844"
+         fill="#fafafa"
+         stroke="#9e9e9e"
+         stroke-width="1.96005"
+         stroke-dasharray="8, 4"
+         id="rect67"
+         style="fill:#fafafa;fill-opacity:0.12072434" />
+      <text
+         x="1245"
+         y="544"
+         font-size="15px"
+         font-weight="700"
+         fill="#616161"
+         text-anchor="middle"
+         id="text68">Planned Adapters</text>
+      <text
+         x="1245"
+         y="559"
+         font-size="10px"
+         fill="#9e9e9e"
+         text-anchor="middle"
+         id="text69">Not yet implemented — will fulfill existing or new ports</text>
+      <g
+         font-size="10"
+         id="g77">
+        <!-- 1: SQLModel -->
+        <rect
+           x="1114.6704"
+           y="571.94965"
+           width="278.88058"
+           height="35.029388"
+           rx="4.921422"
+           fill="#f5f5f5"
+           stroke="#bdbdbd"
+           stroke-width="1.08726"
+           stroke-dasharray="4, 2"
+           id="rect69"
+           style="fill:#ffe0b2;fill-opacity:0.70221329;stroke:#ef6c00;stroke-opacity:0.76861167" />
+        <text
+           x="1132"
+           y="588"
+           font-size="11.5"
+           font-weight="600"
+           fill="#757575"
+           id="text70">SQLModel JobRepository</text>
+        <text
+           x="1132"
+           y="601"
+           fill="#9e9e9e"
+           id="text71">→ JobRepositoryPort · PostgreSQL + Alembic</text>
+        <!-- 2: GeoServer -->
+        <rect
+           x="1114.6704"
+           y="613.98486"
+           width="278.88058"
+           height="35.029388"
+           rx="4.921422"
+           fill="#f5f5f5"
+           stroke="#bdbdbd"
+           stroke-width="1.08726"
+           stroke-dasharray="4, 2"
+           id="rect71"
+           style="fill:#ffe0b2;fill-opacity:0.70221329;stroke:#ef6c00;stroke-opacity:0.76861167" />
+        <text
+           x="1132"
+           y="630"
+           font-size="11.5"
+           font-weight="600"
+           fill="#757575"
+           id="text72">GeoServer Result Storage</text>
+        <text
+           x="1132"
+           y="643"
+           fill="#9e9e9e"
+           id="text73">→ ResultStoragePort (new) · WFS/WMS publish</text>
+        <!-- 3: ldproxy -->
+        <rect
+           x="1114.6704"
+           y="656.02014"
+           width="278.88058"
+           height="35.029388"
+           rx="4.921422"
+           fill="#f5f5f5"
+           stroke="#bdbdbd"
+           stroke-width="1.08726"
+           stroke-dasharray="4, 2"
+           id="rect73"
+           style="fill:#ffe0b2;fill-opacity:0.70221329;stroke:#ef6c00;stroke-opacity:0.76861167" />
+        <text
+           x="1132"
+           y="672"
+           font-size="11.5"
+           font-weight="600"
+           fill="#757575"
+           id="text74">ldproxy Result Storage</text>
+        <text
+           x="1132"
+           y="685"
+           fill="#9e9e9e"
+           id="text75">→ ResultStoragePort (new) · OGC API Features</text>
+        <!-- 4: Keycloak -->
+        <rect
+           x="1114.6704"
+           y="698.05542"
+           width="278.88058"
+           height="35.029388"
+           rx="4.921422"
+           fill="#f5f5f5"
+           stroke="#bdbdbd"
+           stroke-width="1.08726"
+           stroke-dasharray="4, 2"
+           id="rect75"
+           style="fill:#ffe0b2;fill-opacity:0.70221329;stroke:#ef6c00;stroke-opacity:0.76861167" />
+        <text
+           x="1132"
+           y="714"
+           font-size="11.5"
+           font-weight="600"
+           fill="#757575"
+           id="text76">Keycloak Auth Adapter</text>
+        <text
+           x="1132"
+           y="727"
+           fill="#9e9e9e"
+           id="text77">→ AuthorizationPort (new) · JWT, realm roles</text>
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer7"
+     inkscape:label="adapter-driving">
+    <g
+       id="layer-driving-adapter">
+      <!-- Client -->
+      <g
+         id="external-client">
+        <rect
+           x="55"
+           y="170"
+           width="170"
+           height="38"
+           rx="8"
+           fill="#f1f8e9"
+           stroke="#689f38"
+           stroke-width="1.5"
+           id="rect39" />
+        <text
+           x="140"
+           y="194"
+           font-size="12"
+           font-weight="600"
+           fill="#33691e"
+           text-anchor="middle"
+           id="text40">Client / Browser</text>
+      </g>
+      <!-- FastAPI adapter panel -->
+      <g
+         id="fastapi-adapter">
+        <rect
+           x="20"
+           y="240"
+           width="280"
+           height="290"
+           rx="12"
+           fill="#e8f5e9"
+           stroke="#2e7d32"
+           stroke-width="2"
+           id="rect40" />
+        <text
+           x="160"
+           y="264"
+           font-size="15"
+           font-weight="700"
+           fill="#1b5e20"
+           text-anchor="middle"
+           id="text41">Driving Adapter</text>
+        <text
+           x="160"
+           y="279"
+           font-size="10"
+           fill="#4caf50"
+           text-anchor="middle"
+           id="text42">(inbound — calls into core)</text>
+        <!-- Inner FastAPI box -->
+        <rect
+           x="38"
+           y="292"
+           width="244"
+           height="44"
+           rx="7"
+           fill="#c8e6c9"
+           stroke="#388e3c"
+           stroke-width="1.4"
+           id="rect42" />
+        <text
+           x="160"
+           y="311"
+           font-size="12.5"
+           font-weight="600"
+           fill="#1b5e20"
+           text-anchor="middle"
+           id="text43">FastAPI Web Adapter</text>
+        <text
+           x="160"
+           y="326"
+           font-size="9.5"
+           fill="#33691e"
+           text-anchor="middle"
+           id="text44">adapters/web/fastapi.py</text>
+        <!-- Feature list -->
+        <g
+           font-size="10"
+           fill="#37474f"
+           id="g51">
+          <text
+             x="42"
+             y="356"
+             id="text45">• Routes: /processes, /jobs, /execution</text>
+          <text
+             x="42"
+             y="372"
+             id="text46">• Versioned sub-apps (/v1.0/, /v1.1/…)</text>
+          <text
+             x="42"
+             y="388"
+             id="text47">• Landing page (Jinja2 HTML + JSON)</text>
+          <text
+             x="42"
+             y="404"
+             id="text48">• Correlation ID middleware</text>
+          <text
+             x="42"
+             y="420"
+             id="text49">• OpenAPI docs per API version</text>
+          <text
+             x="42"
+             y="436"
+             id="text50">• Templates &amp; static assets</text>
+          <text
+             x="42"
+             y="452"
+             id="text51">• Receives factories from main.py</text>
+        </g>
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer8"
+     inkscape:label="core">
+    <g
+       id="layer-core">
+      <!-- Hex shape  (walls x 335–1065, y 235–605) -->
+      <polygon
+         points="700,75 1065,235 1065,605 700,765 335,605 335,235"
+         fill="url(#core-bg)"
+         stroke="#00838f"
+         stroke-width="3"
+         id="polygon6" />
+      <!-- Core title (narrow hex top — keep text compact) -->
+      <text
+         x="700"
+         y="138"
+         font-size="17px"
+         font-weight="700"
+         fill="#00695c"
+         text-anchor="middle"
+         id="text7">Hexagonal Core</text>
+      <text
+         x="700"
+         y="155"
+         font-size="10px"
+         fill="#00897b"
+         text-anchor="middle"
+         id="text8">src/ump/core/</text>
+      <text
+         x="700"
+         y="171"
+         font-size="10px"
+         fill="#00897b"
+         text-anchor="middle"
+         id="text9">(Pure business logic — no I/O, no frameworks,no technicalconcerns)</text>
+      <!-- ── Domain Models card ── -->
+      <g
+         id="core-models"
+         transform="translate(0,30)">
+        <rect
+           x="530"
+           y="155"
+           width="340"
+           height="112"
+           rx="10"
+           fill="#ffffff"
+           fill-opacity="0.88"
+           stroke="#00897b"
+           stroke-width="1.4"
+           id="rect9" />
+        <text
+           x="700"
+           y="175"
+           font-size="13px"
+           font-weight="700"
+           fill="#004d40"
+           text-anchor="middle"
+           id="text10">Domain Models</text>
+        <text
+           x="700"
+           y="190"
+           font-size="9.5px"
+           fill="#607d8b"
+           text-anchor="middle"
+           id="text11">core/models/</text>
+        <text
+           x="548"
+           y="210"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text12">Job</text>
+        <text
+           x="583"
+           y="210"
+           font-size="10px"
+           fill="#546e7a"
+           id="text13">UUID, status, statusInfo snapshots, remote tracking</text>
+        <text
+           x="548"
+           y="228"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text14">Process / ProcessSummary</text>
+        <text
+           x="548"
+           y="242"
+           font-size="10px"
+           fill="#546e7a"
+           id="text15">OGC API Processes descriptions &amp; pagination</text>
+        <text
+           x="548"
+           y="260"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text16">ExecuteRequest</text>
+        <text
+           x="670"
+           y="260"
+           font-size="10px"
+           fill="#546e7a"
+           id="text17">normalized inputs, outputs, response mode</text>
+      </g>
+      <!-- ── Managers &amp; Services card ── -->
+      <g
+         id="core-managers"
+         transform="translate(0,30)">
+        <rect
+           x="390"
+           y="282"
+           width="620"
+           height="155"
+           rx="10"
+           fill="#ffffff"
+           fill-opacity="0.88"
+           stroke="#00897b"
+           stroke-width="1.4"
+           id="rect17" />
+        <text
+           x="700"
+           y="303"
+           font-size="13px"
+           font-weight="700"
+           fill="#004d40"
+           text-anchor="middle"
+           id="text18">Managers &amp; Services (Business Logic)</text>
+        <text
+           x="700"
+           y="317"
+           font-size="9.5px"
+           fill="#607d8b"
+           text-anchor="middle"
+           id="text19">core/managers/</text>
+        <text
+           x="408"
+           y="338"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text20">ProcessManager</text>
+        <text
+           x="408"
+           y="353"
+           font-size="10px"
+           fill="#546e7a"
+           id="text21">Fetch, cache &amp; transform remote processes via handler pipeline</text>
+        <text
+           x="408"
+           y="366"
+           font-size="9.5px"
+           fill="#90a4ae"
+           id="text22">(enforce ID → fill defaults → sanitize metadata → rewrite links)</text>
+        <text
+           x="408"
+           y="386"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text23">JobManager</text>
+        <text
+           x="408"
+           y="400"
+           font-size="10px"
+           fill="#546e7a"
+           id="text24">Create local jobs, forward execution, derive status, schedule polling, notify observers</text>
+        <text
+           x="408"
+           y="420"
+           font-size="11px"
+           fill="#263238"
+           font-weight="600"
+           id="text25">StatusDerivationOrchestrator + Strategies</text>
+        <text
+           x="408"
+           y="433"
+           font-size="10px"
+           fill="#546e7a"
+           id="text26">Direct → ImmediateResults → LocationFollowup → FallbackFailed</text>
+      </g>
+      <!-- ── Ports (Interfaces) card ── -->
+      <g
+         id="core-ports"
+         transform="translate(0,30)">
+        <rect
+           x="390"
+           y="453"
+           width="620"
+           height="140"
+           rx="10"
+           fill="#ffffff"
+           fill-opacity="0.88"
+           stroke="#00838f"
+           stroke-width="1.4"
+           stroke-dasharray="6, 3"
+           id="rect26" />
+        <text
+           x="700"
+           y="474"
+           font-size="13px"
+           font-weight="700"
+           fill="#006064"
+           text-anchor="middle"
+           id="text27">Ports (Interfaces)</text>
+        <text
+           x="700"
+           y="489"
+           font-size="9.5px"
+           fill="#607d8b"
+           text-anchor="middle"
+           id="text28">core/interfaces/ — abstract contracts the core depends on</text>
+        <!-- Two-column port list -->
+        <g
+           font-size="10.5px"
+           fill="#004d40"
+           id="g38">
+          <!-- Left column -->
+          <circle
+             cx="415"
+             cy="508"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle28" />
+          <text
+             x="424"
+             y="512"
+             font-weight="600"
+             id="text29">ProvidersPort</text>
+          <circle
+             cx="415"
+             cy="526"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle29" />
+          <text
+             x="424"
+             y="530"
+             font-weight="600"
+             id="text30">HttpClientPort</text>
+          <circle
+             cx="415"
+             cy="544"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle30" />
+          <text
+             x="424"
+             y="548"
+             font-weight="600"
+             id="text31">JobRepositoryPort</text>
+          <circle
+             cx="415"
+             cy="562"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle31" />
+          <text
+             x="424"
+             y="566"
+             font-weight="600"
+             id="text32">ProcessIdValidatorPort</text>
+          <circle
+             cx="415"
+             cy="580"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle32" />
+          <text
+             x="424"
+             y="584"
+             font-weight="600"
+             id="text33">RetryPort</text>
+          <!-- Right column -->
+          <circle
+             cx="690"
+             cy="508"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle33" />
+          <text
+             x="699"
+             y="512"
+             font-weight="600"
+             id="text34">ProcessesPort</text>
+          <circle
+             cx="690"
+             cy="526"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle34" />
+          <text
+             x="699"
+             y="530"
+             font-weight="600"
+             id="text35">SiteInfoPort</text>
+          <circle
+             cx="690"
+             cy="544"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle35" />
+          <text
+             x="699"
+             y="548"
+             font-weight="600"
+             id="text36">StatusDerivationStrategy</text>
+          <circle
+             cx="690"
+             cy="562"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle36" />
+          <text
+             x="699"
+             y="566"
+             font-weight="600"
+             id="text37">JobStateObserver</text>
+          <circle
+             cx="690"
+             cy="580"
+             r="3.5"
+             fill="#4db6ac"
+             id="circle37" />
+          <text
+             x="699"
+             y="584"
+             font-weight="600"
+             id="text38">LoggingPort</text>
+        </g>
+      </g>
+      <!-- Supporting pieces (inside hex, below ports card) -->
+      <g
+         id="g135"
+         inkscape:label="utilities"
+         transform="translate(0,30)">
+        <rect
+           x="510.34631"
+           y="605.75092"
+           width="406.10648"
+           height="27.703032"
+           rx="6.5501041"
+           fill="#ffffff"
+           fill-opacity="0.88"
+           stroke="#00838f"
+           stroke-width="0.504024"
+           stroke-dasharray="6, 3"
+           id="rect135" />
+        <text
+           x="713.23499"
+           y="621.74377"
+           font-size="9.5px"
+           fill="#78909c"
+           text-anchor="middle"
+           id="text39">+ ProcessCache · LinkRewriter · OGCProcessException · UmpSettings · JobManagerConfig</text>
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer9"
+     inkscape:label="title">
+    <g
+       id="layer-title">
+      <text
+         x="750"
+         y="35"
+         font-size="25"
+         font-weight="700"
+         fill="#263238"
+         text-anchor="middle"
+         id="text5">Urban Model Platform — Hexagonal Architecture</text>
+      <text
+         x="750"
+         y="58"
+         font-size="12.5"
+         fill="#78909c"
+         text-anchor="middle"
+         id="text6">Core depends only on ports (interfaces). Adapters implement ports and are injected via the composition root (main.py).</text>
+    </g>
+    <rect
+       style="fill:#fafafa;fill-opacity:0.120724;stroke:#ef6c00;stroke-width:0.3;stroke-linejoin:bevel;stroke-miterlimit:3.1;stroke-opacity:0.768612;paint-order:stroke fill markers"
+       id="rect6"
+       width="1500"
+       height="1180"
+       x="0"
+       y="0"
+       sodipodi:insensitive="true" />
+  </g>
 </svg>
