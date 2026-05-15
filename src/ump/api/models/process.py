@@ -493,6 +493,7 @@ class Process:
                 )
             ) from e
         except aiohttp.ServerDisconnectedError as e:
+            logger.error("Client error during job submission: %s", e)
             raise OGCProcessException(
                 OGCExceptionResponse(
                     type="about:blank",
@@ -506,6 +507,7 @@ class Process:
                 )
             ) from e
         except aiohttp.ClientError as e:
+            logger.error("Client error during job submission: %s", e)
             raise OGCProcessException(
                 OGCExceptionResponse(
                     type="about:blank",
