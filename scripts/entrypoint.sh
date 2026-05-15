@@ -13,4 +13,8 @@ echo "Running database migrations..."
 echo "Running API Server in production mode."
 UMP_API_SERVER_WORKERS="${UMP_API_SERVER_WORKERS:-1}"
 echo "Running gunicorn with ${UMP_API_SERVER_WORKERS} workers."
-exec /app/.venv/bin/gunicorn --workers=$UMP_API_SERVER_WORKERS --bind=0.0.0.0:5000 ump.main:app
+exec /app/.venv/bin/gunicorn \
+    --workers=$UMP_API_SERVER_WORKERS \
+    --timeout=$UMP_SERVER_TIMEOUT \
+    --bind=0.0.0.0:5000 \
+    ump.main:app
