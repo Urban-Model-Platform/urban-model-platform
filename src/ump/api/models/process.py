@@ -32,7 +32,8 @@ submission_request_timeout = aiohttp.ClientTimeout(
     total=None,
     connect=10,
     sock_connect=10,
-    sock_read=60,
+    sock_read=120,
+    sock_write=120,
 )
 
 
