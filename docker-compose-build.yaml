@@ -5,4 +5,5 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        SOURCE_COMMIT:
+        SOURCE_COMMIT: ${SOURCE_COMMIT}
+        IMAGE_TAG: ${IMAGE_TAG}
