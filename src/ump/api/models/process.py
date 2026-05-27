@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import re
@@ -8,14 +10,14 @@ from multiprocessing import dummy
 import aiohttp
 from flask import g
 
-from ump.api import remote_auth
 import ump.api.providers as providers
+from ump.api import remote_auth
 from ump.api.db_handler import engine
 from ump.api.models.job import Job, JobStatus
 from ump.api.models.ogc_exception import OGCExceptionResponse
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
 from ump.config import app_settings as config
-from ump.errors import InvalidUsage, OGCProcessException
+from ump.errors import OGCProcessException
 from ump.utils import fetch_json, fetch_response_content
 
 logger = logging.getLogger(__name__)
@@ -58,7 +60,7 @@ class Process:
         self.links = None
 
         match = re.search(r"([^:]+):(.*)", self.process_id_with_prefix)
-        
+
         if not match:
             logger.warning(
                 "Process ID '%s' does not match pattern 'provider:process_id'. "
@@ -137,7 +139,7 @@ class Process:
 
             # check if token was provided by the user
             auth = getattr(g, "auth_token", None)
-            
+
             if not auth:
                 logger.warning(
                     "User is not allowed to access process %s. "
@@ -149,32 +151,28 @@ class Process:
                         type="about:blank",
                         title="Unauthorized.",
                         status=401,
-                        detail=(
-                            "The request lacks necessary authentication details."
-                        ),
+                        detail=("The request lacks necessary authentication details."),
                         instance=f"/processes/{self.process_id_with_prefix}",
                     )
                 )
-            
+
             role_name = f"{self.provider_prefix}_{self.process_id}"
 
             realm_roles = auth.get("realm_access", {}).get("roles", []) if auth else []
 
             client_roles = (
                 (
-                    auth.get(
-                        "resource_access", {}
-                        ).get(
-                            config.UMP_KEYCLOAK_CLIENT_ID, {}
-                        ).get(
-                            "roles", [])
-                        )
+                    auth.get("resource_access", {})
+                    .get(config.UMP_KEYCLOAK_CLIENT_ID, {})
+                    .get("roles", [])
+                )
                 if auth
                 else []
             )
 
             allowed = any(
-                r in realm_roles + client_roles for r in [self.provider_prefix, role_name]
+                r in realm_roles + client_roles
+                for r in [self.provider_prefix, role_name]
             )
 
             if not allowed:
@@ -211,7 +209,7 @@ class Process:
                 session=session,
                 url=f"{provider_config.server_url}processes/{self.process_id}",
                 auth=provider_auth.auth,
-                headers=provider_auth.headers
+                headers=provider_auth.headers,
             )
             for key in process_details:
                 setattr(self, key, process_details[key])
@@ -308,6 +306,17 @@ class Process:
 
         return False
 
+    @staticmethod
+    def compute_job_hash(parameters_json, process_version, user_id):
+        """
+        Compute the cache hash for a job in Python.
+        Must match the PostgreSQL formula:
+        encode(sha512(convert_to(params::json::text || version || user_id, 'UTF8')), 'base64')
+        """
+        raw = parameters_json + process_version + (user_id or "")
+        digest = hashlib.sha512(raw.encode("utf-8")).digest()
+        return base64.b64encode(digest).decode("ascii")
+
     def check_for_cache(self, parameters, user_id):
         """
         Checks if the job has already been executed. Returns the job id if it has, None otherwise.
@@ -319,26 +328,13 @@ class Process:
         if process_config.deterministic:
             return None
 
-        sql = """
-        select job_id from jobs where hash = encode(
-            sha512(
-                convert_to(
-                    %(parameters)s :: json :: text || %(process_version)s || %(user_id)s,
-                    'UTF8'
-                )
-            ),
-            'base64'
+        hash_value = self.compute_job_hash(
+            json.dumps(parameters), self.version, user_id
         )
-        """
+
+        sql = "select job_id from jobs where hash = %(hash)s"
         with engine.begin() as conn:
-            result = conn.exec_driver_sql(
-                sql,
-                {
-                    "parameters": json.dumps(parameters),
-                    "process_version": self.version,
-                    "user_id": user_id,
-                },
-            )
+            result = conn.exec_driver_sql(sql, {"hash": hash_value})
             for row in result:
                 return row.job_id
         return None
@@ -377,9 +373,9 @@ class Process:
             return Job(job_id, user)
 
         headers = {
-                "Content-type": "application/json",
-                "Accept": "application/json",
-                "Prefer": "respond-async",
+            "Content-type": "application/json",
+            "Accept": "application/json",
+            "Prefer": "respond-async",
         }
 
         auth_strategy = remote_auth.get_auth_strategy(provider.authentication)
@@ -391,10 +387,14 @@ class Process:
         async with aiohttp.ClientSession(timeout=submission_request_timeout) as session:
             try:
                 response = await self._submit_remote_job(
-                    session, str(provider.server_url),
-                    request_body, provider_auth,
+                    session,
+                    str(provider.server_url),
+                    request_body,
+                    provider_auth,
                     headers,
-                    max_submit_seconds=max(submission_post_timeout_seconds, provider.timeout),
+                    max_submit_seconds=max(
+                        submission_post_timeout_seconds, provider.timeout
+                    ),
                 )
 
                 response_content = await fetch_response_content(response)
@@ -410,13 +410,14 @@ class Process:
                 headers.pop("Prefer", None)
                 # this can probably be omitted here and deferred for _wait_for_status
                 remote_job_status_info = await self._fetch_remote_job_status(
-                    session, str(provider.server_url), remote_job_id, provider_auth,
-                    headers # remove prefer header
+                    session,
+                    str(provider.server_url),
+                    remote_job_id,
+                    provider_auth,
+                    headers,  # remove prefer header
                 )
 
-                self._update_job_from_status(
-                    job, remote_job_status_info
-                )
+                self._update_job_from_status(job, remote_job_status_info)
 
                 job.update()
 
@@ -555,7 +556,8 @@ class Process:
         return job
 
     async def _fetch_remote_job_status(
-        self, session: aiohttp.ClientSession,
+        self,
+        session: aiohttp.ClientSession,
         url: str,
         remote_job_id: str,
         auth: remote_auth.ProviderAuth,
@@ -615,9 +617,7 @@ class Process:
 
         try:
             await asyncio.wait_for(
-                self._poll_job_until_finished(
-                    job, provider_config
-                ),
+                self._poll_job_until_finished(job, provider_config),
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -644,8 +644,8 @@ class Process:
             await self._store_results_if_needed(job)
 
     async def _poll_job_until_finished(
-            self, job: Job, provider_config: ProviderConfig
-        ) -> dict:
+        self, job: Job, provider_config: ProviderConfig
+    ) -> dict:
 
         headers = {
             "Content-type": "application/json",
@@ -658,20 +658,19 @@ class Process:
         headers.update(provider_auth.headers)
 
         async with aiohttp.ClientSession(timeout=metadata_request_timeout) as session:
-
             while True:
                 status_info = await self._fetch_remote_job_status(
                     session,
                     str(provider_config.server_url),
                     job.remote_job_id,
                     provider_auth,
-                    headers
+                    headers,
                 )
                 self._update_job_from_status(job, status_info)
                 if self.is_finished(status_info):
                     break
                 await asyncio.sleep(config.UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL)
-        
+
         return status_info
 
     def _update_job_from_status(self, job: Job, status_info):

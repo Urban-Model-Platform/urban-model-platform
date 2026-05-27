@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import logging
 import re
@@ -7,17 +9,16 @@ from datetime import datetime, timezone
 import aiohttp
 import geopandas as gpd
 
-from ump.api import remote_auth
-from ump.api.models.ogc_exception import OGCExceptionResponse
 import ump.api.providers as providers
+from ump.api import remote_auth
 from ump.api.db_handler import DBHandler
 from ump.api.models.job_status import JobStatus
+from ump.api.models.ogc_exception import OGCExceptionResponse
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
 from ump.config import app_settings as config
 from ump.errors import InvalidUsage, OGCProcessException
 from ump.geoserver.geoserver import Geoserver
 from ump.utils import fetch_json, join_url_parts
-
 
 results_client_timeout = aiohttp.ClientTimeout(
     total=5,  # Set a reasonable timeout for the requests
@@ -25,6 +26,7 @@ results_client_timeout = aiohttp.ClientTimeout(
     sock_connect=2,  # Socket connection timeout
     sock_read=5,  # Socket read timeout
 )
+
 
 # TODO class violates Single Responsibility Principle (SRP), it mixes
 # business logic with data access logic and metadata handling
@@ -77,7 +79,7 @@ class Job:
         self.process_id = None
         self.provider_url = None
 
-        # TODO: this produces 404 if a job is beeing queried for which was 
+        # TODO: this produces 404 if a job is beeing queried for which was
         # stored with a user id, consider to distinguish between
         # 404, 401 and 403 here
         if job_id and not self._init_from_db(job_id, user):
@@ -92,9 +94,9 @@ class Job:
                             config.UMP_API_SERVER_URL,
                             f"{config.UMP_API_SERVER_URL_PREFIX}",
                             "jobs",
-                            job_id
+                            job_id,
                         ]
-                    )
+                    ),
                 )
             )
 
@@ -157,18 +159,21 @@ class Job:
                 %(process_title)s,
                 %(name)s,
                 %(process_version)s,
-                encode(
-                    sha512(
-                        convert_to(
-                            %(parameters)s :: json :: text || %(process_version)s || %(user_id)s,
-                            'UTF8'
-                        ) :: bytea
-                    ), 'base64'
-                )
+                %(hash)s
             )
         """
+        params = self._to_dict()
+        raw = (
+            (params.get("parameters") or "")
+            + (params.get("process_version") or "")
+            + (params.get("user_id") or "")
+        )
+        params["hash"] = base64.b64encode(
+            hashlib.sha512(raw.encode("utf-8")).digest()
+        ).decode("ascii")
+
         with DBHandler() as db:
-            db.run_query(query, query_params=self._to_dict())
+            db.run_query(query, query_params=params)
 
         logging.info(" --> Job %s for %s created.", self.job_id, self.process_id)
 
@@ -359,7 +364,7 @@ class Job:
                 config.UMP_API_SERVER_URL,
                 config.UMP_API_SERVER_URL_PREFIX,
                 "jobs",
-                f"{self.job_id}/results"
+                f"{self.job_id}/results",
             )
 
             job_dict["links"] = [
@@ -423,12 +428,11 @@ class Job:
         headers.update(provider_auth.headers)
 
         async with aiohttp.ClientSession(timeout=results_client_timeout) as session:
-
             results = await fetch_json(
                 session,
                 url=f"{self.provider_url}jobs/{self.remote_job_id}/results?f=json",
                 headers=headers,
-                auth=provider_auth.auth
+                auth=provider_auth.auth,
             )
 
             return results
@@ -476,12 +480,14 @@ class Job:
             JobStatus.failed.value: {
                 "type": "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/failed",
                 "title": "Job failed",
-                "detail": self.message or "The job failed and no results are available.",
+                "detail": self.message
+                or "The job failed and no results are available.",
             },
             JobStatus.dismissed.value: {
                 "type": "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/dismissed",
                 "title": "Job dismissed",
-                "detail": self.message or "The job was dismissed and no results are available.",
+                "detail": self.message
+                or "The job was dismissed and no results are available.",
             },
             JobStatus.running.value: {
                 "type": "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/result-not-ready",
