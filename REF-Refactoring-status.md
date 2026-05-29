@@ -461,4 +461,7 @@ python -m src.ump.main
 
 ---
 
-_Last updated: 2025-11-11_
+_Last updated: 2026-05-29
+
+# Ideas (not ordered, no exact location within the current implementation plan)
+- for easier testing and users to try out without additional infrastructure mocking an OGC API Processes server would be helpful instead of relying on a (PyGeoApi) modelserver
