@@ -95,7 +95,7 @@ Notes:
 
 This approach keeps the landing page at `/` (as required by the OGC draft) and makes breaking changes explicit by assigning them to a new version prefix.
 
-#### Feature II: /processes/{process_id} (implemented — current state)
+#### Feature II: /processes/{process_id} (implemented - current state)
 
 Status: implemented in code and wired into the web adapter. The following pieces have been completed:
 
@@ -130,7 +130,7 @@ Notes:
 
 #### Feature III: /execution endpoint, Jobs, polling, and local storage (Step 1 implemented)
 
-Current status (Step 1 COMPLETE — async execution forwarding with local job lifecycle):
+Current status (Step 1 COMPLETE - async execution forwarding with local job lifecycle):
 
 Implemented pieces (updated Nov 14 2025):
 1. `Job` model (`src/ump/core/models/job.py`) including: `id` (UUID), `process_id`, `provider_name`, `remote_job_id`, `remote_status_url`, timestamps, `status_code`, `status_info` snapshot history, and helpers like `is_in_terminal_state()` plus documented ID separation rationale (local vs remote vs public id).
@@ -270,7 +270,7 @@ Current focus has shifted with new capabilities; checklist re-aligned:
 - [ ] Optional: adaptive polling/backoff per provider.
 - [ ] Optional: auth rules (JWT) restricting job visibility.
 
-Minimal DDD guidance (commands, events, aggregates) — lightweight, incremental
+Minimal DDD guidance (commands, events, aggregates) - lightweight, incremental
 
 To make the Job lifecycle easier to test, evolve, and (later) migrate to CQRS/Event Sourcing, introduce a small, optional DDD scaffolding that remains lightweight for Step 1:
 
@@ -293,15 +293,15 @@ To make the Job lifecycle easier to test, evolve, and (later) migrate to CQRS/Ev
   - Minimal cost: dataclasses + a few helper methods; keep Phase 1 in-memory to avoid infra overhead.
 
 - Minimal files to add (small footprint):
-  - `src/ump/core/commands.py` — small dataclasses for the command shapes.
-  - `src/ump/core/events.py` — dataclasses for domain events.
-  - `src/ump/core/aggregates/job_aggregate.py` — `JobAggregate` with pure `handle_command` and `apply_event` methods.
+  - `src/ump/core/commands.py` - small dataclasses for the command shapes.
+  - `src/ump/core/events.py` - dataclasses for domain events.
+  - `src/ump/core/aggregates/job_aggregate.py` - `JobAggregate` with pure `handle_command` and `apply_event` methods.
   - update `src/ump/core/interfaces/job_repository.py` to include `append_event(event, expected_version: int | None = None)`.
-  - `src/ump/adapters/job_repository_inmemory.py` — implement `append_event` alongside CRUD methods.
+  - `src/ump/adapters/job_repository_inmemory.py` - implement `append_event` alongside CRUD methods.
 
 - Tests to add (TDD):
-  - `tests/unit/test_job_aggregate.py` — aggregate specs (command -> events -> state transitions).
-  - `tests/unit/test_job_manager_events.py` — JobManager integration with in-memory repo and fake HttpClient.
+  - `tests/unit/test_job_aggregate.py` - aggregate specs (command -> events -> state transitions).
+  - `tests/unit/test_job_manager_events.py` - JobManager integration with in-memory repo and fake HttpClient.
 
 Keep these optional: if you prefer to delay, we can add only the event-append signature on the port so tests can emit events later. Otherwise I can scaffold the lightweight DDD pieces now.
 Notes:
@@ -316,10 +316,10 @@ What is NOT implemented yet for Step 1 (short):
 
 Brief notes about tests already added (TDD):
 
-- Lightweight FastAPI integration tests: `tests/test_fastapi_execute_async.py` — TDD-style tests that cover the expected behaviors around async execute handling (forwarding valid statusInfo, following `Location`, handling missing statusInfo, provider errors/timeouts, always creating a local job, resolving relative Location headers). These tests currently express the desired behavior and will drive implementation.
-- Adapter tests: `tests/test_aiohttp_adapter.py` — unit-level tests for `AioHttpClientAdapter` (JSON parsing, non-JSON -> 502, timeouts -> 504, POST text fallback).
-- Full-stack E2E test: `tests/test_fastapi_execute_e2e.py` — uses the real `AioHttpClientAdapter` together with `aioresponses` to mock provider responses and verify the full call path from FastAPI -> ProcessManager -> Adapter -> provider.
-- ProcessManager unit tests: `tests/test_process_manager.py` — earlier unit tests using a fake HTTP client exist to exercise manager logic in isolation.
+- Lightweight FastAPI integration tests: `tests/test_fastapi_execute_async.py` - TDD-style tests that cover the expected behaviors around async execute handling (forwarding valid statusInfo, following `Location`, handling missing statusInfo, provider errors/timeouts, always creating a local job, resolving relative Location headers). These tests currently express the desired behavior and will drive implementation.
+- Adapter tests: `tests/test_aiohttp_adapter.py` - unit-level tests for `AioHttpClientAdapter` (JSON parsing, non-JSON -> 502, timeouts -> 504, POST text fallback).
+- Full-stack E2E test: `tests/test_fastapi_execute_e2e.py` - uses the real `AioHttpClientAdapter` together with `aioresponses` to mock provider responses and verify the full call path from FastAPI -> ProcessManager -> Adapter -> provider.
+- ProcessManager unit tests: `tests/test_process_manager.py` - earlier unit tests using a fake HTTP client exist to exercise manager logic in isolation.
 
 Recommended next actions (for the next coding assistant):
 
@@ -337,9 +337,9 @@ Recommended next actions (for the next coding assistant):
 
 Pointers for the assistant taking over the task:
 
-- FastAPI route: `src/ump/adapters/web/fastapi.py` — where `execute_process` is wired.
-- Core manager: `src/ump/core/managers/process_manager.py` — extend `execute_process` to implement job creation, Location-following and statusInfo population.
-- HTTP adapter: `src/ump/adapters/aiohttp_client_adapter.py` — the adapter contract (returns dict) that `ProcessManager` relies on.
+- FastAPI route: `src/ump/adapters/web/fastapi.py` - where `execute_process` is wired.
+- Core manager: `src/ump/core/managers/process_manager.py` - extend `execute_process` to implement job creation, Location-following and statusInfo population.
+- HTTP adapter: `src/ump/adapters/aiohttp_client_adapter.py` - the adapter contract (returns dict) that `ProcessManager` relies on.
 - Tests to run: `tests/test_fastapi_execute_async.py`, `tests/test_fastapi_execute_e2e.py`, `tests/test_aiohttp_adapter.py`, `tests/test_process_manager.py`.
 
 Quick prioritized checklist (for the next session):
@@ -464,4 +464,185 @@ python -m src.ump.main
 _Last updated: 2026-05-29
 
 # Ideas (not ordered, no exact location within the current implementation plan)
+
+## adding a mocked OGC API Processes remote server
 - for easier testing and users to try out without additional infrastructure mocking an OGC API Processes server would be helpful instead of relying on a (PyGeoApi) modelserver
+
+## UMP - execution proxy: add additional skills to remote Models
+
+### Kontext
+
+Data is transferred from modelserver to UMP to client. The Problem: Large geodata and missing filtering. OGC API Processes v1.0.0 does not allow for subsetting or filtering of large geodata. The Results object is always passed as a block. Models can generate very large
+geodata sets, which can cause bottlenecks.
+
+An external result store that only comes into play **after** the data has been received by the UMP solves the
+problem too late: for this to work, the data must already have flowed completely from `Model Server → UMP`.
+
+The solution lies in expanding the UMP into an **execution proxy** that can actively
+control the data flow-even before the data has completely passed through the UMP.
+
+
+### UMP as Execution Proxy
+
+The UMP acts as a broker for the entire execution lifecycle according to OGC API Processes:
+
+- `POST /processes/{id}/execution` - Receive and forward execution requests
+- `GET /jobs` / `GET /jobs/{id}` - Federated job registry across all model servers
+- `GET /jobs/{id}/results` - Intercept results and, if necessary, write them to an external store
+
+**Zentrale Fähigkeiten eines execution proxies:**
+
+- federated job registry
+- central auth management
+- process exclusion
+- deterministic caching
+- normalizing: UMP can add or deprive model servers of skills, e.g. add `transmissionMode: reference` capability
+
+This proposal adresses `result-storage` and `transmission-mode-policy`
+
+### Configuration: `transmission-mode-policy`
+
+For each process, the `providers.yaml` file explicitly configures how the UMP handles the
+`transmissionMode` parameter of the OGC standard. The parameter can take four possible values:
+---
+
+#### `pass-through`
+
+The UMP acts as a transparent proxy. The `transmissionMode` from the client request
+is forwarded to the model server unchanged. The UMP’s result store is not
+used - even if one is configured.
+
+The process description that the UMP communicates externally reflects exactly the native
+capabilities of the model server.
+
+**Suitable for:**
+- Model servers that natively support `ref` (the model server’s link is accessible to clients)
+- Model servers that only support `value` when no UMP-side store is desired
+- Scenarios in which the UMP should not interfere with the data path
+
+---
+
+#### `emulate-ref`
+
+The UMP adds the `transmissionMode: reference` capability to the process, even if the
+model server does not natively support it.
+
+**Behavior:**
+- The UMP authoritatively adds `transmissionMode: reference` to the externally visible
+  process description.
+- If the client requests `ref`: The UMP internally sends `value` to the model server,
+  receives the data (ideally as a stream), writes it to the configured
+  result store, and returns a link to the client.
+- If the client requests `value`: The UMP passes the data directly-the
+  result store is not used.
+
+**Prerequisite:** A result store (`result-storage`) must be configured.
+If the configuration is missing, `emulate-ref` results in a configuration error.
+
+**Suitable for:**
+- Model servers that only support `value`, but whose results are to be
+  persisted in the UMP store if the client requests it
+
+---
+
+#### `emulate-ref-only`
+
+Like `emulate-ref`, but `value` is completely blocked as the transmission mode for the client.
+The UMP authoritatively removes `value` from the process description.
+All results are routed through the result store without exception.
+
+**Behavior:**
+- The UMP advertises only `transmissionMode: ref`.
+- Every Execution Request is internally forwarded to the model server with `value`,
+  the result is written to the store, and a link is returned.
+- A client request with `value` is rejected by the UMP with an error
+  (the store is not optional).
+
+**Prerequisite:** A Result Store (`result-storage`) must be configured.
+
+**Suitable for:**
+- Scenarios in which all results are to be stored centrally in the UMP Store
+  (e.g., for auditing, caching, or access reasons)
+- Model servers whose native storage is temporarily unavailable or inaccessible to clients
+
+
+---
+
+#### `value-only`
+
+The UMP completely blocks `transmissionMode: ref`- even if the model server natively
+supports it. The process description is cleaned up accordingly.
+
+A client request with `ref` is rejected by the UMP with an error.
+The result store is not used.
+
+**Suitable for:**
+- Scenarios in which uniform `value` semantics must be enforced
+- Model servers whose native `ref` links are not accessible to all clients and
+  where no UMP store is to be operated
+
+
+### Configuration: `result-storage`
+
+`result-storage` defines the **storage destination** for results managed by the UMP. It is
+a parameter separate from `transmission-mode`:
+
+- `transmission-mode` → defines the **behavior policy**
+- `result-storage` → defines the **storage destination**
+
+| Wert | Bedeutung |
+|---|---|
+| `remote` | not necessary anymore, has no meaning |
+| `geoserver` | UMP saves Results within GeoServer-Instanz |
+| `ldproxy` | UMP saves Results within ldproxy-Instanz |
+
+`result-storage` is only relevant if `transmission-mode-policy: emulate-ref` or
+`emulate-ref-only` is configured and the client requests `transmission-mode: reference`. In all other cases, it is ignored.
+
+
+### Behaviour Overview
+
+| Model skills | `transmission-mode` | Client wants `ref` | Client wants `value` | Store active? |
+|---|---|---|---|---|
+| `ref` + `value` | `native` | Proxy through | Proxy through | No |
+| `value` only | `native` | Proxy through (model decides) | Proxy through | No |
+| `ref` only | `native` | Proxy through | Error from model | No |
+| `value` only | `emulate-ref` | UMP stores, provides link | Directly through | Yes (only for `ref`) |
+| `ref` + `value` | `emulate-ref` | UMP stores, provides link | Directly through | Yes (only for `ref`) |
+| `value` only | `emulate-ref-only` | UMP saves, provides link | Error from UMP | Always |
+| `ref` + `value` | `emulate-ref-only` | UMP saves, provides link | Error from UMP | Always |
+| `ref` + `value` | `value-only` | Error from UMP | Directly through | No |
+| `ref` only | `value-only` | UMP error | Model error | No |
+
+**Unsupported combination:** The model can only be `ref`; `result-storage` is configured.
+The UMP would have to follow the model's native link, download the data, and resave it.
+This combination is treated as a configuration error.
+
+
+### Validierungsregeln für die Konfiguration
+
+When starting the UMP (or reloading `providers.yaml`), the configuration should be validated
+as follows:
+
+- `emulate-ref` without `result-storage` → **Error**
+- `emulate-ref-only` without `result-storage` → **Error**
+- `native` with `result-storage` → **Warning** (Store is ignored)
+- `value-only` with `result-storage` → **Warning** (Store is ignored)
+- Model can only be configured with `ref` or `result-storage` → **Error** (not supported)
+
+
+### Impact on the Process Description
+
+The UMP is the **authoritative source** of the process description for all configured processes.
+It may modify the process description provided by the model server:
+
+| `transmission-mode` | Change to the process description |
+|---|---|
+| `native` | None - 1:1 forwarding |
+| `emulate-ref` | `transmissionMode: ref` is added if not present |
+| `emulate-ref-only` | `transmissionMode` is set to `[“ref”]` |
+| `value-only` | `transmissionMode` is set to `[“value”]` |
+
+This modification is intentional and must be transparent to UMP operators. Clients
+should act exclusively based on the Process Description and should not have to consult the
+model server’s Process description.
