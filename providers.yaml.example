@@ -15,9 +15,12 @@ modelserver:
       hello-world:
         result-storage: "remote"
         anonymous-access: true
+        transmission-mode-policy: "value-only"
       squareroot:
         result-storage: "remote"
         anonymous-access: false
+        transmission-mode-policy: "value-only"
       hello-geo-world:
         result-storage: "geoserver"
         anonymous-access: true
+        transmission-mode-policy: "emulate-ref-only"

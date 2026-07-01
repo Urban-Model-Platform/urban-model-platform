@@ -44,6 +44,7 @@ services:
       UMP_GEOSERVER_PASSWORD: ${UMP_GEOSERVER_PASSWORD:-geoserver}
       UMP_GEOSERVER_URL: http://geoserver:8080/geoserver
       # Using dedicated database for geoserver results in production
+      UMP_GEOSERVER_SERVICE_TYPE: wfs
       UMP_GEOSERVER_DB_PORT: 5432
       UMP_GEOSERVER_DB_NAME: ${UMP_GEOSERVER_DB_NAME:-geoserver_results}
       UMP_GEOSERVER_DB_USER: ${UMP_GEOSERVER_DB_USER:-geoserver}
@@ -89,7 +90,7 @@ services:
       - prod
 
   geoserver:
-    image: kartoza/geoserver:2.22.0
+    image: kartoza/geoserver:2.28.4
     restart: "unless-stopped"
     ports:
       - ${GEOSERVER_PORT_EXTERNAL:-8181}:8080
@@ -98,6 +99,7 @@ services:
     environment:
       GEOSERVER_ADMIN_USER: ${UMP_GEOSERVER_USER}
       GEOSERVER_ADMIN_PASSWORD: ${UMP_GEOSERVER_PASSWORD}
+      STABLE_EXTENSIONS: ogcapi-features-plugin
       # Production: Using dedicated database for Geoserver
       HOST: geoserver-db
       POSTGRES_DB: ${UMP_GEOSERVER_DB_NAME:-geoserver_results}

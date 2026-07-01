@@ -13,9 +13,20 @@ from flask import g
 import ump.api.providers as providers
 from ump.api import remote_auth
 from ump.api.db_handler import engine
-from ump.api.models.job import Job, JobStatus
+from ump.api.models.job import (
+    Job,
+    JobStatus,
+    TransmissionMode,
+)
 from ump.api.models.ogc_exception import OGCExceptionResponse
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
+from ump.api.transmission_policy import (
+    TransmissionDecision,
+    TransmissionPolicyError,
+    apply_forwarded_mode_to_execute_outputs,
+    decide_transmission,
+    extract_requested_mode_from_outputs,
+)
 from ump.config import app_settings as config
 from ump.errors import OGCProcessException
 from ump.utils import fetch_json, fetch_response_content
@@ -291,7 +302,8 @@ class Process:
 
     #         except AssertionError as exc:
     #             raise InvalidUsage(
-    #                 f"Invalid parameter {input} = {param}: does not match mandatory schema {schema}"
+    #                 f"Invalid parameter {input} = {param}: does not match "
+    #                 f"mandatory schema {schema}"
     #             ) from exc
 
     def is_required(self, parameter_metadata):
@@ -311,7 +323,10 @@ class Process:
         """
         Compute the cache hash for a job in Python.
         Must match the PostgreSQL formula:
-        encode(sha512(convert_to(params::json::text || version || user_id, 'UTF8')), 'base64')
+        encode(
+            sha512(convert_to(params::json::text || version || user_id, 'UTF8')),
+            'base64',
+        )
         """
         raw = parameters_json + process_version + (user_id or "")
         digest = hashlib.sha512(raw.encode("utf-8")).digest()
@@ -319,7 +334,8 @@ class Process:
 
     def check_for_cache(self, parameters, user_id):
         """
-        Checks if the job has already been executed. Returns the job id if it has, None otherwise.
+        Checks if the job has already been executed. Returns the job id if
+        it has, ``None`` otherwise.
         """
         # p = providers.PROVIDERS[self.provider_prefix]["processes"][self.process_id]
         provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
@@ -338,6 +354,45 @@ class Process:
             for row in result:
                 return row.job_id
         return None
+
+    def _invalid_transmission_mode_error(self, detail: str) -> OGCProcessException:
+        return OGCProcessException(
+            OGCExceptionResponse(
+                type=(
+                    "http://www.opengis.net/def/exceptions/"
+                    "ogcapi-processes-1/1.0/invalid-parameter-value"
+                ),
+                title="Invalid transmissionMode",
+                status=400,
+                detail=detail,
+                instance=f"/processes/{self.process_id_with_prefix}/execution",
+            )
+        )
+
+    def _resolve_transmission_decision(
+        self,
+        request_body: dict,
+        process_config: ProcessConfig,
+    ) -> TransmissionDecision:
+        """Resolve global transmission behavior from request + policy.
+
+        Enforces that all configured output transmission modes are identical.
+        """
+        try:
+            requested_mode = extract_requested_mode_from_outputs(
+                request_body.get("outputs"),
+                default_mode="value",
+            )
+
+            decision = decide_transmission(
+                requested_mode=requested_mode,
+                policy=process_config.transmission_mode_policy,
+                result_storage=process_config.result_storage,
+            )
+            logger.debug("Resolved transmission decision: %s", decision)
+            return decision
+        except TransmissionPolicyError as e:
+            raise self._invalid_transmission_mode_error(str(e)) from e
 
     def execute(self, exec_body, user):
         provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
@@ -363,9 +418,38 @@ class Process:
         return {"jobID": job.job_id, "status": job.status}
 
     async def start_process_execution(self, request_body, user):
+        """Start asynchronous process execution.
+
+        The job's transmission mode is resolved per OGC API Processes -
+        Part 1: Core (Clause 7.11.2.5):
+
+          The request is normalized to one global output transmission mode for all
+          outputs. The mode is then interpreted via ``transmission-mode-policy``
+          from providers configuration.
+
+        Args:
+            request_body: OGC execute request body.
+            user: User ID from authentication.
+
+        Returns:
+            Job: Initialized Job instance with the resolved transmission mode.
+        """
         request_body["mode"] = "async"
         provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
         name = request_body.pop("job_name", None)
+
+        process_config: ProcessConfig = provider.processes[self.process_id]
+        transmission_decision = self._resolve_transmission_decision(
+            request_body, process_config
+        )
+        process_output_ids = (
+            list(self.outputs.keys()) if isinstance(self.outputs, dict) else None
+        )
+        request_body = apply_forwarded_mode_to_execute_outputs(
+            request_body,
+            transmission_decision.forwarded_mode,
+            process_output_ids,
+        )
 
         job_id = self.check_for_cache(request_body, user)
         if job_id:
@@ -382,7 +466,8 @@ class Process:
         provider_auth = auth_strategy.get_auth()
         headers.update(provider_auth.headers)
 
-        # TODO: if a server decides to ignore the Prefer header, response contains results, not job status info
+        # TODO: if a server decides to ignore the Prefer header, response
+        # contains results, not job status info
         # need to adress this case!
         async with aiohttp.ClientSession(timeout=submission_request_timeout) as session:
             try:
@@ -404,7 +489,11 @@ class Process:
                 remote_job_id = await self._extract_remote_job_id(response)
 
                 job = await self._create_local_job_instance(
-                    remote_job_id, name, request_body, user
+                    remote_job_id,
+                    name,
+                    request_body,
+                    user,
+                    transmission_decision.delivered_mode,
                 )
 
                 headers.pop("Prefer", None)
@@ -456,7 +545,10 @@ class Process:
                         type="http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/server-error",
                         title="Unexpected error during job submission",
                         status=500,
-                        detail=f"Job could not be started remotely due to unexpected error. Please see logs for more details.",
+                        detail=(
+                            "Job could not be started remotely due to unexpected "
+                            "error. Please see logs for more details."
+                        ),
                         instance=f"/processes/{self.process_id_with_prefix}/execution",
                     )
                 ) from e
@@ -539,8 +631,30 @@ class Process:
         )
 
     async def _create_local_job_instance(
-        self, remote_job_id: str, name, request_body, user
+        self,
+        remote_job_id: str,
+        name,
+        request_body,
+        user,
+        transmission_mode: TransmissionMode = "value",
     ):
+        """Create and persist a local job instance in the UMP database.
+
+        Stores the job metadata along with the OGC transmission mode that
+        will be used to deliver results when ``/jobs/{jobID}/results`` is
+        queried.
+
+        Args:
+            remote_job_id: Job ID from the remote model server.
+            name: Custom job name (optional).
+            request_body: Original OGC execute request.
+            user: User ID from authentication.
+            transmission_mode: Resolved OGC transmission mode
+                (``'value'`` or ``'reference'``).
+
+        Returns:
+            Job: The created and persisted Job instance.
+        """
         job = Job()
 
         job.insert(
@@ -551,6 +665,7 @@ class Process:
             exec_body=request_body,
             user=user,
             process_version=self.version,
+            transmission_mode=transmission_mode,
         )
 
         return job
@@ -600,7 +715,10 @@ class Process:
                 type="http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/no-such-process",
                 title="Invalid Location Header",
                 status=500,
-                detail="Could not extract remote job ID from Location header or response body.",
+                detail=(
+                    "Could not extract remote job ID from Location header or "
+                    "response body."
+                ),
                 instance="/jobs",
             )
         )
@@ -659,10 +777,29 @@ class Process:
 
         async with aiohttp.ClientSession(timeout=metadata_request_timeout) as session:
             while True:
+                remote_job_id = job.remote_job_id
+                if remote_job_id is None:
+                    raise OGCProcessException(
+                        OGCExceptionResponse(
+                            type=(
+                                "http://www.opengis.net/def/exceptions/"
+                                "ogcapi-processes-1/1.0/server-error"
+                            ),
+                            title="Remote job ID missing",
+                            status=500,
+                            detail=(
+                                "The local job is missing the remote job "
+                                "identifier required for status polling."
+                            ),
+                            instance=(
+                                f"/processes/{self.process_id_with_prefix}/execution"
+                            ),
+                        )
+                    )
                 status_info = await self._fetch_remote_job_status(
                     session,
                     str(provider_config.server_url),
-                    job.remote_job_id,
+                    remote_job_id,
                     provider_auth,
                     headers,
                 )
@@ -707,6 +844,8 @@ class Process:
 
     async def _store_results_if_needed(self, job: Job):
         try:
+            if job.transmission_mode != "reference":
+                return
             if (
                 providers.check_result_storage(self.provider_prefix, self.process_id)
                 == "geoserver"

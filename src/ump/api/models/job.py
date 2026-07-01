@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Literal, NoReturn
 
 import aiohttp
 import geopandas as gpd
@@ -20,6 +21,12 @@ from ump.errors import InvalidUsage, OGCProcessException
 from ump.geoserver.geoserver import Geoserver
 from ump.utils import fetch_json, join_url_parts
 
+logger = logging.getLogger(__name__)
+
+# OGC API Processes - Part 1: Core (Clause 7.11.2.5)
+# https://docs.ogc.org/is/18-062r2/18-062r2.html#toc32
+TransmissionMode = Literal["value", "reference"]
+
 results_client_timeout = aiohttp.ClientTimeout(
     total=5,  # Set a reasonable timeout for the requests
     connect=2,  # Connection timeout
@@ -31,7 +38,8 @@ results_client_timeout = aiohttp.ClientTimeout(
 # TODO class violates Single Responsibility Principle (SRP), it mixes
 # business logic with data access logic and metadata handling
 # TODO methods like insert use redundant fields instead of job instance fields
-# TODO queries use raw SQL, which is not recommended for different reasons: no migrations, reduced maintainability
+# TODO queries use raw SQL, which is not recommended for different reasons:
+# no migrations, reduced maintainability
 # TODO: table schema is missing normalization
 class Job:
     DISPLAYED_ATTRIBUTES = [
@@ -75,9 +83,10 @@ class Job:
         self.remote_job_id = None
         self.process_id_with_prefix = None
         self.parameters = None
-        self.provider_prefix = None
-        self.process_id = None
+        self.provider_prefix: str | None = None
+        self.process_id: str | None = None
         self.provider_url = None
+        self.transmission_mode: TransmissionMode = "value"
 
         # TODO: this produces 404 if a job is beeing queried for which was
         # stored with a user id, consider to distinguish between
@@ -110,6 +119,7 @@ class Job:
         exec_body=None,
         user=None,
         process_version=None,
+        transmission_mode=None,
     ):
         self._set_attributes(
             job_id,
@@ -120,6 +130,7 @@ class Job:
             exec_body,
             user_id=user,
             process_version=process_version,
+            transmission_mode=transmission_mode,
         )
 
         # TODO: these metadata should come from remote job
@@ -138,7 +149,8 @@ class Job:
                 provider_prefix, provider_url, status,
                 progress, parameters, message, created,
                 started, finished, updated, user_id,
-                process_title, name, process_version, hash
+                process_title, name, process_version, hash,
+                transmission_mode
             )
             VALUES
             (
@@ -159,7 +171,8 @@ class Job:
                 %(process_title)s,
                 %(name)s,
                 %(process_version)s,
-                %(hash)s
+                %(hash)s,
+                %(transmission_mode)s
             )
         """
         params = self._to_dict()
@@ -187,6 +200,7 @@ class Job:
         parameters=None,
         user_id=None,
         process_version=None,
+        transmission_mode=None,
     ):
         self.job_id = job_id
         self.remote_job_id = remote_job_id
@@ -194,27 +208,35 @@ class Job:
         self.process_title = process_title
         self.name = name
         self.process_version = process_version
+        self.transmission_mode = transmission_mode or "value"
 
         if remote_job_id and not job_id:
             self.job_id = f"job-{remote_job_id}"
 
         if job_id and not remote_job_id:
             match = re.search("job-(.*)$", job_id)
+            if match is None:
+                raise InvalidUsage(f"Job ID {job_id} is not valid.")
             self.remote_job_id = match.group(1)
 
         self.process_id_with_prefix = process_id_with_prefix
         self.parameters = parameters
 
         if process_id_with_prefix:
-            match = re.search(r"(.*):(.*)", self.process_id_with_prefix)
+            match = re.search(r"(.*):(.*)", process_id_with_prefix)
             if not match:
                 raise InvalidUsage(
                     f"Process ID {self.process_id_with_prefix} is not known! "
-                    + "Please check endpoint api/processes for a list of available processes."
+                    + (
+                        "Please check endpoint api/processes for a list of "
+                        "available processes."
+                    )
                 )
 
             self.provider_prefix = match.group(1)
             self.process_id = match.group(2)
+            if self.provider_prefix is None:
+                raise InvalidUsage("Provider prefix could not be resolved.")
             self.provider_url = providers.get_providers()[
                 self.provider_prefix
             ].server_url
@@ -224,15 +246,18 @@ class Job:
 
     def _init_from_db(self, job_id, user):
         query = """
-      SELECT j.* FROM jobs j left join jobs_users u on j.job_id = u.job_id WHERE j.job_id = %(job_id)s
-    """
+            SELECT j.*
+            FROM jobs j
+            LEFT JOIN jobs_users u ON j.job_id = u.job_id
+            WHERE j.job_id = %(job_id)s
+        """
         if user is None:
             query += " and j.user_id is null"
         else:
             query += f" and (j.user_id = '{user}' or u.user_id = '{user}')"
 
         with DBHandler() as db:
-            job_details = db.run_query(query, query_params={"job_id": job_id})
+            job_details = db.run_query(query, query_params={"job_id": job_id}) or []
 
         if len(job_details) > 0:
             self._init_from_dict(dict(job_details[0]))
@@ -242,8 +267,8 @@ class Job:
     def _init_from_dict(self, data):
         self.job_id = data["job_id"]
         self.remote_job_id = data["remote_job_id"]
-        self.process_id: str = data["process_id"]
-        self.provider_prefix: str = data["provider_prefix"]
+        self.process_id = data["process_id"]
+        self.provider_prefix = data["provider_prefix"]
         self.provider_url = data["provider_url"]
         self.process_id_with_prefix = f"{data['provider_prefix']}:{data['process_id']}"
         self.status = data["status"]
@@ -259,6 +284,49 @@ class Job:
         self.process_title = data["process_title"]
         self.name = data["name"]
         self.process_version = data["process_version"]
+
+        # The DB CHECK constraint guarantees a valid value; fall back to the
+        # OGC default for legacy rows that may pre-date the migration.
+        self.transmission_mode = data.get("transmission_mode") or "value"
+
+    def _raise_invalid_job_state(self, detail: str) -> NoReturn:
+        raise OGCProcessException(
+            OGCExceptionResponse(
+                type=(
+                    "http://www.opengis.net/def/exceptions/"
+                    "ogcapi-processes-1/1.0/server-error"
+                ),
+                title="Invalid job state",
+                detail=detail,
+                status=500,
+                instance=(
+                    f"{config.UMP_API_SERVER_URL}/"
+                    f"{config.UMP_API_SERVER_URL_PREFIX}/jobs/"
+                    f"{self.job_id or 'unknown'}"
+                ),
+            )
+        )
+
+    def _require_provider_process_context(self) -> tuple[str, str]:
+        if self.provider_prefix is None or self.process_id is None:
+            self._raise_invalid_job_state(
+                "The job is missing provider or process metadata required "
+                "to resolve result delivery."
+            )
+        return self.provider_prefix, self.process_id
+
+    def _require_job_id(self) -> str:
+        if self.job_id is None:
+            self._raise_invalid_job_state("The job is missing its local identifier.")
+        return self.job_id
+
+    def _require_remote_execution_context(self) -> tuple[str, str]:
+        if self.provider_prefix is None or self.remote_job_id is None:
+            self._raise_invalid_job_state(
+                "The job is missing provider or remote job metadata required "
+                "to fetch inline results."
+            )
+        return self.provider_prefix, self.remote_job_id
 
     def _to_dict(self):
         return {
@@ -280,6 +348,7 @@ class Job:
             "results_metadata": json.dumps(self.results_metadata),
             "user_id": self.user_id,
             "process_version": self.process_version,
+            "transmission_mode": self.transmission_mode,
         }
 
     def update(self):
@@ -287,9 +356,37 @@ class Job:
 
         query = """
             UPDATE jobs SET
-            (process_id, provider_prefix, provider_url, status, progress, parameters, message, created, started, finished, updated, results_metadata, process_version)
+            (
+                process_id,
+                provider_prefix,
+                provider_url,
+                status,
+                progress,
+                parameters,
+                message,
+                created,
+                started,
+                finished,
+                updated,
+                results_metadata,
+                process_version
+            )
             =
-            (%(process_id)s, %(provider_prefix)s, %(provider_url)s, %(status)s, %(progress)s, %(parameters)s, %(message)s, %(created)s, %(started)s, %(finished)s, %(updated)s, %(results_metadata)s, %(process_version)s)
+            (
+                %(process_id)s,
+                %(provider_prefix)s,
+                %(provider_url)s,
+                %(status)s,
+                %(progress)s,
+                %(parameters)s,
+                %(message)s,
+                %(created)s,
+                %(started)s,
+                %(finished)s,
+                %(updated)s,
+                %(results_metadata)s,
+                %(process_version)s
+            )
             WHERE job_id = %(job_id)s
         """
         with DBHandler() as db:
@@ -412,38 +509,106 @@ class Job:
             return {k: job_dict[k] for k in self.DISPLAYED_ATTRIBUTES}
 
     async def results(self):
+        """Return job results following the configured OGC transmission mode.
+
+        - ``value``: fetch the result document from the model server and
+          return it inline (OGC results.yaml).
+        - ``reference``: return a result link (link.yaml) pointing to the
+          stored representation (e.g. a GeoServer WFS layer). The remote
+          model server is not contacted in this case.
+
+        Returns:
+            dict: An OGC results document. For reference mode the document is
+            keyed by output identifier and the value is a link object.
+        """
         if self.status != JobStatus.successful.value:
             self.results_not_available()
+
+        if self.transmission_mode == "reference":
+            reference = self._build_reference_result()
+            if reference is not None:
+                return reference
+            # Fall back to inline results if reference mode is not applicable
+            # for the configured result storage backend.
+
+        return await self._fetch_inline_results()
+
+    def _build_reference_result(self) -> dict | None:
+        """Build an OGC-compliant results document with a link to the result.
+
+        Returns:
+            dict | None: A results document of the form
+            ``{output_id: link.yaml}`` if a reference can be produced,
+            otherwise ``None`` to signal that the caller should fall back
+            to inline transmission.
+        """
+        provider_prefix, process_id = self._require_provider_process_context()
+        result_storage = providers.check_result_storage(provider_prefix, process_id)
+        if result_storage != "geoserver":
+            logger.warning(
+                "Job %s: transmissionMode='reference' is configured but "
+                "result-storage='%s' has no addressable result resource; "
+                "falling back to inline results.",
+                self.job_id,
+                result_storage,
+            )
+            return None
+
+        job_id = self._require_job_id()
+        geoserver_url = Geoserver().get_layer_reference_url(job_id)
+        logger.debug(
+            "Job %s: returning OGC reference result for GeoServer layer %s",
+            self.job_id,
+            geoserver_url,
+        )
+
+        # Per OGC results.yaml: additionalProperties is inlineOrRefData; for
+        # reference outputs the value is a link.yaml object.
+        return {
+            "result": {
+                "href": geoserver_url,
+                "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
+                "type": "application/json",
+                "title": f"Process results for job {self.job_id}",
+            }
+        }
+
+    async def _fetch_inline_results(self) -> dict:
+        """Fetch the results document from the remote model server."""
+        provider_prefix, remote_job_id = self._require_remote_execution_context()
+        provider: ProviderConfig = providers.get_providers()[provider_prefix]
+        self.provider_url = provider.server_url
+
+        auth_strategy = remote_auth.get_auth_strategy(provider.authentication)
+        provider_auth = auth_strategy.get_auth()
 
         headers = {
             "Content-type": "application/json",
             "Accept": "application/json",
         }
-
-        provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
-        self.provider_url = provider.server_url
-
-        auth_strategy = remote_auth.get_auth_strategy(provider.authentication)
-        provider_auth = auth_strategy.get_auth()
         headers.update(provider_auth.headers)
 
         async with aiohttp.ClientSession(timeout=results_client_timeout) as session:
-            results = await fetch_json(
+            return await fetch_json(
                 session,
-                url=f"{self.provider_url}jobs/{self.remote_job_id}/results?f=json",
+                url=f"{self.provider_url}jobs/{remote_job_id}/results?f=json",
                 headers=headers,
                 auth=provider_auth.auth,
             )
 
-            return results
-
     async def results_to_geoserver(self):
         try:
-            provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
+            provider_prefix, process_id = self._require_provider_process_context()
+            job_id = self._require_job_id()
+            provider: ProviderConfig = providers.get_providers()[provider_prefix]
 
-            process_config: ProcessConfig = provider.processes[self.process_id]
+            process_config: ProcessConfig = provider.processes[process_id]
 
-            results = await self.results()
+            # Always fetch inline results from the remote model server for
+            # persistence. Using self.results() here can return an OGC
+            # reference link in transmissionMode='reference', which is not
+            # a GeoJSON feature collection and cannot be stored in PostGIS.
+            results = await self._fetch_inline_results()
             if result_path := process_config.result_path:
                 parts = result_path.split(".")
                 for part in parts:
@@ -453,7 +618,7 @@ class Job:
 
             self.set_results_metadata(results)
 
-            geoserver.save_results(job_id=self.job_id, data=results)
+            geoserver.save_results(job_id=job_id, data=results)
 
             logging.info(
                 " --> Successfully stored results for job %s (=%s)/%s to geoserver.",
@@ -497,7 +662,10 @@ class Job:
             JobStatus.accepted.value: {
                 "type": "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/result-not-ready",
                 "title": "Job accepted",
-                "detail": "The job has been accepted but has not started yet. Results are not available.",
+                "detail": (
+                    "The job has been accepted but has not started yet. "
+                    "Results are not available."
+                ),
             },
         }
 

@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+from typing import Literal
 
 from pydantic import FilePath, HttpUrl, SecretStr, computed_field, field_validator
 from pydantic_settings import BaseSettings
@@ -15,7 +16,7 @@ class UmpSettings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
-        "extra": "ignore"  # Ignoriere unbekannte Umgebungsvariablen
+        "extra": "ignore",  # Ignoriere unbekannte Umgebungsvariablen
     }
     UMP_LOG_LEVEL: str = "INFO"
     UMP_PROVIDERS_FILE: FilePath = Path("providers.yaml")
@@ -28,6 +29,7 @@ class UmpSettings(BaseSettings):
     UMP_DATABASE_USER: str = "postgres"
     UMP_DATABASE_PASSWORD: SecretStr = SecretStr("postgres")
     UMP_GEOSERVER_URL: HttpUrl | None = HttpUrl("http://geoserver:8080/geoserver")
+    UMP_GEOSERVER_PUBLIC_URL: HttpUrl | None = None
     UMP_GEOSERVER_DB_HOST: str = "postgis"
     UMP_GEOSERVER_DB_PORT: int = 5432
     UMP_GEOSERVER_DB_NAME: str = "ump"
@@ -39,6 +41,7 @@ class UmpSettings(BaseSettings):
     UMP_GEOSERVER_WORKSPACE_NAME: str = "UMP"
     UMP_GEOSERVER_USER: str = "geoserver"
     UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
+    UMP_GEOSERVER_SERVICE_TYPE: Literal["wfs", "oaf"] = "wfs"
     UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
     UMP_JOB_DELETE_INTERVAL: int = 240  # minutes
     UMP_KEYCLOAK_URL: HttpUrl | None = HttpUrl("http://keycloak:8080/auth")

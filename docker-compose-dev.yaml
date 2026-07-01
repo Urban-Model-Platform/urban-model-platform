@@ -39,8 +39,12 @@ services:
       UMP_GEOSERVER_USER: admin
       UMP_GEOSERVER_PASSWORD: geoserver
       UMP_GEOSERVER_URL: http://geoserver:8080/geoserver
+      UMP_GEOSERVER_PUBLIC_URL: http://localhost:${GEOSERVER_PORT_EXTERNAL}/geoserver
+      UMP_GEOSERVER_SERVICE_TYPE: oaf
       #---
       # using dedicated database for geoserver results
+      # IMPORTANT: container-to-container traffic must use the service's internal port
+      # (5432), not the host-mapped external port (5437)
       UMP_GEOSERVER_DB_PORT: 5432
       UMP_GEOSERVER_DB_NAME: geoserver_results
       UMP_GEOSERVER_DB_USER: geoserver
@@ -80,13 +84,13 @@ services:
       POSTGRES_USER: geoserver
       POSTGRES_PASSWORD: geoserver
     ports:
-      - ${GEOSERVER_DB_PORT_EXTERNAL:-5434}:5432
+      - ${GEOSERVER_DB_PORT_EXTERNAL:-5437}:5432
     networks:
       - dev
 
  # !NOTE: now using dedicated database for geoserver results!
   geoserver:
-    image: kartoza/geoserver:2.22.0
+    image: kartoza/geoserver:2.28.4
     ports:
       - ${GEOSERVER_PORT_EXTERNAL}:8080
     volumes:
@@ -94,6 +98,7 @@ services:
     environment:
       GEOSERVER_ADMIN_USER: admin
       GEOSERVER_ADMIN_PASSWORD: geoserver
+      STABLE_EXTENSIONS: ogcapi-features-plugin
       #---
       # using dedicated database for geoserver results
       HOST: geoserver-db
@@ -111,6 +116,9 @@ services:
     build:
       context: ./modelserver_example
       dockerfile: Dockerfile
+    volumes:
+      - ./modelserver_example/pygeoapi-config.yaml:/home/pythonuser/pygeoapi-config.yaml
+      - ./modelserver_example/example-openapi.yaml:/home/pythonuser/pygeoapi-openapi.yaml
     environment:
       PYGEOAPI_CONFIG: /home/pythonuser/pygeoapi-config.yaml
       PYGEOAPI_OPENAPI: /home/pythonuser/pygeoapi-openapi.yaml
