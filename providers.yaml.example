@@ -1,23 +1,54 @@
-# This is the configuration file for setting up simulation servers.
-# The servers should provide an OGC processes api which will be retrieved
-# Only processes listed in this configuration file will also appear on the UMP
-# One can also exclude processes manually by providing the "exclude" attribute
+# providers.yaml.example -- reference configuration for UMP.
+#
+# Copy this file to providers.yaml and adjust for your environment.
+# Each entry under `providers` points to one OGC API Processes server.
+# Only processes listed here are exposed through UMP.
+# Available authentication types: NoAuth (default), BasicAuth, ApiKey, BearerToken.
+# Available result-storage values: remote (default), geoserver.
 
-modelserver:
-    name: example
+providers:
+
+  # Mock server (local development, no infrastructure required)
+  # Start locally:  PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001
+  # Docker Compose: docker compose -f docker-compose-dev.yaml up mock-ogc-server
+  - name: mock
+    url: "http://localhost:5001"
+    processes:
+      - id: echo
+        anonymous-access: true
+      - id: hello-world
+        anonymous-access: true
+      - id: slow
+        anonymous-access: true
+      - id: failing-job
+        anonymous-access: true
+
+  # Real model server with HTTP Basic auth
+  - name: example
     url: "http://modelserver:5000"
     authentication:
       type: "BasicAuth"
       user: "user"
       password: "password"
-    timeout:  1800
     processes:
-      hello-world:
+      - id: hello-world
         result-storage: "remote"
         anonymous-access: true
-      squareroot:
+      - id: squareroot
         result-storage: "remote"
         anonymous-access: false
-      hello-geo-world:
+      - id: hello-geo-world
         result-storage: "geoserver"
         anonymous-access: true
+
+  # Real model server with API key header
+  - name: another-server
+    url: "http://anotherserver:8080"
+    authentication:
+      type: "ApiKey"
+      key_name: "X-API-Key"
+      key_value: "secret-key-here"
+    processes:
+      - id: some-process
+        anonymous-access: false
+        exclude: false
