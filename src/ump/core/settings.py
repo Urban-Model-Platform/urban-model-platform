@@ -32,6 +32,12 @@ class UmpSettings(BaseSettings):
     UMP_API_SERVER_WORKERS: int = 4
     UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: int = 5
     UMP_REMOTE_JOB_TTW: int | None = None  # Time-to-wait timeout for remote jobs (seconds)
+    # Job store adapter selection: "memory" (default, no DB required) or "postgres"
+    UMP_JOB_STORE: str = "memory"
+    # Async PostgreSQL DSN for SQLModel adapter, e.g.
+    # postgresql+asyncpg://user:password@host:5432/dbname
+    # Required when UMP_JOB_STORE=postgres; ignored otherwise.
+    UMP_DATABASE_URL: str | None = None
     UMP_DATABASE_NAME: str = "ump"
     UMP_DATABASE_HOST: str = "postgres"
     UMP_DATABASE_PORT: int = 5432
