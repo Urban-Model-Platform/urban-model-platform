@@ -11,7 +11,6 @@ from ump.core.interfaces.processes import ProcessesPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.managers.process_cache import ProcessCache, ProcessListCache
 from ump.core.managers.job_manager import JobManager
-from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.models.link import Link
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList, ProcessSummary
@@ -26,13 +25,11 @@ class ProcessManager(ProcessesPort):
         provider_config_service: ProvidersPort,
         http_client: HttpClientPort,
         process_id_validator: ProcessIdValidatorPort,
-        job_repository: JobRepositoryPort | None = None,
         cache_expiry_seconds: int = 300,
     ) -> None:
         self.provider_config_service = provider_config_service
         self.http_client = http_client
         self.process_id_validator = process_id_validator
-        self.job_repository = job_repository
         self._process_cache = ProcessListCache[ProcessSummary](
             expiry_seconds=cache_expiry_seconds
         )
