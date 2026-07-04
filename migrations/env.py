@@ -12,7 +12,7 @@ from sqlmodel import SQLModel
 # autogenerate inspects the metadata at import time.
 # Only the adapter-layer ORM models are imported here; the core domain
 # models (pure Pydantic) are never touched by Alembic.
-import ump.adapters.sqlmodel_job_repository  # noqa: F401  registers JobRecord, JobStatusHistoryRecord
+import ump.adapters.job_repository_sql  # noqa: F401  registers JobRecord, JobStatusHistoryRecord
 
 # Alembic Config object
 config = context.config
