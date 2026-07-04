@@ -1,24 +1,37 @@
 from logging.config import fileConfig
+import os
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from sqlalchemy import engine_from_config, pool
+from sqlmodel import SQLModel
 
 from alembic import context
 
-# this is the Alembic Config object, which provides
-# access to the values within the .ini file in use.
+# Import ORM table models so that SQLModel.metadata is populated.
+# These must be imported before target_metadata is assigned — Alembic's
+# autogenerate inspects the metadata at import time.
+# Only the adapter-layer ORM models are imported here; the core domain
+# models (pure Pydantic) are never touched by Alembic.
+import ump.adapters.sqlmodel_job_repository  # noqa: F401  registers JobRecord, JobStatusHistoryRecord
+
+# Alembic Config object
 config = context.config
 
-# Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# Override sqlalchemy.url from environment variable when present.
+# This allows running `alembic upgrade head` without hard-coding credentials
+# in alembic.ini.  UMP_DATABASE_URL must be a *synchronous* DSN for Alembic
+# (e.g. postgresql+psycopg2://... or postgresql://...) even though the app
+# uses asyncpg at runtime.
+db_url = os.environ.get("UMP_DATABASE_URL")
+if db_url:
+    # Strip async driver prefix so Alembic can use a sync engine
+    sync_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    config.set_main_option("sqlalchemy.url", sync_url)
+
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here
-# for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-target_metadata = None
+# Use SQLModel's shared metadata so autogenerate detects our table models.
+target_metadata = SQLModel.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
