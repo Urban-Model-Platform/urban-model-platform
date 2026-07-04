@@ -54,6 +54,26 @@ services:
     networks:
       - dev
 
+  # Lightweight mock OGC API Processes server — no external dependencies.
+  # Provides echo, hello-world, slow, and failing-job processes for manual testing.
+  # Add to providers.yaml: name: mock, url: http://mock-ogc-server:5001
+  mock-ogc-server:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./scripts/mock_ogc_server.py:/app/mock_ogc_server.py:ro
+    environment:
+      MOCK_BASE_URL: http://mock-ogc-server:5001
+      MOCK_JOB_DELAY_SECONDS: "2"
+      MOCK_SLOW_DELAY_SECONDS: "10"
+    command: >
+      sh -c "pip install fastapi uvicorn --quiet &&
+             uvicorn mock_ogc_server:app --host 0.0.0.0 --port 5001"
+    ports:
+      - "5001:5001"
+    networks:
+      - dev
+
 # !NOTE: here starts the dev environment setup!
 # these apps a required dependencies for the UMP
 # and are not part of the UMP itself
