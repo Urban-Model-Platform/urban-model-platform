@@ -14,7 +14,7 @@ services:
   # !NOTE: this is for testing the current app version in a container, only!
   # development is executed locally
   # and the prod deployment differs anyway!
-  api:
+  ump:
     image: ${CONTAINER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
     restart: "unless-stopped"
     ports:
@@ -57,7 +57,7 @@ services:
 # !NOTE: here starts the dev environment setup!
 # these apps a required dependencies for the UMP
 # and are not part of the UMP itself
-  api-db:
+  ump-db:
     image: postgis/postgis:18-3.6-alpine
     volumes:
       - postgres_data:/var/lib/postgresql/
