@@ -1,9 +1,8 @@
 # ump/adapters/web/fastapi.py
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
-
-import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -28,7 +27,7 @@ from ump.core.models.execute_request import ExecuteRequest
 from ump.core.models.job import JobList, JobStatusInfo
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList
-from ump.core.settings import app_settings, logger, set_logger, NoOpLogger
+from ump.core.settings import NoOpLogger, app_settings, logger, set_logger
 
 
 # Note: this a driver adapter, so it depends on the core interface (ProcessesPort)
@@ -39,6 +38,7 @@ def create_app(
     process_manager_factory: Callable[[HttpClientPort], ProcessManager],
     http_client: HttpClientPort,
     job_manager_factory: Callable[[HttpClientPort, ProcessManager], JobManager],
+    job_repo: JobRepositoryPort,
     site_info: SiteInfoPort | None = None,
 ):
     """Create the FastAPI app.
@@ -62,7 +62,8 @@ def create_app(
             job_manager = job_manager_factory(client, process_port)
             app.state.process_port = process_port
             app.state.job_manager = job_manager
-            
+            app.state.job_repo = job_repo
+
             try:
                 yield
             finally:
@@ -100,7 +101,9 @@ def create_app(
     # Correlation ID middleware: assigns per-request id (header override) and exposes it to logging
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
-        incoming = request.headers.get("x-request-id") or request.headers.get("X-Request-ID")
+        incoming = request.headers.get("x-request-id") or request.headers.get(
+            "X-Request-ID"
+        )
         cid = incoming or uuid.uuid4().hex[:12]
         # set context var so logs include this id
         correlation_id_var.set(cid)
@@ -116,7 +119,9 @@ def create_app(
     class CorrelationIdMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):  # pragma: no cover - thin wrapper
             # Reuse id from inbound header or generate a short uuid4 segment
-            inbound = request.headers.get("x-correlation-id") or request.headers.get("X-Correlation-ID")
+            inbound = request.headers.get("x-correlation-id") or request.headers.get(
+                "X-Correlation-ID"
+            )
             cid = inbound or uuid.uuid4().hex[:12]
             # Set context var for logging filters
             correlation_id_var.set(cid)
@@ -166,15 +171,9 @@ def create_app(
 
         @sub.get("/jobs", response_model=JobList, response_model_exclude_none=True)
         async def list_jobs_sub():
-            # Access job repository via process_port
-            repo = getattr(app.state.process_port, "job_repository", None)
-            if repo is None:
-                return JobList(jobs=[], links=[])
-            jobs = await repo.list()
+            jobs = await app.state.job_repo.list()
             status_infos = [j.status_info for j in jobs if j.status_info]
-            # Minimal self link list for collection
-            collection_links = []
-            return JobList(jobs=status_infos, links=collection_links)
+            return JobList(jobs=status_infos, links=[])
 
         @sub.get(
             "/jobs/{job_id}",
@@ -182,17 +181,7 @@ def create_app(
             response_model_exclude_none=True,
         )
         async def get_job_sub(request: Request, job_id: str):
-            repo: JobRepositoryPort | None = getattr(app.state.process_port, "job_repository", None)
-            if repo is None:
-                problem = build_problem(
-                    status=404,
-                    title="Jobs Not Supported",
-                    detail="Jobs not supported by this deployment",
-                    request=request,
-                )
-                return render_problem(problem)
-            
-            job = await repo.get(job_id)
+            job = await app.state.job_repo.get(job_id)
 
             if not job or not job.status_info:
                 problem = build_problem(
@@ -206,15 +195,6 @@ def create_app(
 
         @sub.get("/jobs/{job_id}/results")
         async def get_job_results_sub(request: Request, job_id: str):
-            repo = getattr(app.state.process_port, "job_repository", None)
-            if repo is None:
-                problem = build_problem(
-                    status=404,
-                    title="Jobs Not Supported",
-                    detail="Jobs not supported by this deployment",
-                    request=request,
-                )
-                return render_problem(problem)
             jm = app.state.job_manager
             if jm is None:
                 problem = build_problem(
@@ -225,7 +205,9 @@ def create_app(
                 )
                 return render_problem(problem)
             resp = await jm.get_results(job_id)
-            return JSONResponse(status_code=resp.get("status", 200), content=resp.get("body", {}))
+            return JSONResponse(
+                status_code=resp.get("status", 200), content=resp.get("body", {})
+            )
 
         return sub, ver_prefix
 
@@ -359,10 +341,7 @@ def create_app(
 
     @app.get("/jobs", response_model=JobList, response_model_exclude_none=True)
     async def list_jobs():
-        repo = getattr(app.state.process_port, "job_repository", None)
-        if repo is None:
-            return JobList(jobs=[], links=[])
-        jobs = await repo.list()
+        jobs = await app.state.job_repo.list()
         status_infos = [j.status_info for j in jobs if j.status_info]
         return JobList(jobs=status_infos, links=[])
 
@@ -370,18 +349,8 @@ def create_app(
         "/jobs/{job_id}", response_model=JobStatusInfo, response_model_exclude_none=True
     )
     async def get_job(job_id: str, request: Request):
-        repo: JobRepositoryPort | None = getattr(app.state.process_port, "job_repository", None)
-        if repo is None:
-            problem = build_problem(
-                status=404,
-                title="Jobs Not Supported",
-                detail="Jobs not supported by this deployment",
-                request=request,
-            )
-            return render_problem(problem)
-        
-        job = await repo.get(job_id)
-        
+        job = await app.state.job_repo.get(job_id)
+
         if not job or not job.status_info:
             problem = build_problem(
                 status=404,
@@ -394,15 +363,6 @@ def create_app(
 
     @app.get("/jobs/{job_id}/results")
     async def get_job_results(job_id: str, request: Request):
-        repo = getattr(app.state.process_port, "job_repository", None)
-        if repo is None:
-            problem = build_problem(
-                status=404,
-                title="Jobs Not Supported",
-                detail="Jobs not supported by this deployment",
-                request=request,
-            )
-            return render_problem(problem)
         jm = app.state.job_manager
         if jm is None:
             problem = build_problem(
@@ -413,7 +373,9 @@ def create_app(
             )
             return render_problem(problem)
         resp = await jm.get_results(job_id)
-        return JSONResponse(status_code=resp.get("status", 200), content=resp.get("body", {}))
+        return JSONResponse(
+            status_code=resp.get("status", 200), content=resp.get("body", {})
+        )
 
     @app.post("/processes/{process_id}/execution")
     async def execute_process(request: Request, process_id: str):
@@ -431,7 +393,9 @@ def create_app(
                 loc = ".".join(str(part) for part in err.get("loc", []))
                 msg = err.get("msg", "invalid value")
                 detail_messages.append(f"{loc or 'body'}: {msg}")
-            detail_text = "; ".join(detail_messages) or "Invalid execute request payload"
+            detail_text = (
+                "; ".join(detail_messages) or "Invalid execute request payload"
+            )
             problem = build_problem(
                 status=400,
                 title="Invalid Execute Request",
@@ -462,13 +426,13 @@ def create_app(
             status = resp.get("status") or 200
             content = resp.get("body") or {}
             location = None
-            
+
             if isinstance(resp.get("headers"), dict):
                 location = resp["headers"].get("Location")
-            
+
             safe_content = jsonable_encoder(content)
             response = JSONResponse(status_code=status, content=safe_content)
-            
+
             if location:
                 response.headers["Location"] = location
             return response
