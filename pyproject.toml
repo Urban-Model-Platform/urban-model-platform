@@ -48,6 +48,10 @@ authors = [
 readme = "README.md"
 package-mode = true
 
+[tool.poetry.scripts]
+ump         = "ump.cli:main"
+ump-migrate = "ump.cli:migrate"
+
 [tool.poetry.urls]
 Homepage = "https://citysciencelab.github.io/urban-model-platform"
 Documentation = "https://github.com/citysciencelab/urban-model-platform"
@@ -70,6 +74,7 @@ tenacity = "^8.2.3"
 sqlmodel = "^0.0.39"
 alembic = "^1.14"
 asyncpg = "^0.30"
+greenlet = "^3.5.3"
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests

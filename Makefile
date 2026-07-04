@@ -1,7 +1,7 @@
 .ONESHELL:
 SHELL=/bin/bash
 
-.PHONY: build initiate-dev build-image upload-image start-dev \
+.PHONY: run-migrations build initiate-dev build-image upload-image start-dev \
         start-dev-example restart-dev stop-dev build-docs clean-docs \
         start-geoserver-db stop-geoserver-db
 
@@ -18,6 +18,8 @@ CONDA_ACTIVATE=source $$(conda info --base)/etc/profile.d/conda.sh ; conda activ
 
 GIT_COMMIT := $(shell git rev-parse --short HEAD)
 
+run migrations:
+	PYTHONPATH=src UMP_DATABASE_URL=postgresql+asyncpg://ump:ump@api-db:5432/ump .venv/bin/alembic upgrade head
 
 initiate-dev:
 	@if [ ! -d ./.venv ]; then \
