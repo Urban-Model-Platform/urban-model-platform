@@ -261,14 +261,176 @@ Rationale:
 
 Immediate actionable checklist (updated):
 Current focus has shifted with new capabilities; checklist re-aligned:
-- [ ] Add `/jobs` (list) and `/jobs/{id}` (detail) endpoints.
+- [x] Add `/jobs` (list) and `/jobs/{id}` (detail) endpoints (routes exist, backed by InMemoryJobRepository).
+- [ ] **SQLModel JobRepository + Alembic migrations + design smell fix** ← current step (see detailed plan below).
 - [ ] Implement inputs separation & `/jobs/{id}/inputs` (no inputs in statusInfo).
-- [ ] SQLModel JobRepository + Alembic migrations (jobs + status history).
 - [ ] Status history persistence (append snapshots) & optional events.
 - [ ] Integrate `ResultStoragePort` for optional persistence on success.
 - [ ] Tests: JobManager polling (including timeout), immediate results synthesis, retry verification, link normalization, /jobs results endpoint.
 - [ ] Optional: adaptive polling/backoff per provider.
 - [ ] Optional: auth rules (JWT) restricting job visibility.
+
+---
+
+## SQLModel JobRepository — detailed implementation plan
+
+### Architectural decisions
+
+#### 1. Two-model ORM mapping (hexagonal-correct)
+
+Isolating persistence details from the core requires a second model class in the adapter layer. The core `Job` (`BaseModel`) must stay free of all ORM annotations; the adapter owns a separate `JobRecord(SQLModel, table=True)` that holds all persistence metadata. The adapter maps between the two explicitly.
+
+```
+src/ump/core/models/job.py          ← domain model (pure Pydantic, no ORM)
+src/ump/adapters/sqlmodel_job_repository.py
+    ├── JobRecord(SQLModel, table=True)              ← ORM model (adapter only)
+    ├── JobStatusHistoryRecord(SQLModel, table=True) ← history ORM model (adapter only)
+    └── SQLModelJobRepository(JobRepositoryPort)     ← adapter implementing port
+          ├── JobRecord.from_domain(job) -> JobRecord
+          └── JobRecord.to_domain()     -> Job
+```
+
+The core never imports `sqlmodel`, `sqlalchemy`, or any database driver. All ORM-specific concerns (column types, primary key strategy, JSONB vs TEXT, FK cascade) stay inside the adapter file.
+
+#### 2. Alembic as migration tool
+
+SQLModel does not ship a migration tool. It wraps SQLAlchemy 2.x, so Alembic is the natural and correct choice. Autogenerate works by inspecting `SQLModel.metadata`, which is only populated once the SQLModel table classes are imported. `migrations/env.py` must import the ORM models before `run_migrations_online()` / `run_migrations_offline()` is called.
+
+Key caveat — JSONB: SQLModel infers `TEXT` for `dict` type annotations by default. Native JSONB requires an explicit `sa_column`:
+
+```python
+from sqlalchemy import Column
+from sqlalchemy.dialects.postgresql import JSONB
+
+class JobRecord(SQLModel, table=True):
+    status_info: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    links: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    inputs: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
+```
+
+Without `sa_column=Column(JSONB)`, the column would be stored as a JSON-encoded TEXT, losing native JSONB operators and index support.
+
+#### 3. Migration strategy
+
+All old migrations have been deleted — the `migrations/versions/` directory is now empty. We start fresh from a clean Alembic history.
+
+Action: create a single initial migration `create_jobs_tables` with `down_revision = None` (new root). This is the first and only migration in the chain and creates the two correctly structured tables.
+
+#### 4. Design smell fix: `job_repository` on `ProcessManager`
+
+Current state — `ProcessManager.__init__` accepts `job_repository` and the web adapter retrieves it via:
+```python
+repo = getattr(app.state.process_port, "job_repository", None)
+```
+`ProcessManager` is a process-fetching concern; it has no business holding a persistence repo. The repo belongs to `JobManager`.
+
+Fix (same step):
+1. Remove `job_repository: JobRepositoryPort | None = None` from `ProcessManager.__init__`.
+2. Add `job_repo: JobRepositoryPort` parameter to `create_app(...)`.
+3. In the lifespan: `app.state.job_repo = job_repo` (direct, first-class state).
+4. All routes replace `getattr(app.state.process_port, "job_repository", None)` with `app.state.job_repo`.
+5. `main.py`: pass `job_repo` to `create_app` directly; remove it from `process_manager_factory`.
+
+#### 5. Adapter selection env flag
+
+To keep tests running without a database, `main.py` selects the adapter based on `UMP_JOB_STORE`:
+
+```
+UMP_JOB_STORE=memory   → InMemoryJobRepository (default, used in all tests)
+UMP_JOB_STORE=postgres → SQLModelJobRepository (production)
+```
+
+SQLModelJobRepository requires `UMP_DATABASE_URL` (PostgreSQL DSN).
+
+### DB schema (Alt A — hybrid)
+
+```sql
+-- jobs: current snapshot (fast reads, SQL-filterable on scalar fields)
+CREATE TABLE jobs (
+    id              UUID PRIMARY KEY,
+    process_id      TEXT,
+    provider        TEXT,
+    remote_job_id   TEXT,
+    remote_status_url TEXT,
+    status          TEXT,                      -- denormalized for WHERE filters
+    created         TIMESTAMPTZ NOT NULL,
+    updated         TIMESTAMPTZ,
+    status_info     JSONB,                     -- full current JobStatusInfo snapshot
+    inputs          JSONB,                     -- inline inputs (small payloads only)
+    inputs_url      TEXT,
+    inputs_storage  TEXT,
+    inputs_size     INTEGER,
+    inputs_checksum TEXT,
+    links           JSONB,                     -- list[Link]
+    diagnostic      TEXT,
+    version         INTEGER NOT NULL DEFAULT 0
+);
+
+-- job_status_history: append-only audit log of all status transitions
+CREATE TABLE job_status_history (
+    id          BIGSERIAL PRIMARY KEY,
+    job_id      UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    seq         INTEGER NOT NULL,
+    snapshot    JSONB NOT NULL,                -- full JobStatusInfo snapshot
+    recorded_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_jobs_status    ON jobs (status);
+CREATE INDEX idx_jobs_provider  ON jobs (provider);
+CREATE INDEX idx_jobs_process   ON jobs (process_id);
+CREATE INDEX idx_jsh_job_id     ON job_status_history (job_id, seq);
+```
+
+### Files to create / modify
+
+| File | Action | Notes |
+|---|---|---|
+| `src/ump/adapters/sqlmodel_job_repository.py` | CREATE | `JobRecord`, `JobStatusHistoryRecord`, `SQLModelJobRepository` |
+| `migrations/versions/XXXX_create_jobs_tables.py` | CREATE | `down_revision=None` (new root), correct schema for both tables |
+| `migrations/env.py` | MODIFY | Import SQLModel table classes; use `SQLModel.metadata` |
+| `src/ump/adapters/web/fastapi.py` | MODIFY | Add `job_repo` param; fix all repo access; set `app.state.job_repo` |
+| `src/ump/core/managers/process_manager.py` | MODIFY | Remove `job_repository` param |
+| `src/ump/main.py` | MODIFY | Pass `job_repo` to `create_app`; add `UMP_JOB_STORE` selection |
+| `src/ump/core/settings.py` | MODIFY | Add `UMP_JOB_STORE`, `UMP_DATABASE_URL` settings |
+
+### Mapping strategy for `SQLModelJobRepository`
+
+The `from_domain` / `to_domain` bridge is the only place where the two models touch. It must be complete and round-trip safe (i.e., `to_domain(from_domain(job)) == job`).
+
+```python
+@classmethod
+def from_domain(cls, job: Job) -> "JobRecord":
+    return cls(
+        id=job.id,
+        process_id=job.process_id,
+        provider=job.provider,
+        status=job.status,
+        status_info=job.status_info.model_dump(mode="json") if job.status_info else None,
+        inputs=job.inputs,
+        links=[lnk.model_dump(mode="json") for lnk in job.links],
+        # ... all other fields
+    )
+
+def to_domain(self) -> Job:
+    return Job(
+        id=self.id,
+        status_info=JobStatusInfo(**self.status_info) if self.status_info else None,
+        links=[Link(**lnk) for lnk in (self.links or [])],
+        # ... all other fields
+    )
+```
+
+### Session management
+
+`SQLModelJobRepository` requires an async SQLAlchemy session. Two strategies:
+
+**Option A — session per operation (simpler, safest for now):**
+Each method opens its own `async_sessionmaker(engine)` context. No session leaks across requests.
+
+**Option B — session injected at construction (more testable):**
+The factory in `main.py` creates an `async_sessionmaker` and injects it; the repo uses it for all operations. Better for transactional grouping of multi-step operations.
+
+Recommendation: Option B (session factory injected), deferred to async session from `sqlalchemy.ext.asyncio`. The `InMemoryJobRepository` needs no changes.
 
 Minimal DDD guidance (commands, events, aggregates) - lightweight, incremental
 
@@ -498,7 +660,7 @@ The UMP acts as a broker for the entire execution lifecycle according to OGC API
 - deterministic caching
 - normalizing: UMP can add or deprive model servers of skills, e.g. add `transmissionMode: reference` capability
 
-This proposal adresses `result-storage` and `transmission-mode-policy`
+This proposal addresses `result-storage`, `transmission-mode-policy`, and `response-mode-policy`
 
 ### Configuration: `transmission-mode-policy`
 
@@ -646,3 +808,203 @@ It may modify the process description provided by the model server:
 This modification is intentional and must be transparent to UMP operators. Clients
 should act exclusively based on the Process Description and should not have to consult the
 model server’s Process description.
+---
+
+### Configuration: `response-mode-policy`
+
+The OGC API Processes standard defines a `response` field in the execute request body with two values:
+
+- `"document"` — the server wraps results in a structured JSON document (conforming to the OGC result schema). UMP can parse this, follow links, and store results.
+- `"raw"` — the server returns the unstructured raw output (e.g., binary data, plain GeoJSON) without any JSON envelope.
+
+This matters because UMP as an execution proxy often needs to **inspect** the remote response body (e.g., to extract `statusInfo`, store results, or rewrite links). A `raw` response from the remote may be opaque to UMP's business logic.
+
+The `response-mode-policy` is therefore an operator-level decision that controls **what `response` value UMP actually sends to the remote OGC API Processes server**, independently of what the client requested.
+
+It is a parameter separate from `transmission-mode-policy`:
+
+- `transmission-mode-policy` → controls how result *links vs. values* are handled
+- `response-mode-policy` → controls the *encoding format* UMP requests from the remote server
+
+#### Policy values
+
+---
+
+##### `pass-through` (default)
+
+UMP forwards the `response` value from the client execute request to the remote server unchanged. The remote response is proxied as-is.
+
+**Suitable for:**
+- Remote servers whose `raw` response is directly consumable by clients (no UMP-side result storage needed).
+- Scenarios where the operator does not want UMP to interfere with response encoding.
+
+**Risk:** If UMP needs to parse the remote response (e.g., for result storage or link rewriting), a `raw` upstream response may be unreadable. This policy is therefore incompatible with `transmission-mode-policy: emulate-ref` / `emulate-ref-only`.
+
+---
+
+##### `force-document`
+
+UMP always sends `response: "document"` to the remote server, regardless of what the client requested.
+
+- If the client requested `document`: UMP proxies the document response directly.
+- If the client requested `raw`: UMP extracts the raw result value from the document envelope before returning it to the client, preserving the client's expected response shape.
+
+**Suitable for:**
+- Any configuration where result storage is active (UMP must parse the structured response to store results and generate links).
+- Remote servers that produce structured output that benefits from document-level validation and link injection.
+
+**Required when:** `transmission-mode-policy` is `emulate-ref` or `emulate-ref-only`, because UMP must receive a parseable response to write to the result store.
+
+---
+
+##### `force-raw`
+
+UMP always sends `response: "raw"` to the remote server, regardless of what the client requested.
+
+Results are proxied as raw bytes. Result storage and link rewriting are bypassed (UMP cannot inspect raw binary responses).
+
+**Suitable for:**
+- Processes that produce binary or non-JSON output and where no UMP-side storage is needed.
+- Performance-sensitive scenarios where avoiding JSON serialization overhead is important.
+
+**Incompatible with:** `transmission-mode-policy: emulate-ref` / `emulate-ref-only` (no result store without a parseable response).
+
+---
+
+#### Validation rules
+
+When starting the UMP (or reloading `providers.yaml`), the following rules apply:
+
+- `response-mode-policy: pass-through` with `transmission-mode-policy: emulate-ref` or `emulate-ref-only` → **Warning** (client may send `raw`, breaking result storage; consider `force-document`)
+- `response-mode-policy: force-raw` with `transmission-mode-policy: emulate-ref` or `emulate-ref-only` → **Error** (result store requires a parseable `document` response)
+- `response-mode-policy: force-raw` with `result-storage` configured → **Warning** (result store will never be reachable for raw responses)
+
+#### Behaviour overview
+
+| Client `response` | `response-mode-policy` | What UMP sends to remote | What UMP returns to client | Store active? |
+|---|---|---|---|---|
+| `document` | `pass-through` | `document` | `document` (proxy) | Depends on `transmission-mode-policy` |
+| `raw` | `pass-through` | `raw` | `raw` (proxy) | No |
+| `document` | `force-document` | `document` | `document` (proxy) | Depends on `transmission-mode-policy` |
+| `raw` | `force-document` | `document` | raw content extracted from document | Depends on `transmission-mode-policy` |
+| `document` | `force-raw` | `raw` | `raw` (proxy, client expected document) | No |
+| `raw` | `force-raw` | `raw` | `raw` (proxy) | No |
+
+#### Impact on process description
+
+The `response-mode-policy` does **not** modify the externally advertised process description (OGC does not expose `response` as a process-level capability). It is purely an internal forwarding decision. UMP operators configure it in `providers.yaml` at the process level.
+
+Example `providers.yaml` fragment:
+
+```yaml
+modelserver:
+  name: example
+  url: "http://modelserver:5000"
+  processes:
+    hello-world:
+      transmission-mode-policy: emulate-ref
+      response-mode-policy: force-document   # required when emulate-ref is set
+      result-storage: geoserver
+    wind-model:
+      transmission-mode-policy: pass-through
+      response-mode-policy: pass-through     # no store involved, proxy as-is
+```
+
+---
+
+### Output format awareness in UMP
+
+#### The problem
+
+An OGC API Processes execute request body can declare, per output, which media type the client wants and how results should be transmitted:
+
+```json
+{
+  "outputs": {
+    "voronoi_diagram": {
+      "format": {
+        "mediaType": "application/geo+json",
+        "schema": "https://geojson.org/schema/FeatureCollection.json"
+      },
+      "transmissionMode": "reference"
+    },
+    "classification_breaks": {
+      "transmissionMode": "value"
+    }
+  }
+}
+```
+
+The OGC standard also mandates specific HTTP response shapes depending on the combination of execute mode, `response`, transmission mode, and number of outputs (summarised below):
+
+| response | transmission mode | # outputs | HTTP code | Content-Type | Body |
+|---|---|---|---|---|---|
+| `raw` | `value` | 1 | 200 | as per output definition | raw output bytes |
+| `raw` | `value` | >1 | 200 | `multipart/related` | one part per output |
+| `raw` | `reference` | 1 | 204 | — | empty + `Link` headers |
+| `raw` | mixed | >1 | 200 | `multipart/related` | one part per output |
+| `document` | `value` | any | 200 | `application/json` | results document |
+| `document` | `reference` | 1 | — | — | — |
+
+UMP, as a proxy, must be aware of these rules in two places:
+
+1. **Forwarding the execute request**: UMP forwards the `outputs` dict (including per-output `format` and `transmissionMode`) to the remote server unchanged (or adjusted by `transmission-mode-policy`). No additional format resolution is needed at forward time because the remote server handles the OGC rules natively.
+
+2. **Proxying the results** (`GET /jobs/{id}/results`): When UMP fetches results from the remote and returns them to the client, it must know:
+   - Whether the expected response body is binary (e.g., FlatGeobuf, GeoTIFF) or JSON-native (GeoJSON, plain JSON), to decide whether to parse or stream it.
+   - What `Content-Type` to advertise to the client.
+   - When `response-mode-policy: force-document` causes UMP to request `document` from the remote but the client originally requested `raw` with a single output, UMP must unwrap the document envelope and return only the raw output value.
+
+#### What UMP needs to track per job
+
+When a job is created (`POST /processes/{id}/execution`), UMP should capture the **resolved per-output format** alongside the job record, so it is available when proxying results later:
+
+```
+job.output_formats: dict[output_id, ResolvedOutputFormat]
+  output_id:         str        — e.g. "voronoi_diagram"
+  media_type:        str        — canonical IANA type, e.g. "application/geo+json"
+  transmission_mode: str        — "value" | "reference"
+  is_binary:         bool       — True for FlatGeobuf, GeoTIFF, PNG etc.; False for JSON-native types
+```
+
+`is_binary` is the critical flag: it tells UMP whether a remote `document` response will contain a base64-encoded string value (binary) or a JSON object/array (JSON-native), which controls how UMP can safely unwrap or pass through the result.
+
+#### Output format resolution
+
+UMP resolves the per-output format at execute time by reading the process description it already fetched and cached (via `ProcessManager`):
+
+- For each `output_id` in the execute request's `outputs` map:
+  - If the client supplied `format.mediaType`, use it (after validating it is advertised in the process description output schema).
+  - Otherwise pick the highest-priority default from the output schema's `oneOf` branches, using a priority list (e.g., `application/geo+json` > `application/json` > binary types).
+- If the client omitted `outputs` entirely, resolve all described outputs with their defaults (OGC req. 27).
+
+This logic closely mirrors the `OutputSchemaResolver` in the `fastprocesses` package the user referenced. UMP should implement an equivalent `OutputFormatResolver` in `src/ump/core/utils/output_format_resolver.py` (port-free pure function — no I/O). The key difference from the `fastprocesses` version is that UMP does **not** serialize results itself; it only needs the resolved `(media_type, is_binary, transmission_mode)` triple per output.
+
+#### Results proxy behavior
+
+When serving `GET /jobs/{id}/results`, UMP fetches the result from the remote server. The behavior depends on `response-mode-policy` and the stored `output_formats`:
+
+| `response-mode-policy` | Client's original `response` | Remote response shape | UMP action |
+|---|---|---|---|
+| `pass-through` | `raw` | raw bytes | Stream directly; use stored `media_type` for `Content-Type` |
+| `pass-through` | `document` | JSON document | Proxy JSON document as-is |
+| `force-document` | `raw`, 1 output | JSON document with value envelope | Unwrap the `value` field; return raw bytes with stored `media_type`. If `is_binary`, base64-decode first. |
+| `force-document` | `document` | JSON document | Proxy JSON document as-is |
+| `force-raw` | any | raw bytes | Stream directly; use stored `media_type` |
+
+#### What is reusable from `fastprocesses`
+
+| Component | Relevance to UMP |
+|---|---|
+| `OutputSchemaResolver.resolve()` | Directly applicable. UMP needs the same schema-walking logic to derive `(media_type, is_binary)` per output. Adapt rather than import directly (keep UMP's core free of fastprocesses dependency). |
+| `ResolvedOutputFormat` dataclass | The `output_id`, `media_type`, `is_binary`, `transmission_mode` fields are all needed. `schema_branch` is only needed during resolution, not at proxy time. |
+| `_media_type_from_schema`, `_find_branch`, `_default_media_type`, `_is_binary` | Internal helpers — replicate the logic in `src/ump/core/utils/output_format_resolver.py`. |
+| `serialize_result` / `BaseProcessResult` | **Not** applicable to UMP. UMP is a proxy; it never instantiates or calls process logic. Result serialization is handled by streaming the remote response body. |
+| `_build_document_response` | Partially applicable: the unwrapping direction (`document → raw`) is the inverse of what fastprocesses does (`result → document`). UMP needs the inverse: extract `value` from a document envelope and return raw bytes. |
+
+#### Files to add / modify
+
+- `src/ump/core/utils/output_format_resolver.py` — pure `resolve_output_formats(process: Process, requested_outputs: dict) -> dict[str, ResolvedOutputFormat]` function.
+- `src/ump/core/models/job.py` — add `output_formats: dict[str, ResolvedOutputFormat]` field (serializable to JSON for DB storage).
+- `src/ump/core/managers/job_manager.py` — call `resolve_output_formats` at job creation time and store on the job record.
+- `src/ump/adapters/web/fastapi.py` — update `GET /jobs/{id}/results` route to read `job.output_formats` and apply the correct proxy/unwrap logic.
