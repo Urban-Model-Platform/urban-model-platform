@@ -5,6 +5,29 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "ump",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "flask",
+            "envFile": "${workspaceFolder}/.env",
+            "env": {
+                "FLASK_APP": "src/ump/main.py",
+                "FLASK_DEBUG": "1"
+            },
+            "args": [
+                "--debug",
+                "run",
+                "--no-debugger",
+                "-p",
+                // "5005",
+                "${command:pickArgs}"
+            ],
+            "jinja": true,
+            "autoStartBrowser": false,
+            "postDebugTask": "stop-postgis-container",
+            "justMyCode": false,
+        },
+        {
             "name": "ump + db",
             "type": "debugpy",
             "request": "launch",
