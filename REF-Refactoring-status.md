@@ -262,11 +262,12 @@ Rationale:
 Immediate actionable checklist (updated):
 Current focus has shifted with new capabilities; checklist re-aligned:
 - [x] Add `/jobs` (list) and `/jobs/{id}` (detail) endpoints (routes exist, backed by InMemoryJobRepository).
-- [ ] **SQLModel JobRepository + Alembic migrations + design smell fix** ← current step (see detailed plan below).
+- [x] **SQLModel JobRepository + Alembic migrations + design smell fix** (complete).
 - [ ] Implement inputs separation & `/jobs/{id}/inputs` (no inputs in statusInfo).
 - [ ] Status history persistence (append snapshots) & optional events.
 - [ ] Integrate `ResultStoragePort` for optional persistence on success.
 - [ ] Tests: JobManager polling (including timeout), immediate results synthesis, retry verification, link normalization, /jobs results endpoint.
+- [ ] Job execution pipeline: implement `PipelineStep` subclasses and migrate `create_and_forward` → `create_and_forward_ii` (see pipeline plan above).
 - [ ] Optional: adaptive polling/backoff per provider.
 - [ ] Optional: auth rules (JWT) restricting job visibility.
 
@@ -431,6 +432,74 @@ Each method opens its own `async_sessionmaker(engine)` context. No session leaks
 The factory in `main.py` creates an `async_sessionmaker` and injects it; the repo uses it for all operations. Better for transactional grouping of multi-step operations.
 
 Recommendation: Option B (session factory injected), deferred to async session from `sqlalchemy.ext.asyncio`. The `InMemoryJobRepository` needs no changes.
+
+---
+
+### Job execution pipeline — incremental refactoring plan
+
+#### Motivation
+
+`create_and_forward` in `JobManager` is a monolithic orchestration method (~200 lines) that handles validation, local job creation, HTTP forwarding, status derivation, finalization, and polling scheduling in one sequential flow. As complexity grows (output format resolution, `transmission-mode-policy`, `response-mode-policy`, result storage), each new concern requires inserting conditional logic into an already dense method.
+
+The `JobExecutionPipeline` pattern decomposes this into a sequence of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort the pipeline by setting `context.should_halt = True`.
+
+#### Current state (scaffolding only — steps not yet implemented)
+
+The following classes live in `src/ump/core/managers/job_manager.py`:
+
+```python
+class PipelineStep(ABC):           # abstract base — one async process(context) method
+class ExecutionResult(dataclass):  # output of a completed pipeline run
+class JobExecutionContext(BaseModel):  # mutable shared state across steps
+class JobExecutionPipeline:        # runs steps in sequence; stops on should_halt
+```
+
+`create_and_forward_ii` is the new entrypoint that delegates to the pipeline. It currently runs an empty step list and is therefore a no-op. **`create_and_forward` remains the active path in production.**
+
+#### Planned pipeline steps
+
+Each becomes a concrete `PipelineStep` subclass, ideally in its own file under `src/ump/core/managers/steps/`:
+
+| Step class | Responsibility | Source logic to extract |
+|---|---|---|
+| `ValidateAndResolveStep` | Validate `process_id`, resolve provider prefix and raw id | `_resolve_provider` |
+| `CreateLocalJobStep` | Create `Job` domain object with local UUID and inline inputs | `_init_job` |
+| `PersistAcceptedStep` | Persist job + initial `accepted` statusInfo snapshot; notify observers | `_persist_accepted` + `_notify_job_created` |
+| `ForwardToProviderStep` | POST to remote OGC endpoint with retry/backoff | `_safe_forward` |
+| `HandleProviderResponseStep` | Detect upstream error responses (≥ 400) and propagate or absorb | `_handle_upstream_error_response` |
+| `DeriveStatusInfoStep` | Select derivation strategy (direct body / Location follow / immediate results / failed) | `_derive_status_info` + `StatusDerivationOrchestrator` |
+| `FinalizeJobStep` | Persist derived status, update job record, notify observers | `_finalize_job` |
+| `InitiatePollingStep` | Schedule background poll loop if job is non-terminal and has `remote_status_url` | `_schedule_poll` call |
+
+Future steps can be inserted at any position without touching the others:
+
+- `ResolveOutputFormatsStep` — capture per-output `(media_type, is_binary)` from execute request + process description (output format awareness proposal)
+- `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` in payload before forwarding
+- `ApplyResponseModePolicyStep` — override `response` field sent to remote
+
+#### Migration strategy
+
+1. Implement steps one at a time, each fully unit-tested against a minimal `JobExecutionContext` fixture.
+2. Wire implemented steps into `_build_execution_pipeline()`.
+3. Run `create_and_forward_ii` in parallel (shadow mode) alongside `create_and_forward` in tests — compare outputs.
+4. When all steps are implemented and all tests pass against `_ii`, switch the active call in `ProcessManager.execute_process` from `create_and_forward` to `create_and_forward_ii`.
+5. Delete `create_and_forward` and rename `_ii`.
+
+#### `JobExecutionContext` field summary
+
+```python
+class JobExecutionContext(BaseModel):
+    job: Optional[Job]                  # set by CreateLocalJobStep
+    process_id: str                     # set by caller
+    provider: Optional[ProviderConfig]  # set by ValidateAndResolveStep
+    execute_payload: Dict[str, Any]     # the normalized ExecuteRequest payload
+    headers: Dict[str, str]             # forwarding headers (Prefer, etc.)
+    status_info: Optional[JobStatusInfo]# set by DeriveStatusInfoStep
+    should_halt: bool                   # set by any step to abort the pipeline
+    response: Optional[Dict[str, Any]]  # set when a step produces a direct HTTP response
+```
+
+`to_result()` converts the context into an `ExecutionResult`, which has a `to_response()` method returning the `{status, headers, body}` dict that the web adapter expects.
 
 Minimal DDD guidance (commands, events, aggregates) - lightweight, incremental
 
