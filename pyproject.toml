@@ -67,6 +67,9 @@ uvicorn = "^0.37.0"
 fastapi = "^0.118.1"
 jinja2 = "^3.1.6"
 tenacity = "^8.2.3"
+sqlmodel = "^0.0.39"
+alembic = "^1.14"
+asyncpg = "^0.30"
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests
