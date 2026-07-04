@@ -34,7 +34,7 @@ def main():
     process_id_validator = ColonProcessId()
     # Select job repository adapter based on UMP_JOB_STORE setting
     if app_settings.UMP_JOB_STORE == "postgres":
-        from ump.adapters.sqlmodel_job_repository import SQLModelJobRepository
+        from ump.adapters.job_repository_sql import SQLModelJobRepository
         if not app_settings.UMP_DATABASE_URL:
             raise RuntimeError(
                 "UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres"
