@@ -13,9 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urljoin
+
+from pydantic import BaseModel
 
 from ump.core.config import JobManagerConfig
 from ump.core.exceptions import OGCProcessException
@@ -31,9 +35,99 @@ from ump.core.managers.status_derivation_orchestrator import (
 from ump.core.models.job import Job, JobStatusInfo, StatusCode
 from ump.core.models.link import Link
 from ump.core.models.ogcp_exception import OGCExceptionResponse
+from ump.core.models.providers_config import ProviderConfig
 from ump.core.settings import logger
 
 REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
+
+
+# ---------------------------------------------------------------------------
+# Pipeline primitives (for future refactoring of create_and_forward)
+# ---------------------------------------------------------------------------
+
+
+class PipelineStep(ABC):
+    """Abstract base for a single step in the job execution pipeline.
+
+    Each step receives the shared ``JobExecutionContext``, mutates it in place
+    (or sets ``should_halt`` to abort early), and returns control to the pipeline.
+    """
+
+    @abstractmethod
+    async def process(self, context: JobExecutionContext) -> None: ...
+
+
+@dataclass
+class ExecutionResult:
+    """Distilled output of a completed pipeline execution."""
+
+    job_id: str
+    status_info: Optional[JobStatusInfo] = None
+    response_status: int = 201
+    response_headers: Dict[str, str] = field(default_factory=dict)
+    response_body: Dict[str, Any] = field(default_factory=dict)
+
+    def to_response(self) -> Dict[str, Any]:
+        return {
+            "status": self.response_status,
+            "headers": self.response_headers,
+            "body": self.response_body,
+        }
+
+
+class JobExecutionContext(BaseModel):
+    """Carries mutable state through pipeline steps.
+
+    Passed by reference through each ``PipelineStep.process`` call.
+    Steps mutate fields directly; set ``should_halt = True`` to abort.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    job: Optional[Job] = None
+    process_id: str = ""
+    provider: Optional[ProviderConfig] = None
+    execute_payload: Dict[str, Any] = {}
+    headers: Dict[str, str] = {}
+    status_info: Optional[JobStatusInfo] = None
+    should_halt: bool = False
+    response: Optional[Dict[str, Any]] = None
+
+    def to_result(self) -> ExecutionResult:
+        job_id = self.job.id if self.job else ""
+        if self.response:
+            return ExecutionResult(
+                job_id=job_id,
+                status_info=self.status_info,
+                response_status=self.response.get("status", 201),
+                response_headers=self.response.get("headers", {}),
+                response_body=self.response.get("body", {}),
+            )
+        body = self.status_info.model_dump() if self.status_info else {}
+        return ExecutionResult(
+            job_id=job_id,
+            status_info=self.status_info,
+            response_status=201,
+            response_headers={"Location": f"/jobs/{job_id}"},
+            response_body=body,
+        )
+
+
+class JobExecutionPipeline:
+    """Runs a sequence of ``PipelineStep`` instances against a shared context.
+
+    Stops early when any step sets ``context.should_halt = True``.
+    """
+
+    def __init__(self, steps: List[PipelineStep]) -> None:
+        self.steps = steps
+
+    async def execute(self, context: JobExecutionContext) -> ExecutionResult:
+        for step in self.steps:
+            if context.should_halt:
+                break
+            await step.process(context)
+        return context.to_result()
 
 
 class TransientOGCError(OGCProcessException):
@@ -44,29 +138,6 @@ class TransientOGCError(OGCProcessException):
     """
 
     pass
-
-
-class JobExecutionPipeline:
-    def __init__(self, steps: List[PipelineStep]):
-        self.steps = steps
-    
-    async def execute(self, context: JobExecutionContext) -> ExecutionResult:
-        for step in self.steps:
-            if context.should_halt:
-                break
-            await step.process(context)
-        return context.to_result()
-
-class JobExecutionContext(BaseModel):
-    """Carries state through pipeline steps"""
-    job: Job
-    process_id: str
-    provider: Provider
-    execute_payload: Dict
-    headers: Dict
-    status_info: Optional[JobStatusInfo]
-    should_halt: bool = False
-    response: Optional[Dict] = None
 
 
 class JobManager:
@@ -104,39 +175,6 @@ class JobManager:
 
         # Initialize status derivation orchestrator
         self._status_orchestrator = StatusDerivationOrchestrator(http_client)
-
-    def create_and_forward_ii(
-        self,
-        process_id: str,
-        execute_payload: Optional[Dict[str, Any]],
-        headers: Dict[str, str],
-    ) -> Dict[str, Any]:
-        
-        # Initialize execution context
-        context = JobExecutionContext(
-            process_id=process_id,
-            execute_payload=execute_payload,
-            headers=headers
-        )
-
-        # Create and run pipeline
-        pipeline = self._build_execution_pipeline()
-        result = await pipeline.execute(context)
-        
-        return result.to_response()
-
-    def _build_execution_pipeline(self) -> ExecutionPipeline:
-        """Factory method to construct the pipeline."""
-        return ExecutionPipeline([
-            ValidateAndResolveStep(self._validator, self._providers),
-            CreateLocalJobStep(self._repo),
-            PersistAcceptedStep(self._repo, self._observers),
-            ForwardToProviderStep(self._http, self._retry),
-            HandleProviderResponseStep(),
-            DeriveStatusInfoStep(self._status_orchestrator),
-            FinalizeJobStep(self._repo, self._observers),
-            InitiatePollingStep(self._poll_scheduler)
-        ])
 
     async def _notify_job_created(self, job: Job, status_info: JobStatusInfo) -> None:
         """Notify all observers that a job was created."""
@@ -177,6 +215,35 @@ class JobManager:
                     f"[observer:error] on_job_completed failed observer={type(observer).__name__} "
                     f"job_id={job.id} error={exc}"
                 )
+
+    async def create_and_forward_ii(
+        self,
+        process_id: str,
+        execute_payload: Optional[Dict[str, Any]],
+        headers: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """Pipeline-based execution entrypoint (future replacement for create_and_forward).
+
+        Builds a ``JobExecutionPipeline`` from named steps and runs the context
+        through them.  Steps are not yet implemented — this method is scaffolding
+        for the incremental migration from the monolithic ``create_and_forward``.
+        """
+        context = JobExecutionContext(
+            process_id=process_id,
+            execute_payload=execute_payload or {},
+            headers=headers,
+        )
+        pipeline = self._build_execution_pipeline()
+        result = await pipeline.execute(context)
+        return result.to_response()
+
+    def _build_execution_pipeline(self) -> JobExecutionPipeline:
+        """Factory method to construct the step pipeline.
+
+        Steps are intentionally empty stubs — implement each as a concrete
+        ``PipelineStep`` subclass and wire them here incrementally.
+        """
+        return JobExecutionPipeline(steps=[])
 
     async def create_and_forward(
         self,
