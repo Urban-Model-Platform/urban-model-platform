@@ -32,7 +32,16 @@ def main():
     providers_port.start_file_watcher()
     http_client = AioHttpClientAdapter()
     process_id_validator = ColonProcessId()
-    job_repo = InMemoryJobRepository("scratch/ump_jobs")
+    # Select job repository adapter based on UMP_JOB_STORE setting
+    if app_settings.UMP_JOB_STORE == "postgres":
+        from ump.adapters.sqlmodel_job_repository import SQLModelJobRepository
+        if not app_settings.UMP_DATABASE_URL:
+            raise RuntimeError(
+                "UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres"
+            )
+        job_repo = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
+    else:
+        job_repo = InMemoryJobRepository("scratch/ump_jobs")
     site_info_adapter = StaticSiteInfoAdapter()
 
     # Central logging configuration BEFORE injecting adapter so uvicorn adopts level/format
@@ -46,7 +55,6 @@ def main():
             providers_port,
             client,
             process_id_validator=process_id_validator,
-            job_repository=job_repo,
         )
 
     def job_manager_factory(client, process_manager):
@@ -88,6 +96,7 @@ def main():
         process_manager_factory=process_manager_factory,
         http_client=http_client,
         job_manager_factory=job_manager_factory,
+        job_repo=job_repo,
         site_info=site_info_adapter,
     )
 
