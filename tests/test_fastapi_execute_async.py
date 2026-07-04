@@ -102,7 +102,7 @@ def make_app_with_factories(http_client: HttpClientPort, provider: FakeProvider 
     )
     
     def process_manager_factory(client: HttpClientPort):
-        return ProcessManager(providers_service, client, process_id_validator=validator, job_repository=job_repo)
+        return ProcessManager(providers_service, client, process_id_validator=validator)
     
     def job_manager_factory(client: HttpClientPort, process_manager: ProcessManager):
         from ump.core.managers.observers import StatusHistoryObserver, PollingSchedulerObserver, ResultsVerificationObserver
@@ -128,7 +128,7 @@ def make_app_with_factories(http_client: HttpClientPort, provider: FakeProvider 
         process_manager.attach_job_manager(jm)
         return jm
     
-    return create_app(process_manager_factory=process_manager_factory, http_client=http_client, job_manager_factory=job_manager_factory, site_info=None)
+    return create_app(process_manager_factory=process_manager_factory, http_client=http_client, job_manager_factory=job_manager_factory, job_repo=job_repo, site_info=None)
 
 def test_forward_valid_statusinfo():
     """Provider returns statusInfo body + Location header.
