@@ -9,56 +9,120 @@ Refactor the Urban Model Platform (UMP) codebase to follow hexagonal architectur
 - Adapters implement ports and are injected into the core.
 - Keep web adapter, persistence, and other infra concerns outside of core.
 
-## Current state (what's implemented)
+## Current state — complete picture
 
-- Provider config
-  - `src/ump/adapters/provider_config_file_adapter.py` implemented
-    - Atomic updates, file-watcher for configmap updates, thread-safe ModelServers store.
-  - `ProvidersPort` interface in `src/ump/core/interfaces/providers.py` exists and adapter implements it.
+_Last updated: 2026-07-04_
 
-- Process ID validation
-  - `ProcessIdValidatorPort` added (`src/ump/core/interfaces/process_id_validator.py`).
-  - `RegexProcessIdValidator` / `ColonProcessId` adapter implemented under `src/ump/adapters/`.
-  - `ProcessManager` delegates pattern validation and creation to validator adapter.
+### ✅ Infrastructure / cross-cutting
 
-- HTTP client
-  - `HttpClientPort` interface added with `__aenter__` / `__aexit__` for async context manager.
-  - `AioHttpClientAdapter` implemented to map remote errors to domain exceptions.
+| Component | Status | Location |
+|---|---|---|
+| Provider config (file-watcher, atomic updates, thread-safe store) | ✅ | `src/ump/adapters/provider_config_file_adapter.py` |
+| `ProvidersPort` interface | ✅ | `src/ump/core/interfaces/providers.py` |
+| Process ID validation (`ColonProcessId`) | ✅ | `src/ump/adapters/colon_process_id_validator.py` |
+| `ProcessIdValidatorPort` interface | ✅ | `src/ump/core/interfaces/process_id_validator.py` |
+| HTTP client (`AioHttpClientAdapter`) | ✅ | `src/ump/adapters/aiohttp_client_adapter.py` |
+| `HttpClientPort` interface | ✅ | `src/ump/core/interfaces/http_client.py` |
+| Retry adapter (Tenacity) | ✅ | `src/ump/adapters/retry_tenacity.py` |
+| Logging port + adapter | ✅ | `src/ump/adapters/logging_adapter.py` |
+| Settings (`UmpSettings` via pydantic-settings) | ✅ | `src/ump/core/settings.py` |
+| `ump` + `ump-migrate` CLI commands (Poetry scripts) | ✅ | `pyproject.toml`, `src/ump/cli.py` |
 
-- ProcessManager
-  - `src/ump/core/managers/process_manager.py` refactored:
-    - Depends on `ProvidersPort`, `HttpClientPort`, and `ProcessIdValidatorPort`.
-    - Implements `fetch_processes_for_provider(provider_name)` helper.
-    - Implements `get_all_processes()` which runs per-provider fetches concurrently with `asyncio.gather()`.
-    - Adds an in-memory per-provider cache via `ProcessCache` helper.
+### ✅ Web adapter & wiring
 
-- Cache
-  - Small `ProcessCache` class added to `src/ump/core/managers/process_cache.py` for expiry-based in-memory caching.
+| Component | Status | Location |
+|---|---|---|
+| FastAPI web adapter with lifespan DI | ✅ | `src/ump/adapters/web/fastapi.py` |
+| Landing page (Jinja2 + JSON fallback) | ✅ | `src/ump/adapters/web/templates/`, `static/` |
+| Route-based API versioning (`/v1.0/`) | ✅ | `src/ump/adapters/web/fastapi.py` |
+| Composition root (all adapters wired in `main.py`) | ✅ | `src/ump/main.py` |
+| Site info adapter (landing page routes) | ✅ | `src/ump/adapters/site_info_static_adapter.py` |
 
-- Logging
-  - `LoggingPort` and `LoggingAdapter` created.
-  - A `logger` instance exposed via `src/ump/core/settings.py`.
+### ✅ Process management
 
-- Web adapter
-  - `src/ump/adapters/web/fastapi.py` adapted to accept dependencies and create `ProcessManager` in the lifespan using an injected `http_client`.
+| Component | Status | Location |
+|---|---|---|
+| `ProcessManager` (concurrent fetching, per-provider cache) | ✅ | `src/ump/core/managers/process_manager.py` |
+| `ProcessCache` / `ProcessListCache` (TTL-based in-memory) | ✅ | `src/ump/core/managers/process_cache.py` |
+| Process handler pipeline (ID enforcement, link rewriting, metadata leniency) | ✅ | `src/ump/core/managers/process_manager.py` |
+| `GET /processes` + `GET /processes/{id}` routes | ✅ | `src/ump/adapters/web/fastapi.py` |
 
-- Main entrypoint
-  - `src/ump/main.py` wires provider config adapter, process manager and FastAPI adapter and starts Uvicorn.
+### ✅ Job management (Feature III — core complete)
 
-## Files changed (key ones)
+| Component | Status | Location |
+|---|---|---|
+| `Job` domain model | ✅ | `src/ump/core/models/job.py` |
+| `JobRepositoryPort` interface | ✅ | `src/ump/core/interfaces/job_repository.py` |
+| `InMemoryJobRepository` (TDD / default) | ✅ | `src/ump/adapters/job_repository_inmemory.py` |
+| `SQLModelJobRepository` (PostgreSQL via asyncpg) | ✅ | `src/ump/adapters/sqlmodel_job_repository.py` |
+| Alembic migrations (`jobs` + `job_status_history` tables) | ✅ | `migrations/versions/0001_create_jobs_tables.py` |
+| `UMP_JOB_STORE=memory\|postgres` adapter selection | ✅ | `src/ump/main.py` |
+| `JobManager` (orchestration: create → forward → derive → persist → poll) | ✅ | `src/ump/core/managers/job_manager.py` |
+| `ExecuteRequest` normalization model | ✅ | `src/ump/core/models/execute_request.py` |
+| Remote status polling with TTW timeout | ✅ | `src/ump/core/managers/job_manager.py` |
+| Immediate results fallback (no-statusInfo provider) | ✅ | `src/ump/core/managers/job_manager.py` |
+| Link normalization (local self/results links) | ✅ | `src/ump/core/managers/job_manager.py` |
+| Observer pattern (status history, polling scheduler, results verification) | ✅ | `src/ump/core/managers/observers.py` |
+| Status derivation strategies (orchestrator + strategy pattern) | ✅ | `src/ump/core/managers/status_derivation_orchestrator.py` |
+| `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/results` routes | ✅ | `src/ump/adapters/web/fastapi.py` |
+| `POST /processes/{id}/execution` route | ✅ | `src/ump/adapters/web/fastapi.py` |
+| `JobExecutionPipeline` scaffolding (classes only — no step implementations yet) | ✅ | `src/ump/core/managers/job_manager.py` |
 
-- `src/ump/core/interfaces/providers.py` (ProvidersPort)
-- `src/ump/adapters/provider_config_file_adapter.py` (Provider config file adapter)
-- `src/ump/core/interfaces/process_id_validator.py` (Process ID validator port)
-- `src/ump/adapters/regex_process_id_validator.py` (validator implementation)
-- `src/ump/core/interfaces/http_client.py` (HttpClientPort)
-- `src/ump/adapters/aiohttp_client_adapter.py` (HTTP adapter)
-- `src/ump/core/managers/process_manager.py` (ProcessManager with async fetching and cache)
-- `src/ump/core/managers/process_cache.py` (ProcessCache)
-- `src/ump/adapters/web/fastapi.py` (web adapter wiring)
-- `src/ump/core/settings.py` (logger exposure)
-- `src/ump/adapters/logging_adapter.py` (logging adapter)
-- `src/ump/main.py` (app entrypoint)
+### ✅ Developer tooling
+
+| Component | Status | Location |
+|---|---|---|
+| Mock OGC API Processes server (echo, hello-world, slow, failing-job) | ✅ | `scripts/mock_ogc_server.py` |
+| `providers.yaml` (correct list-based format, includes mock entry) | ✅ | `providers.yaml` |
+| `providers.yaml.example` (documents all auth types + mock server) | ✅ | `providers.yaml.example` |
+| `docker-compose-dev.yaml` `mock-ogc-server` service | ✅ | `docker-compose-dev.yaml` |
+
+---
+
+## Key files
+
+### Core interfaces
+- `src/ump/core/interfaces/providers.py` — `ProvidersPort`
+- `src/ump/core/interfaces/process_id_validator.py` — `ProcessIdValidatorPort`
+- `src/ump/core/interfaces/http_client.py` — `HttpClientPort`
+- `src/ump/core/interfaces/job_repository.py` — `JobRepositoryPort`
+- `src/ump/core/interfaces/observers.py` — `JobStateObserver`
+- `src/ump/core/interfaces/retry.py` — `RetryPort`
+
+### Core models
+- `src/ump/core/models/job.py` — `Job`, `JobStatusInfo`, `StatusCode`, `JobList`
+- `src/ump/core/models/execute_request.py` — `ExecuteRequest`, `ResponseMode`, `TransmissionMode`
+- `src/ump/core/models/process.py` — `Process`, `ProcessSummary`, `ProcessList`
+- `src/ump/core/models/providers_config.py` — `ProviderConfig`, `ProcessConfig`, `ProvidersConfig`
+- `src/ump/core/config.py` — `JobManagerConfig`
+- `src/ump/core/settings.py` — `UmpSettings` (env vars)
+
+### Adapters
+- `src/ump/adapters/provider_config_file_adapter.py`
+- `src/ump/adapters/colon_process_id_validator.py`
+- `src/ump/adapters/aiohttp_client_adapter.py`
+- `src/ump/adapters/job_repository_inmemory.py`
+- `src/ump/adapters/sqlmodel_job_repository.py` — ORM models + `SQLModelJobRepository`
+- `src/ump/adapters/retry_tenacity.py`
+- `src/ump/adapters/logging_adapter.py`
+- `src/ump/adapters/site_info_static_adapter.py`
+- `src/ump/adapters/web/fastapi.py` — all routes, lifespan, middleware
+
+### Managers
+- `src/ump/core/managers/process_manager.py`
+- `src/ump/core/managers/job_manager.py`
+- `src/ump/core/managers/status_derivation_orchestrator.py`
+- `src/ump/core/managers/observers.py`
+- `src/ump/core/managers/process_cache.py`
+
+### Infrastructure
+- `src/ump/main.py` — composition root + Uvicorn entrypoint
+- `src/ump/cli.py` — `ump` and `ump-migrate` Poetry scripts
+- `migrations/env.py` — Alembic config (reads `UMP_DATABASE_*` env vars)
+- `migrations/versions/0001_create_jobs_tables.py`
+- `scripts/mock_ogc_server.py` — standalone development mock server
+
+
 
 ## Outstanding issues / TODOs
 
@@ -128,12 +192,264 @@ Notes:
 - Link rewriting (controlled by `UMP_REWRITE_REMOTE_LINKS`) still happens inside the manager as a handler in the processing pipeline; it will rewrite remote links into local API links when enabled.
 
 
-#### Feature III: /execution endpoint, Jobs, polling, and local storage (Step 1 implemented)
+#### ✅ Feature III: Execution proxy, Jobs, and Persistence
 
-Current status (Step 1 COMPLETE - async execution forwarding with local job lifecycle):
+The goal of Feature III is to enable UMP to act as an OGC API Processes execution proxy: forwarding execution requests to remote model servers, maintaining a local federated job registry with full status lifecycle, and persisting jobs durably in PostgreSQL.
 
-Implemented pieces (updated Nov 14 2025):
-1. `Job` model (`src/ump/core/models/job.py`) including: `id` (UUID), `process_id`, `provider_name`, `remote_job_id`, `remote_status_url`, timestamps, `status_code`, `status_info` snapshot history, and helpers like `is_in_terminal_state()` plus documented ID separation rationale (local vs remote vs public id).
+**Feature III is functionally complete for the core use case.** The remaining items are refinements and extensions.
+
+##### Quick status
+
+| Area | Status |
+|---|---|
+| Job model, ports, in-memory repo | ✅ |
+| JobManager: forwarding, status derivation, polling, retry, timeout | ✅ |
+| ExecuteRequest normalization | ✅ |
+| /jobs, /jobs/{id}, /jobs/{id}/results routes | ✅ |
+| POST /processes/{id}/execution route | ✅ |
+| SQLModel JobRepository + Alembic migration | ✅ |
+| Observer pattern (history, polling scheduler, results verification) | ✅ |
+| /jobs/{id}/inputs endpoint | 🔲 |
+| Status history reads (DB writes exist; no read endpoint yet) | 🔲 |
+| Expanded test coverage | 🔲 |
+| ResultStoragePort placeholder injection | 🔲 |
+| Large-object input separation | 🔲 |
+
+##### ✅ What is implemented
+
+**Domain models**
+
+- `Job` (`src/ump/core/models/job.py`): `id` (local UUID), `process_id`, `provider`, `remote_job_id`, `remote_status_url`, timestamps, `status`, `status_info` snapshot, inline `inputs`, `inputs_url`, `links`, `diagnostic`, `version`. Helper methods: `apply_status_info()`, `touch()`, `is_in_terminal_state()`. ID separation rationale documented in code (local UUID / remote id / public route id are kept distinct).
+- `JobStatusInfo` / `StatusCode`: mirrors OGC `statusInfo.yaml` schema.
+- `ExecuteRequest` (`src/ump/core/models/execute_request.py`): `from_raw()` factory normalizes inline/ref inputs, outputs, `response` mode, `transmissionMode`, and subscriber callbacks. `as_provider_payload()` converts to the wire format sent to the remote.
+
+**Ports**
+
+- `JobRepositoryPort` (`src/ump/core/interfaces/job_repository.py`): `create`, `get`, `update`, `list`, `mark_failed`, `append_status`, `append_event`.
+- `JobStateObserver` (`src/ump/core/interfaces/observers.py`): `on_job_created`, `on_status_changed`, `on_job_completed`.
+
+**Adapters**
+
+- `InMemoryJobRepository` — async-safe, thread-safe, with optional JSON dump to `UMP_JOB_DUMP_DIR`. Used by default and in all tests.
+- `SQLModelJobRepository` — PostgreSQL-backed via asyncpg. Selected when `UMP_JOB_STORE=postgres`. Uses two-model ORM pattern (see persistence notes below).
+
+**JobManager** (`src/ump/core/managers/job_manager.py`)
+
+Orchestrates the full async execution lifecycle via `create_and_forward`:
+1. Resolve provider from `process_id` (with prefix extraction).
+2. Create local job immediately with `accepted` statusInfo snapshot; persist.
+3. Forward execute request to remote provider with retry/backoff (`TenacityRetryAdapter`).
+4. Derive initial `StatusInfo` from provider response via `StatusDerivationOrchestrator` (strategy pattern: direct body / Location header follow-up / immediate results fallback / failed).
+5. Normalise remote job ID to local UUID; enrich missing timestamps and progress.
+6. Finalize: persist derived status, notify observers.
+7. Schedule background polling loop if job is non-terminal and has `remote_status_url`. Polling stops on terminal state, TTW timeout (`UMP_REMOTE_JOB_TTW`), or graceful shutdown.
+
+Error handling: transport errors, upstream 4xx/5xx, missing statusInfo, and TTW timeout are all normalized into `failed` snapshots with diagnostic messages. Returns HTTP 201 with `Location: /jobs/{local_id}` in all cases.
+
+**Observer pattern** (`src/ump/core/managers/observers.py`):
+- `StatusHistoryObserver` — calls `repo.append_status()` on every status transition (writes to `job_status_history` table in postgres).
+- `PollingSchedulerObserver` — calls `_schedule_poll()` when a non-terminal job needs polling.
+- `ResultsVerificationObserver` — attempts to fetch remote results for immediate-success jobs; downgrades to `failed` if unavailable.
+
+**Routes** (on parent app and each versioned sub-app):
+- `POST /processes/{id}/execution` → `JobManager.create_and_forward`
+- `GET /jobs` → list all jobs (from repo)
+- `GET /jobs/{id}` → current `statusInfo` snapshot
+- `GET /jobs/{id}/results` → remote results proxy (404 if not successful)
+
+**Link normalization**: always inject local `self` link with stable UUID; add `results` link on success; filter out any remote self/results links that contain foreign job identifiers.
+
+**Lifecycle sequence (happy path)**:
+1. `POST /processes/{id}/execution` with raw JSON body.
+2. Web adapter parses body; `ExecuteRequest.from_raw` normalizes.
+3. `ProcessManager.execute_process` delegates to `JobManager.create_and_forward`.
+4. Job created locally (status=accepted); forwarded to provider.
+5. StatusInfo derived; job updated (running/successful/failed).
+6. Polling scheduled if non-terminal.
+7. Returns HTTP 201 + `Location` header + current statusInfo body.
+
+**ID strategy** (documented in code):
+- Local UUID: internal canonical key; always used for public routes.
+- Remote job id: stored for correlation/polling; never exposed externally.
+- Public route id = local UUID (no leakage of provider semantics).
+
+##### ✅ Persistence layer (SQLModel + Alembic)
+
+**Two-model ORM pattern** (hexagonal-correct): the core `Job` (`BaseModel`) stays pure Pydantic with no ORM annotations. The adapter owns separate ORM classes:
+
+```
+src/ump/core/models/job.py                 ← domain model (pure Pydantic)
+src/ump/adapters/sqlmodel_job_repository.py
+  ├── JobRecord(SQLModel, table=True)              ← ORM model
+  ├── JobStatusHistoryRecord(SQLModel, table=True) ← history ORM model
+  └── SQLModelJobRepository(JobRepositoryPort)
+        ├── JobRecord.from_domain(job) -> JobRecord
+        └── JobRecord.to_domain()     -> Job
+```
+
+The core never imports `sqlmodel` or `sqlalchemy`. The `from_domain`/`to_domain` bridge is the only contact point.
+
+**JSONB columns**: `status_info`, `inputs`, and `links` use `sa_column=Column(JSONB)` — without this SQLModel defaults to TEXT, losing native JSONB operators.
+
+**DB schema**:
+```sql
+CREATE TABLE jobs (
+    id UUID PRIMARY KEY,
+    process_id TEXT, provider TEXT, remote_job_id TEXT, remote_status_url TEXT,
+    status TEXT,              -- denormalized for WHERE filters
+    created TIMESTAMPTZ NOT NULL, updated TIMESTAMPTZ,
+    status_info JSONB,        -- current OGC statusInfo snapshot
+    inputs JSONB,             -- inline inputs (small payloads only)
+    inputs_url TEXT, inputs_storage TEXT, inputs_size INT, inputs_checksum TEXT,
+    links JSONB,              -- list[Link]
+    diagnostic TEXT, version INT NOT NULL DEFAULT 0
+);
+CREATE TABLE job_status_history (
+    id BIGSERIAL PRIMARY KEY,
+    job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    seq INT NOT NULL, snapshot JSONB NOT NULL, recorded_at TIMESTAMPTZ NOT NULL
+);
+-- Indexes: status, provider, process_id, job_id+seq
+```
+
+**Alembic**: `env.py` reads `UMP_DATABASE_URL` or constructs from individual `UMP_DATABASE_*` vars. Strips `asyncpg` prefix for sync Alembic engine. Run migrations with:
+```bash
+ump-migrate                  # uses env vars
+ump-migrate downgrade -1     # any alembic subcommand
+```
+
+**Adapter selection** via `UMP_JOB_STORE`:
+- `memory` (default) — `InMemoryJobRepository`, no DB required, used in all tests.
+- `postgres` — `SQLModelJobRepository`, requires `UMP_DATABASE_URL`.
+
+**Session management**: async session factory injected at construction in `main.py`; each repository method opens its own session context (no session leaks).
+
+##### 🔲 Remaining work
+
+1. **`/jobs/{id}/inputs` endpoint** — inputs are stored on the `Job` record but never exposed via a dedicated route. Implement and segregate inputs from `statusInfo` (OGC compliance).
+2. **Status history reads** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
+3. **Test coverage** — expand: polling loop (including TTW timeout path), immediate results synthesis, retry exhaustion, link normalization invariants, `/jobs/{id}/results` edge cases.
+4. **`ResultStoragePort` placeholder** — inject a no-op placeholder into `JobManager` at the composition root so the slot exists for Feature V adapters.
+5. **Large-object input separation** — inputs above `inline_inputs_size_limit` should be stored externally (object storage) with a URL reference; see large input strategies below.
+6. **Ambiguous bare process IDs** — current behavior picks the first matching provider; consider a deterministic policy (error on duplicates, or require fully-qualified IDs).
+
+##### Design notes: large input data strategies
+
+When processing large payloads (e.g. 4×30 MB = 120 MB geospatial data):
+
+**Option 1 — Chunked Transfer Encoding (automatic, current baseline)**
+aiohttp chunks large bodies automatically. Any standard HTTP server (RFC 7230) reassembles them. Works transparently — no code changes needed. Downside: full JSON still loaded into Python memory (~360–600 MB for 120 MB raw).
+
+**Option 2 — URL/Href referencing (OGC-native)**
+Send `{ "inputs": { "geospatial_data": { "href": "http://s3.../file.json" } } }`. Remote server fetches the reference on-demand. Eliminates local memory spike. Requires server-side support (`href` pattern) and stable external storage.
+
+**Recommended future step**: add an input pre-processor that detects payloads above a configurable threshold (e.g. >100 MB) and automatically stores them externally, replacing inline data with `href` references before forwarding.
+
+##### Design notes: job history / CQRS decision
+
+Chosen approach: CRUD `jobs` table + append-only `job_status_history` table (hybrid). This gives fast reads, simple writes, a full audit trail, and replay capability for most needs, without the complexity of full CQRS or event sourcing. Migration path to CQRS is available if/when advanced projections or heavy scaling become necessary.
+
+##### OGC schema reference
+
+```yaml
+# statusInfo.yaml (OGC API Processes)
+type: object
+required: [jobID, status, type]
+properties:
+  processID: {type: string}
+  type: {type: string, enum: [process]}
+  jobID: {type: string}
+  status: {$ref: "statusCode.yaml"}
+  message: {type: string}
+  created: {type: string, format: date-time}
+  started: {type: string, format: date-time}
+  finished: {type: string, format: date-time}
+  updated: {type: string, format: date-time}
+  progress: {type: integer, minimum: 0, maximum: 100}
+  links: {type: array, items: {$ref: "link.yaml"}}
+```
+
+```yaml
+# JobList.yaml (OGC API Processes)
+type: object
+required: [jobs, links]
+properties:
+  jobs: {type: array, items: {$ref: "statusInfo.yaml"}}
+  links: {type: array, items: {$ref: "link.yaml"}}
+```
+
+```yaml
+# JobControlOptions.yaml (OGC API Processes)
+type: string
+enum: [sync-execute, async-execute, dismiss]
+```
+
+Deferred execution modes:
+- Sync execute (no `Prefer: respond-async`)
+- Transmission direct / local-by-ref
+- Streaming results to clients
+
+#### 🔲 Feature IV: JWT-based Auth
+- implement jwt based authentication
+- evaluate jwt for realm roles and client roles to grant or restrict access to resources (all routes)
+- add an option to grant public access to /processes route
+
+#### 🔲 Feature V: Add support for result storage
+- add result storage business logic
+- create an adapter for geoserver result storage (wfs, wms)
+- create an adapter for ldproxy result storage (ogc api features)
+
+#### 🔲 Feature VI: Job Execution Pipeline refactoring
+
+**Goal**: replace the monolithic `create_and_forward` method (~200 lines) with a composable `JobExecutionPipeline` of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort by setting `context.should_halt = True`.
+
+**Current state**: scaffolding exists (`PipelineStep`, `ExecutionResult`, `JobExecutionContext`, `JobExecutionPipeline`, `create_and_forward_ii`) in `src/ump/core/managers/job_manager.py`. Steps are empty — `_build_execution_pipeline()` returns `JobExecutionPipeline(steps=[])`. `create_and_forward` remains the active production path.
+
+**Planned steps** (each a `PipelineStep` subclass under `src/ump/core/managers/steps/`):
+
+| Step | Responsibility | Extracts from |
+|---|---|---|
+| `ValidateAndResolveStep` | Validate process_id, resolve provider prefix/raw id | `_resolve_provider` |
+| `CreateLocalJobStep` | Create `Job` with UUID and inline inputs | `_init_job` |
+| `PersistAcceptedStep` | Persist job + accepted snapshot; notify observers | `_persist_accepted` + `_notify_job_created` |
+| `ForwardToProviderStep` | POST to remote OGC endpoint with retry | `_safe_forward` |
+| `HandleProviderResponseStep` | Detect upstream errors ≥ 400, propagate or absorb | `_handle_upstream_error_response` |
+| `DeriveStatusInfoStep` | Select derivation strategy via `StatusDerivationOrchestrator` | `_derive_status_info` |
+| `FinalizeJobStep` | Persist derived status, notify observers | `_finalize_job` |
+| `InitiatePollingStep` | Schedule background poll if non-terminal | `_schedule_poll` |
+
+Future extension steps (insert without touching others):
+- `ResolveOutputFormatsStep` — per-output `(media_type, is_binary)` from execute request + process description
+- `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` per provider config
+- `ApplyResponseModePolicyStep` — override `response` field sent to remote
+
+**`JobExecutionContext` fields**:
+```python
+class JobExecutionContext(BaseModel):
+    job: Optional[Job]               # set by CreateLocalJobStep
+    process_id: str
+    provider: Optional[ProviderConfig]  # set by ValidateAndResolveStep
+    execute_payload: Dict[str, Any]  # normalized ExecuteRequest payload
+    headers: Dict[str, str]          # forwarding headers (Prefer, etc.)
+    status_info: Optional[JobStatusInfo]  # set by DeriveStatusInfoStep
+    should_halt: bool                # abort flag
+    response: Optional[Dict]         # direct HTTP response (bypasses normal flow)
+```
+
+**Migration strategy**:
+1. Implement steps one at a time; unit-test each against a `JobExecutionContext` fixture.
+2. Wire into `_build_execution_pipeline()`.
+3. Shadow-run `create_and_forward_ii` alongside `create_and_forward` in tests; compare outputs.
+4. Switch `ProcessManager.execute_process` to call `_ii`; delete old method.
+
+**Minimal DDD scaffolding** (optional, for future evolution toward CQRS):
+- `src/ump/core/commands.py` — `CreateJobCommand`, `ForwardExecutionCommand`, etc.
+- `src/ump/core/events.py` — `JobCreated`, `JobForwarded`, `JobStatusUpdated`, `JobFailed`.
+- `src/ump/core/aggregates/job_aggregate.py` — pure `handle_command`/`apply_event` with no IO.
+- `append_event(event, expected_version)` on `JobRepositoryPort` (already exists as no-op).
+These are optional and deferred unless complexity grows sufficiently to justify them.
+
+
 2. `JobRepositoryPort` (`src/ump/core/interfaces/job_repository.py`) and in-memory adapter `InMemoryJobRepository` for fast TDD; ready to swap with SQLModel adapter later.
 3. `JobManager` (`src/ump/core/managers/job_manager.py`): orchestrates `create_and_forward` by:
    - Creating local job immediately.
@@ -247,450 +563,65 @@ When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there ar
 - This hybrid approach avoids memory pressure while remaining transparent to callers.
 
 
-Event sourcing, CQRS, and job history: design decision
-
-- For now, we will not implement full CQRS or event sourcing. Instead, we will:
-  - Implement a CRUD JobRepository with an append-only `job_statuses` (history) table (A: hybrid approach).
-  - Optionally add an `append_event(job_event)` primitive to the JobRepositoryPort (B: event log for future migration/testing).
-  - This gives us: fast reads, simple writes, a full audit trail, and replayability for most needs, with minimal complexity.
-  - If/when we need advanced projections, replay, or scaling, we can migrate to CQRS + Event Sourcing later.
-
-Rationale:
-- CRUD + history table is simple, testable, and covers most audit/replay needs.
-- CQRS + event sourcing is powerful but adds significant complexity and infra cost; only migrate if you need advanced projections, strict event audit, or heavy read/write scaling.
-
-Immediate actionable checklist (updated):
-Current focus has shifted with new capabilities; checklist re-aligned:
-- [x] Add `/jobs` (list) and `/jobs/{id}` (detail) endpoints (routes exist, backed by InMemoryJobRepository).
-- [x] **SQLModel JobRepository + Alembic migrations + design smell fix** (complete).
-- [ ] Implement inputs separation & `/jobs/{id}/inputs` (no inputs in statusInfo).
-- [ ] Status history persistence (append snapshots) & optional events.
-- [ ] Integrate `ResultStoragePort` for optional persistence on success.
-- [ ] Tests: JobManager polling (including timeout), immediate results synthesis, retry verification, link normalization, /jobs results endpoint.
-- [ ] Job execution pipeline: implement `PipelineStep` subclasses and migrate `create_and_forward` → `create_and_forward_ii` (see pipeline plan above).
-- [ ] Optional: adaptive polling/backoff per provider.
-- [ ] Optional: auth rules (JWT) restricting job visibility.
-
----
-
-## SQLModel JobRepository — detailed implementation plan
-
-### Architectural decisions
-
-#### 1. Two-model ORM mapping (hexagonal-correct)
-
-Isolating persistence details from the core requires a second model class in the adapter layer. The core `Job` (`BaseModel`) must stay free of all ORM annotations; the adapter owns a separate `JobRecord(SQLModel, table=True)` that holds all persistence metadata. The adapter maps between the two explicitly.
-
-```
-src/ump/core/models/job.py          ← domain model (pure Pydantic, no ORM)
-src/ump/adapters/sqlmodel_job_repository.py
-    ├── JobRecord(SQLModel, table=True)              ← ORM model (adapter only)
-    ├── JobStatusHistoryRecord(SQLModel, table=True) ← history ORM model (adapter only)
-    └── SQLModelJobRepository(JobRepositoryPort)     ← adapter implementing port
-          ├── JobRecord.from_domain(job) -> JobRecord
-          └── JobRecord.to_domain()     -> Job
-```
-
-The core never imports `sqlmodel`, `sqlalchemy`, or any database driver. All ORM-specific concerns (column types, primary key strategy, JSONB vs TEXT, FK cascade) stay inside the adapter file.
-
-#### 2. Alembic as migration tool
-
-SQLModel does not ship a migration tool. It wraps SQLAlchemy 2.x, so Alembic is the natural and correct choice. Autogenerate works by inspecting `SQLModel.metadata`, which is only populated once the SQLModel table classes are imported. `migrations/env.py` must import the ORM models before `run_migrations_online()` / `run_migrations_offline()` is called.
-
-Key caveat — JSONB: SQLModel infers `TEXT` for `dict` type annotations by default. Native JSONB requires an explicit `sa_column`:
-
-```python
-from sqlalchemy import Column
-from sqlalchemy.dialects.postgresql import JSONB
-
-class JobRecord(SQLModel, table=True):
-    status_info: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
-    links: list | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
-    inputs: dict | None = Field(default=None, sa_column=Column(JSONB, nullable=True))
-```
-
-Without `sa_column=Column(JSONB)`, the column would be stored as a JSON-encoded TEXT, losing native JSONB operators and index support.
-
-#### 3. Migration strategy
-
-All old migrations have been deleted — the `migrations/versions/` directory is now empty. We start fresh from a clean Alembic history.
-
-Action: create a single initial migration `create_jobs_tables` with `down_revision = None` (new root). This is the first and only migration in the chain and creates the two correctly structured tables.
-
-#### 4. Design smell fix: `job_repository` on `ProcessManager`
-
-Current state — `ProcessManager.__init__` accepts `job_repository` and the web adapter retrieves it via:
-```python
-repo = getattr(app.state.process_port, "job_repository", None)
-```
-`ProcessManager` is a process-fetching concern; it has no business holding a persistence repo. The repo belongs to `JobManager`.
-
-Fix (same step):
-1. Remove `job_repository: JobRepositoryPort | None = None` from `ProcessManager.__init__`.
-2. Add `job_repo: JobRepositoryPort` parameter to `create_app(...)`.
-3. In the lifespan: `app.state.job_repo = job_repo` (direct, first-class state).
-4. All routes replace `getattr(app.state.process_port, "job_repository", None)` with `app.state.job_repo`.
-5. `main.py`: pass `job_repo` to `create_app` directly; remove it from `process_manager_factory`.
-
-#### 5. Adapter selection env flag
-
-To keep tests running without a database, `main.py` selects the adapter based on `UMP_JOB_STORE`:
-
-```
-UMP_JOB_STORE=memory   → InMemoryJobRepository (default, used in all tests)
-UMP_JOB_STORE=postgres → SQLModelJobRepository (production)
-```
-
-SQLModelJobRepository requires `UMP_DATABASE_URL` (PostgreSQL DSN).
-
-### DB schema (Alt A — hybrid)
-
-```sql
--- jobs: current snapshot (fast reads, SQL-filterable on scalar fields)
-CREATE TABLE jobs (
-    id              UUID PRIMARY KEY,
-    process_id      TEXT,
-    provider        TEXT,
-    remote_job_id   TEXT,
-    remote_status_url TEXT,
-    status          TEXT,                      -- denormalized for WHERE filters
-    created         TIMESTAMPTZ NOT NULL,
-    updated         TIMESTAMPTZ,
-    status_info     JSONB,                     -- full current JobStatusInfo snapshot
-    inputs          JSONB,                     -- inline inputs (small payloads only)
-    inputs_url      TEXT,
-    inputs_storage  TEXT,
-    inputs_size     INTEGER,
-    inputs_checksum TEXT,
-    links           JSONB,                     -- list[Link]
-    diagnostic      TEXT,
-    version         INTEGER NOT NULL DEFAULT 0
-);
-
--- job_status_history: append-only audit log of all status transitions
-CREATE TABLE job_status_history (
-    id          BIGSERIAL PRIMARY KEY,
-    job_id      UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    seq         INTEGER NOT NULL,
-    snapshot    JSONB NOT NULL,                -- full JobStatusInfo snapshot
-    recorded_at TIMESTAMPTZ NOT NULL
-);
-
-CREATE INDEX idx_jobs_status    ON jobs (status);
-CREATE INDEX idx_jobs_provider  ON jobs (provider);
-CREATE INDEX idx_jobs_process   ON jobs (process_id);
-CREATE INDEX idx_jsh_job_id     ON job_status_history (job_id, seq);
-```
-
-### Files to create / modify
-
-| File | Action | Notes |
-|---|---|---|
-| `src/ump/adapters/sqlmodel_job_repository.py` | CREATE | `JobRecord`, `JobStatusHistoryRecord`, `SQLModelJobRepository` |
-| `migrations/versions/XXXX_create_jobs_tables.py` | CREATE | `down_revision=None` (new root), correct schema for both tables |
-| `migrations/env.py` | MODIFY | Import SQLModel table classes; use `SQLModel.metadata` |
-| `src/ump/adapters/web/fastapi.py` | MODIFY | Add `job_repo` param; fix all repo access; set `app.state.job_repo` |
-| `src/ump/core/managers/process_manager.py` | MODIFY | Remove `job_repository` param |
-| `src/ump/main.py` | MODIFY | Pass `job_repo` to `create_app`; add `UMP_JOB_STORE` selection |
-| `src/ump/core/settings.py` | MODIFY | Add `UMP_JOB_STORE`, `UMP_DATABASE_URL` settings |
-
-### Mapping strategy for `SQLModelJobRepository`
-
-The `from_domain` / `to_domain` bridge is the only place where the two models touch. It must be complete and round-trip safe (i.e., `to_domain(from_domain(job)) == job`).
-
-```python
-@classmethod
-def from_domain(cls, job: Job) -> "JobRecord":
-    return cls(
-        id=job.id,
-        process_id=job.process_id,
-        provider=job.provider,
-        status=job.status,
-        status_info=job.status_info.model_dump(mode="json") if job.status_info else None,
-        inputs=job.inputs,
-        links=[lnk.model_dump(mode="json") for lnk in job.links],
-        # ... all other fields
-    )
-
-def to_domain(self) -> Job:
-    return Job(
-        id=self.id,
-        status_info=JobStatusInfo(**self.status_info) if self.status_info else None,
-        links=[Link(**lnk) for lnk in (self.links or [])],
-        # ... all other fields
-    )
-```
-
-### Session management
-
-`SQLModelJobRepository` requires an async SQLAlchemy session. Two strategies:
-
-**Option A — session per operation (simpler, safest for now):**
-Each method opens its own `async_sessionmaker(engine)` context. No session leaks across requests.
-
-**Option B — session injected at construction (more testable):**
-The factory in `main.py` creates an `async_sessionmaker` and injects it; the repo uses it for all operations. Better for transactional grouping of multi-step operations.
-
-Recommendation: Option B (session factory injected), deferred to async session from `sqlalchemy.ext.asyncio`. The `InMemoryJobRepository` needs no changes.
-
----
-
-### Job execution pipeline — incremental refactoring plan
-
-#### Motivation
-
-`create_and_forward` in `JobManager` is a monolithic orchestration method (~200 lines) that handles validation, local job creation, HTTP forwarding, status derivation, finalization, and polling scheduling in one sequential flow. As complexity grows (output format resolution, `transmission-mode-policy`, `response-mode-policy`, result storage), each new concern requires inserting conditional logic into an already dense method.
-
-The `JobExecutionPipeline` pattern decomposes this into a sequence of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort the pipeline by setting `context.should_halt = True`.
-
-#### Current state (scaffolding only — steps not yet implemented)
-
-The following classes live in `src/ump/core/managers/job_manager.py`:
-
-```python
-class PipelineStep(ABC):           # abstract base — one async process(context) method
-class ExecutionResult(dataclass):  # output of a completed pipeline run
-class JobExecutionContext(BaseModel):  # mutable shared state across steps
-class JobExecutionPipeline:        # runs steps in sequence; stops on should_halt
-```
-
-`create_and_forward_ii` is the new entrypoint that delegates to the pipeline. It currently runs an empty step list and is therefore a no-op. **`create_and_forward` remains the active path in production.**
-
-#### Planned pipeline steps
-
-Each becomes a concrete `PipelineStep` subclass, ideally in its own file under `src/ump/core/managers/steps/`:
-
-| Step class | Responsibility | Source logic to extract |
-|---|---|---|
-| `ValidateAndResolveStep` | Validate `process_id`, resolve provider prefix and raw id | `_resolve_provider` |
-| `CreateLocalJobStep` | Create `Job` domain object with local UUID and inline inputs | `_init_job` |
-| `PersistAcceptedStep` | Persist job + initial `accepted` statusInfo snapshot; notify observers | `_persist_accepted` + `_notify_job_created` |
-| `ForwardToProviderStep` | POST to remote OGC endpoint with retry/backoff | `_safe_forward` |
-| `HandleProviderResponseStep` | Detect upstream error responses (≥ 400) and propagate or absorb | `_handle_upstream_error_response` |
-| `DeriveStatusInfoStep` | Select derivation strategy (direct body / Location follow / immediate results / failed) | `_derive_status_info` + `StatusDerivationOrchestrator` |
-| `FinalizeJobStep` | Persist derived status, update job record, notify observers | `_finalize_job` |
-| `InitiatePollingStep` | Schedule background poll loop if job is non-terminal and has `remote_status_url` | `_schedule_poll` call |
-
-Future steps can be inserted at any position without touching the others:
-
-- `ResolveOutputFormatsStep` — capture per-output `(media_type, is_binary)` from execute request + process description (output format awareness proposal)
-- `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` in payload before forwarding
-- `ApplyResponseModePolicyStep` — override `response` field sent to remote
-
-#### Migration strategy
-
-1. Implement steps one at a time, each fully unit-tested against a minimal `JobExecutionContext` fixture.
-2. Wire implemented steps into `_build_execution_pipeline()`.
-3. Run `create_and_forward_ii` in parallel (shadow mode) alongside `create_and_forward` in tests — compare outputs.
-4. When all steps are implemented and all tests pass against `_ii`, switch the active call in `ProcessManager.execute_process` from `create_and_forward` to `create_and_forward_ii`.
-5. Delete `create_and_forward` and rename `_ii`.
-
-#### `JobExecutionContext` field summary
-
-```python
-class JobExecutionContext(BaseModel):
-    job: Optional[Job]                  # set by CreateLocalJobStep
-    process_id: str                     # set by caller
-    provider: Optional[ProviderConfig]  # set by ValidateAndResolveStep
-    execute_payload: Dict[str, Any]     # the normalized ExecuteRequest payload
-    headers: Dict[str, str]             # forwarding headers (Prefer, etc.)
-    status_info: Optional[JobStatusInfo]# set by DeriveStatusInfoStep
-    should_halt: bool                   # set by any step to abort the pipeline
-    response: Optional[Dict[str, Any]]  # set when a step produces a direct HTTP response
-```
-
-`to_result()` converts the context into an `ExecutionResult`, which has a `to_response()` method returning the `{status, headers, body}` dict that the web adapter expects.
-
-Minimal DDD guidance (commands, events, aggregates) - lightweight, incremental
-
-To make the Job lifecycle easier to test, evolve, and (later) migrate to CQRS/Event Sourcing, introduce a small, optional DDD scaffolding that remains lightweight for Step 1:
-
-- Concepts to add (minimal):
-  - Commands: immutable intent objects used by the `JobManager` to express actions, e.g. `CreateJobCommand`, `ForwardExecutionCommand`, `FetchRemoteStatusCommand`.
-  - Domain Events: immutable facts emitted when something meaningful happens, e.g. `JobCreated`, `JobForwarded`, `JobStatusUpdated`, `JobFailed`.
-  - Aggregate: `JobAggregate` encapsulates in-memory domain logic and invariant checks. It receives Commands (or Events) and returns Events; it does not perform IO.
-  - Event append primitive: `JobRepository.append_event(event, expected_version=None)` for persisting events to an in-memory list or events table.
-
-- How these pieces fit together (runtime flow):
-  1. API / ProcessManager creates a `CreateJobCommand` and passes it to `JobManager`.
- 2. `JobManager` constructs or loads a `JobAggregate` and invokes `handle_command(cmd)` to get a list of DomainEvents.
- 3. `JobManager` persists events via `JobRepository.append_event(...)` and updates the snapshot (`JobRepository.update(...)`).
- 4. `JobManager` forwards the execution to the provider using `HttpClientPort`, maps provider responses to events (e.g., `JobForwarded`, `JobStatusUpdated`, `JobFailed`), persists them, and updates job snapshot.
- 5. Optionally dispatch events on an in-memory bus for side-effects (projections, webhooks).
-
-- Benefits (practical):
-  - Testability: unit tests can exercise `JobAggregate` pure logic without IO.
-  - Evolution: you capture discrete facts for replay/projection in the future without flipping the architecture.
-  - Minimal cost: dataclasses + a few helper methods; keep Phase 1 in-memory to avoid infra overhead.
-
-- Minimal files to add (small footprint):
-  - `src/ump/core/commands.py` - small dataclasses for the command shapes.
-  - `src/ump/core/events.py` - dataclasses for domain events.
-  - `src/ump/core/aggregates/job_aggregate.py` - `JobAggregate` with pure `handle_command` and `apply_event` methods.
-  - update `src/ump/core/interfaces/job_repository.py` to include `append_event(event, expected_version: int | None = None)`.
-  - `src/ump/adapters/job_repository_inmemory.py` - implement `append_event` alongside CRUD methods.
-
-- Tests to add (TDD):
-  - `tests/unit/test_job_aggregate.py` - aggregate specs (command -> events -> state transitions).
-  - `tests/unit/test_job_manager_events.py` - JobManager integration with in-memory repo and fake HttpClient.
-
-Keep these optional: if you prefer to delay, we can add only the event-append signature on the port so tests can emit events later. Otherwise I can scaffold the lightweight DDD pieces now.
-Notes:
-- Keep adapters conservative: they provide raw response shape and map transport/IO errors to domain exceptions. Business logic (statusInfo merging, job lifecycle) belongs in core.
-- For Step 1 use an in-memory job store; prepare SQLModel schema and migration plan for Step 2 (hybrid approach with JSONB + history table recommended).
-
-What is NOT implemented yet for Step 1 (short):
-
-- Local job creation/storage: there is no job model or any in-memory/persistent store yet. For Step 1 we should add a lightweight in-memory job store (replaceable by DB in Step 2).
-- Execute flow: the manager must be extended to always create a local job, populate a statusInfo snapshot, follow provider `Location` headers when necessary to fetch job status, and return HTTP 201 with Location header pointing to the local job plus the statusInfo body.
-- Validation: request body validation against the OGC `execute` schema is not enforced yet.
-
-Brief notes about tests already added (TDD):
-
-- Lightweight FastAPI integration tests: `tests/test_fastapi_execute_async.py` - TDD-style tests that cover the expected behaviors around async execute handling (forwarding valid statusInfo, following `Location`, handling missing statusInfo, provider errors/timeouts, always creating a local job, resolving relative Location headers). These tests currently express the desired behavior and will drive implementation.
-- Adapter tests: `tests/test_aiohttp_adapter.py` - unit-level tests for `AioHttpClientAdapter` (JSON parsing, non-JSON -> 502, timeouts -> 504, POST text fallback).
-- Full-stack E2E test: `tests/test_fastapi_execute_e2e.py` - uses the real `AioHttpClientAdapter` together with `aioresponses` to mock provider responses and verify the full call path from FastAPI -> ProcessManager -> Adapter -> provider.
-- ProcessManager unit tests: `tests/test_process_manager.py` - earlier unit tests using a fake HTTP client exist to exercise manager logic in isolation.
-
-Recommended next actions (for the next coding assistant):
-
-1. Add a minimal `Job` model and an in-memory job store in core (e.g., `src/ump/core/models/job.py` and `src/ump/core/managers/job_store.py`). Keep the store replaceable by a DB-backed adapter later.
-2. Extend `ProcessManager.execute_process` to implement the async execute flow:
-  - Create a local job immediately (uuid, timestamps, provider ref, inputs).
-  - Call `http_client.post(...)` to forward execution.
-  - If the provider response includes a JSON body conforming to statusInfo, use it to populate the local job status snapshot.
-  - Else if the provider response has a `Location` header, resolve relative locations against the provider base URL and `http_client.get(location)` to fetch the statusInfo; use it if valid.
-  - Else mark the job as failed and include diagnostic details.
-  - Persist the job in the in-memory store and return HTTP 201 with `Location: /jobs/{local_id}` and the job's statusInfo body.
-3. Implement lightweight validation of incoming execute request bodies (Pydantic or jsonschema) and return 400 on invalid input (no job created).
-4. Run the newly added TDD tests (lightweight FastAPI tests and adapter/E2E tests) and iterate until they pass. Use `aioresponses` for adapter/E2E mocks.
-5. Keep the adapter conservative: it should supply raw `status/headers/body` and map transport errors to `OGCProcessException`; business rules (statusInfo merging, job lifecycle) belong to `ProcessManager`.
-
-Pointers for the assistant taking over the task:
-
-- FastAPI route: `src/ump/adapters/web/fastapi.py` - where `execute_process` is wired.
-- Core manager: `src/ump/core/managers/process_manager.py` - extend `execute_process` to implement job creation, Location-following and statusInfo population.
-- HTTP adapter: `src/ump/adapters/aiohttp_client_adapter.py` - the adapter contract (returns dict) that `ProcessManager` relies on.
-- Tests to run: `tests/test_fastapi_execute_async.py`, `tests/test_fastapi_execute_e2e.py`, `tests/test_aiohttp_adapter.py`, `tests/test_process_manager.py`.
-
-Quick prioritized checklist (for the next session):
-Superseded (already implemented); new quick priorities:
-- [ ] `/jobs` list & detail endpoints
-- [ ] Inputs separation & endpoint
-- [ ] SQLModel repository & migrations
-- [ ] Result storage adapter integration
-- [ ] Expanded test coverage (retry, timeout, immediate results)
-
-```yaml
-#JobControlOptions.yaml
-type: string
-enum:
-  - sync-execute
-  - async-execute
-  - dismiss
-```
-
-```yaml
-#statusInfo.yaml
-type: object
-required:
-   - jobID
-   - status
-   - type
-properties:
-   processID:
-      type: string
-   type:
-      type: string
-      enum:
-        - process
-   jobID:
-      type: string
-   status:
-      $ref: "statusCode.yaml"
-   message:
-      type: string
-   created:
-      type: string
-      format: date-time
-   started:
-      type: string
-      format: date-time
-   finished:
-      type: string
-      format: date-time
-   updated:
-      type: string
-      format: date-time
-   progress:
-      type: integer
-      minimum: 0
-      maximum: 100
-   links:
-      type: array
-      items:
-         $ref: "link.yaml"
-```
-
-```yaml
-# JobList
-type: object
-required:
-  - jobs
-  - links
-properties:
-  jobs:
-    type: array
-    items:
-      $ref: "statusInfo.yaml"
-  links:
-    type: array
-    items:
-      $ref: "link.yaml"
-```
-
-- deferred: remote process execution: sync
-- deferred: remote transmission direct, local by ref
-- deferred: stream content to clients (for use cases where some resources take longer than others)
-
-#### Feature IV: JWT-based Auth
-- implement jwt based authentication
-- evaluate jwt for realm roles and client roles to grant or restrict access to resources (all routes)
-- add an option to grant public access to /processes route
-
-#### Feature V: Add support for result storage
-- add result storage business logic
-- create an adapter for geoserver result storage (wfs, wms)
-- create an adapter for ldproxy result storage (ogc api features)
-
-Notes to assistant:
-When user asks for implementation details for"ensembles":
-- Ask user for reference code to gain insights what ensembles are and which mechanisms must be reimplemented
-- do not reuse the user provided code, instead look for a better solution and inform the user
-
 ## Next non-immediate steps
 
 - Add unit tests for `ProcessManager`, `ProcessCache`, and `ProviderConfigFileAdapter` (happy path + failure fallback).
 - Add unit tests for the cache and manager (Task 10).
 
-## How to run the app for local testing
+## How to run
 
-1. Install dependencies (ensure `uvicorn`, `fastapi`, `aiohttp`, and `watchdog` are installed).
-2. Start the app:
-
+### Install dependencies
 ```bash
-python -m src.ump.main
+poetry install
 ```
 
-(Or use `uvicorn src.ump.adapters.web.fastapi:create_app --reload` after wiring DI in a runner.)
+### Start the API server
+```bash
+ump                         # uses .env or environment variables
+```
+
+With PostgreSQL persistence:
+```bash
+UMP_JOB_STORE=postgres \
+UMP_DATABASE_URL=postgresql+asyncpg://ump:ump@localhost:5432/ump \
+ump
+```
+
+### Run database migrations
+```bash
+# Uses UMP_DATABASE_* env vars (or UMP_DATABASE_URL):
+ump-migrate                 # upgrade head
+ump-migrate downgrade -1    # any alembic subcommand passes through
+```
+
+### Start the mock OGC server (for local testing without a real model server)
+```bash
+PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001 --reload
+```
+Then set `providers.yaml` to point at `http://localhost:5001` with process ids `echo`, `hello-world`, `slow`, `failing-job`.
+
+### Run tests
+```bash
+PYTHONPATH=src .venv/bin/pytest tests/ -q
+```
+
+### Docker Compose (dev environment)
+```bash
+docker compose -f docker-compose-dev.yaml up mock-ogc-server ump-db
+ump-migrate
+ump
+```
 
 ## Notes for the assistant
 
 - The user prefers explicit dependency injection. Do not instantiate adapters inside adapters; instantiate them in `main.py` and inject.
 - Keep the core free of framework code.
 - When proposing changes, include small tests where feasible and run quick syntax/type checks.
+- `providers.yaml` uses a list-based format under a `providers:` key — not the old dict-keyed format. See `providers.yaml.example`.
+- When the user asks for implementation details for "ensembles": ask for reference code to gain insights; do not reuse the provided code — find a better solution and inform the user.
 
 ---
+
 
 _Last updated: 2026-05-29
 
