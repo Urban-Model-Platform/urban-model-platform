@@ -1,6 +1,4 @@
 channels:
   - conda-forge
 dependencies:
-  - python=3.11
-  - poetry=1.8.5
-  - copier=9
+  - python=3.14
