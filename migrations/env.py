@@ -24,9 +24,7 @@ config = context.config
 #   3. alembic.ini placeholder (will fail at runtime — useful only for autogenerate dry-runs)
 db_url = os.environ.get("UMP_DATABASE_URL")
 if db_url:
-    # Strip async driver prefix so Alembic can use a sync engine
-    sync_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
-    config.set_main_option("sqlalchemy.url", sync_url)
+    config.set_main_option("sqlalchemy.url", db_url)
 else:
     host = os.environ.get("UMP_DATABASE_HOST", "localhost")
     port = os.environ.get("UMP_DATABASE_PORT", "5432")
