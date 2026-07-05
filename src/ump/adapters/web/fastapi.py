@@ -26,6 +26,48 @@ from ump.core.models.process import Process, ProcessList
 from ump.core.settings import app_settings
 
 
+# module global helpers
+def render_problem(
+    problem: OGCExceptionResponse,
+    *,
+    include_request_id: bool = False,
+) -> JSONResponse:
+    payload = jsonable_encoder(problem.model_dump(exclude_none=True))
+    response = JSONResponse(status_code=problem.status, content=payload)
+    if include_request_id and problem.additional and problem.additional.requestId:
+        response.headers["X-Request-ID"] = problem.additional.requestId
+    return response
+
+def build_problem(
+    status: int,
+    title: str,
+    detail: str,
+    request: Request,
+    type_uri: str = "about:blank",
+) -> OGCExceptionResponse:
+    return OGCExceptionResponse(
+        type=type_uri,
+        title=title,
+        status=status,
+        detail=detail,
+        instance=str(request.url),
+    )
+
+def validate_process_id(
+        process_id: str, request: Request,
+        process_id_validator: ProcessIdValidatorPort | None = None
+) -> JSONResponse | None:
+    """Returns a 400 problem response if process_id fails validation, else None."""
+    if process_id_validator and not process_id_validator.validate(process_id):
+        problem = build_problem(
+            status=400,
+            title="Invalid Process ID",
+            detail=f"Process ID '{process_id}' does not match the expected format.",
+            request=request,
+        )
+        return render_problem(problem)
+    return None
+
 # Note: this a driver adapter, so it depends on the core interface (ProcessesPort)
 # but the core does not depend on this adapter
 # it does not need to implement a port/interface itself
@@ -67,43 +109,6 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
-    def render_problem(
-        problem: OGCExceptionResponse,
-        *,
-        include_request_id: bool = False,
-    ) -> JSONResponse:
-        payload = jsonable_encoder(problem.model_dump(exclude_none=True))
-        response = JSONResponse(status_code=problem.status, content=payload)
-        if include_request_id and problem.additional and problem.additional.requestId:
-            response.headers["X-Request-ID"] = problem.additional.requestId
-        return response
-
-    def build_problem(
-        status: int,
-        title: str,
-        detail: str,
-        request: Request,
-        type_uri: str = "about:blank",
-    ) -> OGCExceptionResponse:
-        return OGCExceptionResponse(
-            type=type_uri,
-            title=title,
-            status=status,
-            detail=detail,
-            instance=str(request.url),
-        )
-
-    def validate_process_id(process_id: str, request: Request) -> JSONResponse | None:
-        """Returns a 400 problem response if process_id fails validation, else None."""
-        if process_id_validator and not process_id_validator.validate(process_id):
-            problem = build_problem(
-                status=400,
-                title="Invalid Process ID",
-                detail=f"Process ID '{process_id}' does not match the expected format.",
-                request=request,
-            )
-            return render_problem(problem)
-        return None
 
     # Correlation ID middleware: assigns per-request id (header override) and exposes it to logging
     @app.middleware("http")
@@ -152,7 +157,10 @@ def create_app(
         response_model_by_alias=True,
     )
     async def get_process(process_id: str, request: Request):
-        if err := validate_process_id(process_id, request):
+        if err := validate_process_id(
+            process_id, request,
+            process_id_validator,
+        ):
             return err
         return await app.state.process_port.get_process(process_id)
 
@@ -208,7 +216,10 @@ def create_app(
 
     @api_router.post("/processes/{process_id}/execution")
     async def execute_process(request: Request, process_id: str):
-        if err := validate_process_id(process_id, request):
+        if err := validate_process_id(
+            process_id, request,
+            process_id_validator
+        ):
             return err
         # Parse and validate execute request body against ExecuteRequest model.
         try:
