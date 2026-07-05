@@ -143,7 +143,7 @@ def test_forward_valid_statusinfo():
     http_client = FakeHttpClient(provider_resp)
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         body = r.json()
         assert body.get("status") == "accepted"
@@ -161,7 +161,7 @@ def test_location_followup_fetches_statusinfo():
     http_client = MultiFakeHttpClient(get_responses={"http://provider.local/jobs/remote-job-1": job_status}, post_responses={("POST", "http://provider.local/processes/echo/execution"): post_resp})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         body = r.json()
         # initial response always accepted snapshot
@@ -170,7 +170,7 @@ def test_location_followup_fetches_statusinfo():
         assert "Location" in r.headers
         # follow-up fetch reveals remote-derived running status
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "running"
 
@@ -183,13 +183,13 @@ def test_no_statusinfo_no_location_returns_failed():
     http_client = MultiFakeHttpClient(get_responses={}, post_responses={("POST", "http://provider.local/processes/echo/execution"): post_resp})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         body = r.json()
         assert body.get("status") == "accepted"
         assert "Location" in r.headers
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "failed"
 
@@ -201,12 +201,12 @@ def test_remote_provider_error_or_timeout():
     http_client = MultiFakeHttpClient(post_responses={("POST", "http://provider.local/processes/echo/execution"): RuntimeError("timeout")})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         assert r.json().get("status") == "accepted"
         assert "Location" in r.headers
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "failed"
 
@@ -219,12 +219,12 @@ def test_always_create_local_job():
     http_client = MultiFakeHttpClient(post_responses={("POST", "http://provider.local/processes/echo/execution"): post_resp})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         assert r.json().get("status") == "accepted"
         assert "Location" in r.headers
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "successful"
 
@@ -238,14 +238,14 @@ def test_relative_location_header_resolution():
     http_client = MultiFakeHttpClient(get_responses={"http://provider.local/jobs/rel-1": job_status}, post_responses={("POST", "http://provider.local/processes/echo/execution"): post_resp})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"inputs": {}}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         body = r.json()
         assert body.get("status") == "accepted"
         assert body.get("jobID") and body["jobID"] != "rel-1"
         assert "Location" in r.headers
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "running"
 
@@ -259,12 +259,12 @@ def test_execute_endpoint_forwards_201():
     http_client = MultiFakeHttpClient(post_responses={("POST", exec_url): fake_response})
     app = make_app_with_factories(http_client)
     with TestClient(app) as client:
-        r = client.post("/processes/infra:echo/execution", json={"x":1}, headers={"Prefer": "respond-async"})
+        r = client.post("/v1.0/processes/infra:echo/execution", json={"x":1}, headers={"Prefer": "respond-async"})
         assert r.status_code == 201
         body = r.json()
         assert body.get("status") == "accepted"  # initial snapshot
         assert body.get("jobID") and body["jobID"] != "1"
         job_id = r.headers["Location"].split("/")[-1]
-        jr = client.get(f"/jobs/{job_id}")
+        jr = client.get(f"/v1.0/jobs/{job_id}")
         assert jr.status_code == 200
         assert jr.json().get("status") == "accepted"

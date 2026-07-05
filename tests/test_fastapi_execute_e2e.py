@@ -132,7 +132,7 @@ async def test_e2e_forward_statusinfo_with_real_adapter():
         # Run the test via TestClient; lifespan should open the adapter via async context
         with TestClient(app) as client:
             r = client.post(
-                "/processes/infra:echo/execution",
+                "/v1.0/processes/infra:echo/execution",
                 json={"inputs": {}},
                 headers={"Prefer": "respond-async"},
             )
