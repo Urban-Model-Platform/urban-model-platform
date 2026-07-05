@@ -53,11 +53,14 @@ import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
+from logging import getLogger
 from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
+
+logger = getLogger()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -410,31 +413,35 @@ async def execute_process(process_id: str, request: Request):
             inputs[k] = v
 
     prefer = request.headers.get("Prefer", "").lower()
+
+    logger.info("prefer header: %s", prefer)
     respond_sync = "respond-sync" in prefer
 
     job_id = _create_job(process_id)
+    location = f"{BASE_URL}/jobs/{job_id}"
     accepted_si = _make_status(job_id, process_id, "accepted", progress=0)
     _jobs[job_id]["status_info"] = accepted_si
 
     runner = _RUNNERS.get(process_id)
 
     if respond_sync and runner:
-        # Synchronous execution: await runner, return final result directly
+        # Synchronous execution: await runner, then return a completed statusInfo body.
+        # UMP's DirectStatusInfoStrategy recognises this, marks the job as immediately
+        # terminal and makes results available via GET /jobs/{id}/results.
         await runner(job_id, inputs)
-        final_status = _jobs[job_id]["status"]
         final_si = _jobs[job_id].get("status_info", {})
-        if final_status == "successful":
-            results = _results.get(job_id, {})
-            return JSONResponse(status_code=200, content=results)
-        else:
-            # Failed sync execution: return 500 with statusInfo
-            return JSONResponse(status_code=500, content=final_si)
+        # Return 201 + Location so UMP can track the job, but embed the terminal
+        # statusInfo so UMP skips polling.
+        return JSONResponse(
+            status_code=201,
+            content=final_si,
+            headers={"Location": location},
+        )
 
     # Asynchronous execution (Prefer: respond-async or no preference)
     if runner:
         asyncio.create_task(runner(job_id, inputs))
 
-    location = f"{BASE_URL}/jobs/{job_id}"
     return JSONResponse(
         status_code=201,
         content=accepted_si,
