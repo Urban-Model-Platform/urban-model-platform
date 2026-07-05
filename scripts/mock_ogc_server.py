@@ -398,16 +398,39 @@ async def execute_process(process_id: str, request: Request):
     except Exception:
         pass
 
-    inputs: Dict[str, Any] = body.get("inputs", {})
-    prefer = request.headers.get("Prefer", "")
-    respond_async = "respond-async" in prefer.lower()
+    # Normalize inputs: OGC clients may send {"message": {"value": "..."}} or {"message": "..."}
+    raw_inputs: Dict[str, Any] = body.get("inputs", {})
+    inputs: Dict[str, Any] = {}
+    for k, v in raw_inputs.items():
+        if isinstance(v, dict) and "value" in v:
+            inputs[k] = v["value"]
+        elif isinstance(v, dict) and "href" in v:
+            inputs[k] = v["href"]
+        else:
+            inputs[k] = v
+
+    prefer = request.headers.get("Prefer", "").lower()
+    respond_sync = "respond-sync" in prefer
 
     job_id = _create_job(process_id)
     accepted_si = _make_status(job_id, process_id, "accepted", progress=0)
     _jobs[job_id]["status_info"] = accepted_si
 
-    # Start background execution
     runner = _RUNNERS.get(process_id)
+
+    if respond_sync and runner:
+        # Synchronous execution: await runner, return final result directly
+        await runner(job_id, inputs)
+        final_status = _jobs[job_id]["status"]
+        final_si = _jobs[job_id].get("status_info", {})
+        if final_status == "successful":
+            results = _results.get(job_id, {})
+            return JSONResponse(status_code=200, content=results)
+        else:
+            # Failed sync execution: return 500 with statusInfo
+            return JSONResponse(status_code=500, content=final_si)
+
+    # Asynchronous execution (Prefer: respond-async or no preference)
     if runner:
         asyncio.create_task(runner(job_id, inputs))
 
