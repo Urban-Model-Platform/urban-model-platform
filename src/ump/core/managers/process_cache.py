@@ -1,7 +1,8 @@
 import time
-from typing import List, Dict, TypeVar, Generic, Optional
+from typing import Dict, Generic, List, Optional, Set, TypeVar
 
-T = TypeVar('T')
+T = TypeVar("T")
+
 
 class ProcessListCache(Generic[T]):
     def __init__(self, expiry_seconds: int = 300):
@@ -19,9 +20,22 @@ class ProcessListCache(Generic[T]):
     def set(self, key: str, value: List[T]):
         self._cache[key] = (time.time(), value)
 
+    def invalidate(self, key: str) -> None:
+        self._cache.pop(key, None)
+
+    def invalidate_stale_keys(self, valid_keys: Set[str]) -> None:
+        """Remove cache entries whose keys are no longer in valid_keys."""
+        stale = [k for k in self._cache if k not in valid_keys]
+        for k in stale:
+            del self._cache[k]
+
+    def clear(self) -> None:
+        self._cache.clear()
+
 
 class ProcessCache(Generic[T]):
     """Cache for individual process objects keyed by process id."""
+
     def __init__(self, expiry_seconds: int = 300):
         self._cache: Dict[str, tuple[float, T]] = {}
         self._expiry_seconds = expiry_seconds
@@ -36,3 +50,9 @@ class ProcessCache(Generic[T]):
 
     def set(self, key: str, value: T):
         self._cache[key] = (time.time(), value)
+
+    def invalidate(self, key: str) -> None:
+        self._cache.pop(key, None)
+
+    def clear(self) -> None:
+        self._cache.clear()
