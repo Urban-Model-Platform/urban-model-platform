@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Optional, Sequence
 
-from sqlalchemy import Column, Index, text
+from sqlalchemy import Column, DateTime, Index, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import Field, SQLModel, select
@@ -53,9 +53,12 @@ class JobRecord(SQLModel, table=True):
     status: Optional[str] = Field(default=None, index=True)
     created: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
     )
-    updated: Optional[datetime] = Field(default=None)
+    updated: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
     inputs_url: Optional[str] = Field(default=None)
     inputs_storage: Optional[str] = Field(default=None)
     inputs_size: Optional[int] = Field(default=None)
@@ -136,7 +139,7 @@ class JobStatusHistoryRecord(SQLModel, table=True):
     snapshot: dict = Field(sa_column=Column(JSONB, nullable=False))
     recorded_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
-        nullable=False,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
     )
 
 
