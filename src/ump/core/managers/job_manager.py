@@ -297,18 +297,16 @@ class JobManager:
             job, exec_url, execute_payload or {}, forward_headers
         )
 
-        # Handle immediate forward failure
+        # Handle immediate forward failure — return the accepted snapshot, not the failed
+        # state. The client receives HTTP 201 as an acknowledgement that the job was
+        # registered; the failed status is visible via GET /jobs/{id}. This follows
+        # OGC async semantics: 201 = job accepted, poll for status.
         if provider_resp is None:
-            failed_job = await self._repo.get(job.id)
             logger.debug(
-                f"[job:forward] upstream forward failed immediately job_id={job.id} returning failed status"
+                f"[job:forward] upstream forward failed immediately job_id={job.id} "
+                "returning accepted snapshot; failed status visible via GET /jobs/{id}"
             )
-            return self._response(
-                job.id,
-                failed_job.status_info
-                if failed_job and failed_job.status_info
-                else None,
-            )
+            return self._response(job.id, accepted_si)
 
         # Handle upstream error responses (>=400) with non-statusInfo bodies
         upstream_status = provider_resp.get("status")
