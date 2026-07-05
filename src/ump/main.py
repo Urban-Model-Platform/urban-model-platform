@@ -97,6 +97,7 @@ def main():
         http_client=http_client,
         job_manager_factory=job_manager_factory,
         job_repo=job_repo,
+        process_id_validator=process_id_validator,
         site_info=site_info_adapter,
     )
 
