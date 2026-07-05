@@ -71,7 +71,7 @@ class InlineOrRef(BaseModel):
 
 
 class OutputSpec(BaseModel):
-    format: Optional[str] = Field(
+    format: Optional[dict] = Field(
         None, description="Requested output format / media type"
     )
     transmissionMode: Optional[TransmissionMode] = Field(
