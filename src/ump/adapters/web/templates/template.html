@@ -29,15 +29,22 @@
         <table>
           <thead><tr><th>Path</th><th>Description</th></tr></thead>
           <tbody>
-            {{ table_rows | safe }}
+            {% for r in links %}
+            <tr>
+              <td><a href="{{ r.path }}">{{ r.path }}</a></td>
+              <td>{{ r.description | default('') }}</td>
+            </tr>
+            {% endfor %}
           </tbody>
         </table>
       </section>
 
       <footer class="footer">
-        <div>{{ contact_line | safe }}</div>
-        <div>{{ license_line | safe }}</div>
-        <div>{{ terms_of_service | safe }}</div>
+        <div>
+          {%- if contact.url %}<a href="{{ contact.url }}">{{ contact.name }}</a>{% endif %}
+          {%- if contact.url and contact.email %} | {% endif %}
+          {%- if contact.email %}<a href="mailto:{{ contact.email }}">{{ contact.email }}</a>{% endif %}
+        </div>
         <hr style="width:25%;text-align:left;margin-left:0">
         <small>powered by {{ powered_by | safe }}</small>
       </footer>

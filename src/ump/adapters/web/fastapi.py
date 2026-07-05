@@ -190,7 +190,18 @@ def create_app(
                 request=request,
             )
             return render_problem(problem)
-        resp = await jm.get_results(job_id)
+        try:
+            resp = await jm.get_results(job_id)
+        except OGCProcessException:
+            raise  # let the app-level OGC handler format it
+        except Exception as exc:
+            problem = build_problem(
+                status=500,
+                title="Results Unavailable",
+                detail=f"Unexpected error fetching job results: {exc}",
+                request=request,
+            )
+            return render_problem(problem)
         return JSONResponse(
             status_code=resp.get("status", 200), content=resp.get("body", {})
         )
@@ -298,32 +309,12 @@ def create_app(
         if f == "json" or ("application/json" in accept and f != "html"):
             return JSONResponse(api)
 
-        # Build table rows
         links = api.get("routes", [])
-        table_rows = "".join(
-            f"<tr><td><a href='{r['path']}'>{r['path']}</a></td><td>{r.get('description', '')}</td></tr>"
-            for r in links
-        )
-
         contact = api.get("contact") or {}
-        contact_line = " | ".join(
-            filter(
-                None,
-                [
-                    f"<a href='{contact.get('url')}'>{contact.get('name')}</a>"
-                    if isinstance(contact, dict) and contact.get("url")
-                    else None,
-                    f"<a href='mailto:{contact.get('email')}'>{contact.get('email')}</a>"
-                    if isinstance(contact, dict) and contact.get("email")
-                    else None,
-                ],
-            )
-        )
 
         # Adapter-local style
         css_href = "/static/style.css"
 
-        # Also include discovered supported versions for the template
         supported_versions = getattr(
             app_settings, "UMP_SUPPORTED_API_VERSIONS", ["1.0"]
         )
@@ -333,12 +324,10 @@ def create_app(
             "title": api.get("title"),
             "version": ", ".join(supported_versions),
             "description": api.get("description"),
-            "contact_line": contact_line,
-            "license_line": "",
-            "terms_of_service": "",
+            "links": links,
+            "contact": contact,
             "powered_by": "<a href='https://github.com/citysciencelab/urban-model-platform'>urban-model-platform</a>",
             "css": css_href,
-            "table_rows": table_rows,
             "supported_versions": supported_versions,
         }
 
