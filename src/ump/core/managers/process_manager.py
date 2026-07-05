@@ -9,8 +9,8 @@ from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.processes import ProcessesPort
 from ump.core.interfaces.providers import ProvidersPort
-from ump.core.managers.process_cache import ProcessCache, ProcessListCache
 from ump.core.managers.job_manager import JobManager
+from ump.core.managers.process_cache import ProcessCache, ProcessListCache
 from ump.core.models.link import Link
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList, ProcessSummary
@@ -40,7 +40,7 @@ class ProcessManager(ProcessesPort):
         # Will be set by composition root after instantiation.
         self.job_manager: Optional[JobManager] = None
 
-    # A pipeline of handlers (functions) that transform a fetched process dict.
+        # A pipeline of handlers (functions) that transform a fetched process dict.
         # Each handler has signature: handler(provider_name: str, proc: Dict[str, Any]) -> Dict[str, Any]
         # Handlers can raise ValueError to indicate the process should be skipped.
         self._process_handlers: List[
@@ -73,7 +73,9 @@ class ProcessManager(ProcessesPort):
         raw_proc_id = proc.get("id")
         if raw_proc_id is None:
             raise ValueError("missing process id")
-        full_proc_id = self.process_id_validator.create(provider_name, raw_proc_id)
+        # Avoid double-prefixing: if the remote returned an ID that already carries
+        # our provider prefix (e.g. another UMP instance), keep it as-is.
+        full_proc_id = self._to_canonical_id(provider_name, raw_proc_id)
         proc["id"] = full_proc_id
         return proc
 
@@ -211,24 +213,47 @@ class ProcessManager(ProcessesPort):
             )
         return proc
 
-    def _extract_raw_id(self, provider_name: str, configured_id: str) -> str:
-        """Strip our provider prefix while keeping any remote colon segments intact."""
-        try:
-            prefix, raw_id = self.process_id_validator.extract(configured_id)
-            if prefix == provider_name:
-                return raw_id
-        except ValueError:
-            pass
-        return configured_id
+    def _to_canonical_id(self, provider_name: str, configured_id: str) -> str:
+        """Compute the UMP-local canonical process ID.
 
-    def _configured_process_ids(self, provider_name: str) -> List[str]:
+        If the configured ID already starts with ``{provider_name}:`` (e.g.
+        because the remote is another UMP instance), it is used as-is to avoid
+        double-prefixing.  Otherwise the provider prefix is prepended.
+        """
+        if configured_id.startswith(f"{provider_name}:"):
+            return configured_id
+        return self.process_id_validator.create(provider_name, configured_id)
+
+    def _find_remote_id(self, provider_name: str, canonical_id: str) -> str:
+        """Look up the remote server's process ID for a given UMP canonical ID.
+
+        The configured ``id`` in providers.yaml is the verbatim remote ID.
+        Fallback: strip the provider prefix (old behaviour, for servers that use
+        bare IDs).
+        """
         provider = self.provider_config_service.get_provider(provider_name)
-        raw_ids: List[str] = []
+        if provider:
+            for proc_cfg in provider.processes:
+                if self._to_canonical_id(provider_name, proc_cfg.id) == canonical_id:
+                    return proc_cfg.id  # verbatim configured remote ID
+        # Fallback: bare id without provider prefix
+        try:
+            _, bare = self.process_id_validator.extract(canonical_id)
+            return bare
+        except ValueError:
+            return canonical_id
+
+    def _configured_process_ids(self, provider_name: str) -> List[tuple[str, str]]:
+        """Return (remote_id, canonical_id) pairs for all non-excluded processes."""
+        provider = self.provider_config_service.get_provider(provider_name)
+        result: List[tuple[str, str]] = []
         for proc_cfg in provider.processes:
             if getattr(proc_cfg, "exclude", False):
                 continue
-            raw_ids.append(self._extract_raw_id(provider_name, proc_cfg.id))
-        return raw_ids
+            remote_id = proc_cfg.id  # verbatim; used in the remote URL
+            canonical_id = self._to_canonical_id(provider_name, remote_id)
+            result.append((remote_id, canonical_id))
+        return result
 
     def _cache_process(self, model: Process) -> None:
         self._process_cache_by_id.set(model.pid, model)
@@ -273,9 +298,12 @@ class ProcessManager(ProcessesPort):
             for proc_cfg in provider.processes:
                 if getattr(proc_cfg, "exclude", False):
                     continue
-                raw_id = self._extract_raw_id(provider_name, proc_cfg.id)
-                if raw_id == process_id:
-                    return provider_name, raw_id
+                # Match against the remote ID or the canonical ID
+                if (
+                    proc_cfg.id == process_id
+                    or self._to_canonical_id(provider_name, proc_cfg.id) == process_id
+                ):
+                    return provider_name, proc_cfg.id
         raise OGCProcessException(
             OGCExceptionResponse(
                 type="about:blank",
@@ -292,32 +320,38 @@ class ProcessManager(ProcessesPort):
         Aggregates all results into a single ProcessList.
         """
         provider_names = self.provider_config_service.list_providers()
-        provider_summaries: Dict[str, List[ProcessSummary]] = {}
-        fetch_plan: List[tuple[str, str]] = []  # (provider_name, canonical_process_id)
 
-        # fetch plan for all configured processes of each provider
+        # Evict cache entries for providers that are no longer configured
+        # (handles providers.yaml reload where a provider was removed or renamed)
+        self._process_cache.invalidate_stale_keys(set(provider_names))
+
+        provider_summaries: Dict[str, List[ProcessSummary]] = {}
+        fetch_plan: List[
+            tuple[str, str, str]
+        ] = []  # (provider_name, remote_id, canonical_id)
+
         for provider_name in provider_names:
-            
-            # lookup processed in cache for this provider
             cached = self._process_cache.get(provider_name)
             if cached is not None:
                 provider_summaries[provider_name] = list(cached)
-                
-                # if found in cache, skip fetching
                 continue
 
-            configured_raw_ids = self._configured_process_ids(provider_name)
+            configured = self._configured_process_ids(provider_name)
             provider_summaries[provider_name] = []
 
-            for raw_id in configured_raw_ids:
-                canonical_id = self.process_id_validator.create(provider_name, raw_id)
-                fetch_plan.append((provider_name, canonical_id))
+            for remote_id, canonical_id in configured:
+                fetch_plan.append((provider_name, remote_id, canonical_id))
 
-        tasks = [self.get_process(canonical_id) for _, canonical_id in fetch_plan]
+        # Fetch all processes directly (bypasses per-process cache to use remote_id)
+        tasks = [
+            self._fetch_process(provider_name, remote_id)
+            for provider_name, remote_id, _ in fetch_plan
+        ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # create processSummary for each fetched process, ignoring failed fetches
-        for (provider_name, canonical_id), result in zip(fetch_plan, results):
+        for (provider_name, remote_id, canonical_id), result in zip(
+            fetch_plan, results
+        ):
             if isinstance(result, Exception):
                 logger.warning(
                     f"Failed to fetch process '{canonical_id}' from provider '{provider_name}': {result}"
@@ -328,18 +362,22 @@ class ProcessManager(ProcessesPort):
             provider_summaries.setdefault(provider_name, []).append(summary)
 
         for provider_name, summaries in provider_summaries.items():
-            self._process_cache.set(provider_name, summaries)
+            # Bug fix: never cache an empty list — always retry on the next request
+            # so that a providers.yaml fix takes effect without waiting for TTL expiry.
+            if summaries:
+                self._process_cache.set(provider_name, summaries)
 
-        all_processes = [proc for summaries in provider_summaries.values() for proc in summaries]
+        all_processes = [
+            proc for summaries in provider_summaries.values() for proc in summaries
+        ]
         return ProcessList(processes=all_processes)
 
     async def get_process(self, process_id: str) -> Process:
         """
         Retrieve a single process by id. The id may include a provider prefix
-        (e.g. 'provider:proc'). If a provider prefix is present we fetch the
-        process description directly from that provider. Otherwise we search
-        across configured providers for a matching process summary and, if
-        possible, attempt to fetch the full description from the provider.
+        (e.g. 'provider:proc'). If a provider prefix is present we look up the
+        configured remote ID for that provider and fetch directly. Otherwise we
+        search across configured providers for a matching process.
         """
         cached = self._process_cache_by_id.get(process_id)
         if cached is not None:
@@ -349,17 +387,21 @@ class ProcessManager(ProcessesPort):
         logger.info(f"Process cache miss for id '{process_id}'")
 
         try:
-            provider_name, raw_id = self.process_id_validator.extract(process_id)
+            provider_name, _ = self.process_id_validator.extract(process_id)
         except ValueError:
-            provider_name, raw_id = self._resolve_provider_for_bare_id(process_id)
+            provider_name, _ = self._resolve_provider_for_bare_id(process_id)
 
-        return await self._fetch_process(provider_name, raw_id)
+        # Use the verbatim configured remote ID, not the bare stripped ID
+        remote_id = self._find_remote_id(provider_name, process_id)
+        return await self._fetch_process(provider_name, remote_id)
 
     async def cleanup(self) -> None:
         """Cleanup resources"""
         await self.http_client.close()
 
-    async def execute_process(self, process_id: str, payload: dict, headers: dict) -> dict:
+    async def execute_process(
+        self, process_id: str, payload: dict, headers: dict
+    ) -> dict:
         """Delegate execution to JobManager (always async semantics Step 1).
 
         `payload` is the full normalized ExecuteRequest provider payload (includes
@@ -378,9 +420,10 @@ class ProcessManager(ProcessesPort):
                     instance=None,
                 )
             )
-        return await self.job_manager.create_and_forward(process_id, payload or {}, headers)
+        return await self.job_manager.create_and_forward_ii(
+            process_id, payload or {}, headers
+        )
 
     def attach_job_manager(self, job_manager: JobManager) -> None:
         """Attach the JobManager once; explicit wiring keeps type hints simple."""
         self.job_manager = job_manager
-
