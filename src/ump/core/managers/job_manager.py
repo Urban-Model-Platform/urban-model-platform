@@ -84,14 +84,37 @@ class JobExecutionContext(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
-    job: Optional[Job] = None
+    # ---- set by caller before pipeline runs ----
     process_id: str = ""
-    provider: Optional[ProviderConfig] = None
     execute_payload: Dict[str, Any] = {}
     headers: Dict[str, str] = {}
+    # First-class execution context (used by ShapeClientResponseStep)
+    execution_mode: str = "async"  # "sync" | "async" — derived from Prefer header
+    response_mode: str = "raw"  # "raw" | "document" — from ExecuteRequest.response
+    output_specs: Dict[str, Any] = {}  # per-output OutputSpec (transmissionMode etc.)
+
+    # ---- set by ValidateAndResolveStep ----
+    provider: Optional[ProviderConfig] = None
+    provider_process_id: str = ""  # raw process id without provider prefix
+
+    # ---- set by CreateLocalJobStep ----
+    job: Optional[Job] = None
+
+    # ---- set by PersistAcceptedStep ----
+    accepted_si: Optional[JobStatusInfo] = None
+
+    # ---- set by ForwardToProviderStep ----
+    provider_resp: Optional[Dict[str, Any]] = None
+
+    # ---- set by DeriveStatusInfoStep ----
     status_info: Optional[JobStatusInfo] = None
+    remote_status_url: Optional[str] = None
+    remote_job_id: Optional[str] = None
+    diagnostic: Optional[str] = None
+
+    # ---- pipeline control ----
     should_halt: bool = False
-    response: Optional[Dict[str, Any]] = None
+    response: Optional[Dict[str, Any]] = None  # final response dict
 
     def to_result(self) -> ExecutionResult:
         job_id = self.job.id if self.job else ""
@@ -222,28 +245,58 @@ class JobManager:
         execute_payload: Optional[Dict[str, Any]],
         headers: Dict[str, str],
     ) -> Dict[str, Any]:
-        """Pipeline-based execution entrypoint (future replacement for create_and_forward).
+        """Pipeline-based execution entrypoint — replacement for create_and_forward.
 
-        Builds a ``JobExecutionPipeline`` from named steps and runs the context
-        through them.  Steps are not yet implemented — this method is scaffolding
-        for the incremental migration from the monolithic ``create_and_forward``.
+        Extracts execution_mode and response_mode as first-class context fields
+        so pipeline steps (especially ShapeClientResponseStep) can make OGC-correct
+        response-shape decisions without reading the raw payload.
         """
+        prefer = (headers.get("Prefer") or headers.get("prefer") or "").lower()
+        execution_mode = "sync" if "respond-sync" in prefer else "async"
+
+        payload = execute_payload or {}
+        response_mode = payload.get("response", "raw")
+        output_specs = payload.get("outputs", {})
+
         context = JobExecutionContext(
             process_id=process_id,
-            execute_payload=execute_payload or {},
+            execute_payload=payload,
             headers=headers,
+            execution_mode=execution_mode,
+            response_mode=response_mode,
+            output_specs=output_specs,
         )
         pipeline = self._build_execution_pipeline()
         result = await pipeline.execute(context)
         return result.to_response()
 
     def _build_execution_pipeline(self) -> JobExecutionPipeline:
-        """Factory method to construct the step pipeline.
+        """Construct the step pipeline with all dependencies wired."""
+        from ump.core.managers.steps import (
+            CreateLocalJobStep,
+            DeriveStatusInfoStep,
+            FinalizeJobStep,
+            ForwardToProviderStep,
+            HandleProviderResponseStep,
+            InitiatePollingStep,
+            PersistAcceptedStep,
+            ShapeClientResponseStep,
+            ValidateAndResolveStep,
+        )
 
-        Steps are intentionally empty stubs — implement each as a concrete
-        ``PipelineStep`` subclass and wire them here incrementally.
-        """
-        return JobExecutionPipeline(steps=[])
+        return JobExecutionPipeline(
+            steps=[
+                ValidateAndResolveStep(self._validator, self._providers),
+                CreateLocalJobStep(self.config),
+                PersistAcceptedStep(self._repo, self._observers),
+                ForwardToProviderStep(self._http, self._repo, self._retry, self.config),
+                HandleProviderResponseStep(self._repo),
+                DeriveStatusInfoStep(self._status_orchestrator),
+                FinalizeJobStep(self._repo, self._observers),
+                ShapeClientResponseStep(),
+                InitiatePollingStep(self._schedule_poll),
+            ]
+        )
 
     async def create_and_forward(
         self,
