@@ -9,8 +9,8 @@
             "name": "ump",
             "type": "debugpy",
             "request": "launch",
-            "module": "ump.main",
-            // "program": "ump.main",
+            // "module": "ump",
+            "program": ".venv/bin/ump",
             "console": "integratedTerminal",
             // "args": [
             //     "-m",
@@ -38,12 +38,8 @@
             "name": "ump + db",
             "type": "debugpy",
             "request": "launch",
-            "module": "flask",
+            "program": ".venv/bin/ump",
             "envFile": "${workspaceFolder}/.env",
-            "env": {
-                "FLASK_APP": "src/ump/main.py",
-                "FLASK_DEBUG": "1"
-            },
             "args": [
                 "--debug",
                 "run",
@@ -62,7 +58,7 @@
             "name": "ump + db + migrations",
             "type": "debugpy",
             "request": "launch",
-            "module": "flask",
+            "program": ".venv/bin/ump",
             "envFile": "${workspaceFolder}/.env",
             "env": {
                 "FLASK_APP": "src/ump/main.py",
@@ -74,12 +70,12 @@
                 "--no-debugger",
                 "-p",
                 // "5005",
-                "${command:pickArgs}"
+                "${command:pickArgs}" // enter a port number
             ],
             "jinja": true,
             "autoStartBrowser": false,
-            "preLaunchTask": "setup-environment",
-            "postDebugTask": "stop-postgis-container",
+            "preLaunchTask": "prepare-dev-setup",
+            "postDebugTask": "stop-ump-dev",
             "justMyCode": false,
         },
         {

@@ -1,7 +1,7 @@
 {
     "version": "2.0.0",
     "tasks": [{
-        "label": "start-postgis-container",
+        "label": "start-ump-dev",
         "type": "shell",
         "command": "docker",
         "args": [
@@ -10,11 +10,11 @@
             "docker-compose-dev.yaml",
             "up",
             "-d",
-            "api-db",
-            "geoserver-db"
+            "ump-db",
+            // "mock-ogc-server"
         ],
     },{
-            "label": "stop-postgis-container",
+            "label": "stop-ump-dev",
             "type": "shell",
             "command": "docker",
             "args": [
@@ -23,31 +23,27 @@
                 "docker-compose-dev.yaml",
                 "rm",
                 "-s",
-                "api-db",
-                "geoserver-db",
+                "ump-db",
+                "mock-ogc-server",
                 "--force"
             ],
     },{
         "label":"run-db-migrations",
         "type": "shell",
-        "command": "flask",
-        "args": [
-            "db",
-            "upgrade"
-        ],
+        "command": "${workspaceFolder}/.venv/bin/ump-migrate",
         "options": {
+            "cwd": "${workspaceFolder}",
             "env": {
-                "FLASK_APP": "src/ump/main.py",
-                "FLASK_ENV": "development"
+                "UMP_DATABASE_URL": "postgresql+asyncpg://ump:ump@ump-db:5432/ump",
             }
         },
         "dependsOn": [
-            "start-postgis-container"
+            "start-ump-dev"
         ],
     },{
-        "label": "setup-environment",
+        "label": "prepare-dev-setup",
         "dependsOn": [
-            "start-postgis-container",
+            "start-ump-dev",
             "run-db-migrations"
         ]
 
