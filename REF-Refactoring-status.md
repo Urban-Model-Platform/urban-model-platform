@@ -384,8 +384,8 @@ type: string
 enum: [sync-execute, async-execute, dismiss]
 ```
 
-Deferred execution modes:
-- Sync execute (no `Prefer: respond-async`)
+Deferred execution modes (all belong in Feature VI pipeline implementation):
+- **Sync execute** (`Prefer: respond-sync` or absent `Prefer`) — see Feature VI for design
 - Transmission direct / local-by-ref
 - Streaming results to clients
 
@@ -403,6 +403,8 @@ Deferred execution modes:
 
 **Goal**: replace the monolithic `create_and_forward` method (~200 lines) with a composable `JobExecutionPipeline` of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort by setting `context.should_halt = True`.
 
+**Sync execution is a primary driver for completing this refactoring.** The monolithic `create_and_forward` currently hard-codes "always return 201 + accepted statusInfo". Full OGC compliance requires the core to select among 8+ different response shapes depending on execution mode × response mode × transmissionMode × number of outputs. A pipeline step `ShapeClientResponseStep` is the right place to encode this decision without polluting the adapter.
+
 **Current state**: scaffolding exists (`PipelineStep`, `ExecutionResult`, `JobExecutionContext`, `JobExecutionPipeline`, `create_and_forward_ii`) in `src/ump/core/managers/job_manager.py`. Steps are empty — `_build_execution_pipeline()` returns `JobExecutionPipeline(steps=[])`. `create_and_forward` remains the active production path.
 
 **Planned steps** (each a `PipelineStep` subclass under `src/ump/core/managers/steps/`):
@@ -416,24 +418,58 @@ Deferred execution modes:
 | `HandleProviderResponseStep` | Detect upstream errors ≥ 400, propagate or absorb | `_handle_upstream_error_response` |
 | `DeriveStatusInfoStep` | Select derivation strategy via `StatusDerivationOrchestrator` | `_derive_status_info` |
 | `FinalizeJobStep` | Persist derived status, notify observers | `_finalize_job` |
-| `InitiatePollingStep` | Schedule background poll if non-terminal | `_schedule_poll` |
+| `ShapeClientResponseStep` | Select the correct OGC response shape from the table below | **new** |
+| `InitiatePollingStep` | Schedule background poll if non-terminal (async only) | `_schedule_poll` |
 
 Future extension steps (insert without touching others):
 - `ResolveOutputFormatsStep` — per-output `(media_type, is_binary)` from execute request + process description
 - `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` per provider config
 - `ApplyResponseModePolicyStep` — override `response` field sent to remote
 
-**`JobExecutionContext` fields**:
+**OGC execution response table** — `ShapeClientResponseStep` implements this:
+
+| execution_mode | response_mode | transmissionMode | # outputs | HTTP code | Content-Type | Body |
+|---|---|---|---|---|---|---|
+| async | any | any | any | 201 | application/json | statusInfo |
+| sync | raw | value | 1 | 200 | per output definition | raw output bytes |
+| sync | raw | value | >1 | 200 | multipart/related | one part per output |
+| sync | raw | reference | 1 | 204 | — | empty + Link headers |
+| sync | raw | mixed | >1 | 200 | multipart/related | one part per output |
+| sync | document | value | any | 200 | application/json | results document |
+
+The decision belongs in core; the adapter only serialises the dict to HTTP (e.g., builds the multipart MIME body for `multipart/related` rows).
+
+**Adapter/core boundary for sync**
+
+The adapter currently passes `Prefer` as `headers["Prefer"]` but does NOT pass `exec_req.response` (raw vs document) or `exec_req.outputs` (per-output `transmissionMode`) as first-class parameters to the core's decision logic — they are buried inside `provider_payload` and forwarded to the remote without being used by UMP itself. To support `ShapeClientResponseStep`, the pipeline entrypoint needs:
+
+```python
+# What the adapter must extract and pass as first-class context (not just in provider_payload):
+exec_req.response           # ResponseMode.raw | ResponseMode.document
+exec_req.outputs            # Dict[output_id, OutputSpec] — contains transmissionMode per output
+# Derived from Prefer header:
+execution_mode              # "sync" | "async"
+```
+
+These become first-class fields on `JobExecutionContext` (see below); `ShapeClientResponseStep` reads them to select the correct row in the OGC table.
+
+**`JobExecutionContext` fields** (updated — additions marked with ★):
 ```python
 class JobExecutionContext(BaseModel):
     job: Optional[Job]               # set by CreateLocalJobStep
     process_id: str
     provider: Optional[ProviderConfig]  # set by ValidateAndResolveStep
-    execute_payload: Dict[str, Any]  # normalized ExecuteRequest payload
+    execute_payload: Dict[str, Any]  # normalized ExecuteRequest payload for the remote
     headers: Dict[str, str]          # forwarding headers (Prefer, etc.)
+    # ★ first-class execution context (used by ShapeClientResponseStep, not forwarded)
+    execution_mode: str = "async"    # "sync" | "async" — derived from Prefer header
+    response_mode: str = "raw"       # "raw" | "document" — from ExecuteRequest.response
+    output_specs: Dict[str, Any] = {}  # ExecuteRequest.outputs (transmissionMode per output)
+    output_formats: Dict[str, Any] = {}  # resolved by ResolveOutputFormatsStep
+    # pipeline control
     status_info: Optional[JobStatusInfo]  # set by DeriveStatusInfoStep
-    should_halt: bool                # abort flag
-    response: Optional[Dict]         # direct HTTP response (bypasses normal flow)
+    should_halt: bool = False        # abort flag
+    response: Optional[Dict] = None  # final response dict (set by ShapeClientResponseStep)
 ```
 
 **Migration strategy**:
