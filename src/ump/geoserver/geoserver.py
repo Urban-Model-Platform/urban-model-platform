@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import shutil
+import subprocess
+import tempfile
 import time
+import uuid
 from urllib.parse import quote, urlencode
 
 import requests
@@ -228,6 +231,150 @@ class Geoserver:
                 payload={"error": type(e).__name__, "message": e},
             ) from e
         return success
+
+    def save_flatgeobuf_results(self, job_id: str, source: str):
+        """Efficiently ingest FlatGeobuf into PostGIS via GDAL/ogr2ogr.
+
+        The source can be either a local file path or an HTTP/HTTPS URL.
+        Data is imported into a temporary table and then normalized into
+        ``job_results`` so downstream GeoServer publishing remains unchanged.
+        """
+        self.job_id = job_id
+        temp_table = self._temp_table_name(job_id)
+
+        try:
+            self.create_workspace()
+            self._ogr2ogr_import_flatgeobuf(source, temp_table)
+            self._merge_temp_table_into_results(job_id, temp_table)
+
+            success = self.create_central_store()
+            success = self.create_job_layer(job_id=job_id)
+            return success
+        except Exception as e:
+            raise GeoserverException(
+                "FlatGeobuf result could not be uploaded to geoserver.",
+                payload={"error": type(e).__name__, "message": e},
+            ) from e
+        finally:
+            self._drop_table_if_exists(temp_table)
+
+    def save_flatgeobuf_bytes(self, job_id: str, payload: bytes):
+        """Persist FlatGeobuf bytes by writing a temp file and using ogr2ogr."""
+        with tempfile.NamedTemporaryFile(suffix=".fgb", delete=True) as tmp:
+            tmp.write(payload)
+            tmp.flush()
+            return self.save_flatgeobuf_results(job_id=job_id, source=tmp.name)
+
+    def _temp_table_name(self, job_id: str) -> str:
+        safe = "".join(ch if ch.isalnum() else "_" for ch in job_id)
+        return f"tmp_fgb_{safe[:40]}_{uuid.uuid4().hex[:8]}"
+
+    def _ogr2ogr_import_flatgeobuf(self, source: str, temp_table: str):
+        conn_str = (
+            "PG:"
+            f"host={config.UMP_GEOSERVER_INTERNAL_DB_HOST} "
+            f"port={config.UMP_GEOSERVER_INTERNAL_DB_PORT} "
+            f"dbname={config.UMP_GEOSERVER_DB_NAME} "
+            f"user={config.UMP_GEOSERVER_DB_USER} "
+            f"password={config.UMP_GEOSERVER_DB_PASSWORD.get_secret_value()}"
+        )
+
+        command = [
+            "ogr2ogr",
+            "-f",
+            "PostgreSQL",
+            conn_str,
+            source,
+            "-nln",
+            temp_table,
+            "-overwrite",
+            "--config",
+            "PG_USE_COPY",
+            "YES",
+        ]
+
+        try:
+            subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise GeoserverException(
+                "ogr2ogr is not installed in runtime environment.",
+                payload={"error": type(e).__name__, "message": str(e)},
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise GeoserverException(
+                "ogr2ogr FlatGeobuf import failed.",
+                payload={
+                    "error": type(e).__name__,
+                    "message": e.stderr or e.stdout,
+                },
+            ) from e
+
+    def _merge_temp_table_into_results(self, job_id: str, temp_table: str):
+        geom_column = self._detect_geometry_column(temp_table)
+        if not geom_column:
+            raise GeoserverException(
+                f"No geometry column detected in temp table '{temp_table}'."
+            )
+
+        with engine.connect() as conn:
+            conn.execute(
+                text(f"DELETE FROM {self.RESULTS_TABLE_NAME} WHERE job_id = :job_id"),
+                {"job_id": job_id},
+            )
+
+            conn.execute(
+                text(
+                    f"""
+                    INSERT INTO {self.RESULTS_TABLE_NAME}
+                    (
+                        job_id,
+                        feature_index,
+                        properties,
+                        geometry,
+                        created_at,
+                        updated_at
+                    )
+                    SELECT
+                        :job_id,
+                        ROW_NUMBER() OVER () - 1,
+                        to_jsonb(t) - '{geom_column}',
+                        ST_Force2D(t.{geom_column}),
+                        NOW(),
+                        NOW()
+                    FROM {temp_table} t
+                    """
+                ),
+                {"job_id": job_id},
+            )
+            conn.commit()
+
+    def _detect_geometry_column(self, table_name: str) -> str | None:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT f_geometry_column
+                    FROM public.geometry_columns
+                    WHERE f_table_schema = 'public'
+                      AND f_table_name = :table_name
+                    LIMIT 1
+                    """
+                ),
+                {"table_name": table_name},
+            ).fetchone()
+        if row is None:
+            return None
+        return row[0]
+
+    def _drop_table_if_exists(self, table_name: str):
+        with engine.connect() as conn:
+            conn.execute(text(f"DROP TABLE IF EXISTS {table_name}"))
+            conn.commit()
 
     def publish_layer(self, store_name: str, layer_name: str):
         try:

@@ -5,7 +5,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 import aiohttp
 import geopandas as gpd
@@ -13,13 +13,24 @@ import geopandas as gpd
 import ump.api.providers as providers
 from ump.api import remote_auth
 from ump.api.db_handler import DBHandler
+from ump.api.models.flatgeobuf_ingest import (
+    build_storage_job_id,
+    extract_flatgeobuf_bytes,
+    store_flatgeobuf_ingest,
+    try_decode_base64,
+)
 from ump.api.models.job_status import JobStatus
 from ump.api.models.ogc_exception import OGCExceptionResponse
+from ump.api.models.output_media_type import (
+    FLATGEOBUF_MEDIA_TYPES,
+    GEOJSON_MEDIA_TYPES,
+    detect_output_media_type,
+)
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
 from ump.config import app_settings as config
 from ump.errors import InvalidUsage, OGCProcessException
 from ump.geoserver.geoserver import Geoserver
-from ump.utils import fetch_json, join_url_parts
+from ump.utils import join_url_parts
 
 logger = logging.getLogger(__name__)
 
@@ -584,14 +595,17 @@ class Job:
             )
             return inline_results
 
-        result_document = {}
+        result_document: dict = {}
 
         for output_id, output_data in inline_results.items():
             # Default to "value" per OGC API Processes spec
             output_mode = self.output_transmission_modes.get(output_id, "value")
 
             if output_mode == "reference":
-                ref_link = self._build_reference_link_for_output(output_id)
+                ref_link = self._build_reference_link_for_output(
+                    output_id,
+                    output_data,
+                )
                 if ref_link is not None:
                     result_document[output_id] = ref_link
                 else:
@@ -609,7 +623,11 @@ class Job:
 
         return result_document
 
-    def _build_reference_link_for_output(self, output_id: str) -> dict | None:
+    def _build_reference_link_for_output(
+        self,
+        output_id: str,
+        output_data: Any,
+    ) -> dict | None:
         """Build an OGC link.yaml object for a specific output.
 
         Per OGC API Processes link.yaml schema:
@@ -639,13 +657,42 @@ class Job:
                 return None
 
             job_id = self._require_job_id()
-            geoserver_url = Geoserver().get_layer_reference_url(job_id)
+            media_type = self._detect_output_media_type(output_data)
+            geoserver = Geoserver()
+
+            if media_type in FLATGEOBUF_MEDIA_TYPES:
+                saved = self._store_flatgeobuf_reference_output(
+                    geoserver,
+                    self._build_storage_job_id(job_id, output_id),
+                    output_data,
+                )
+                if not saved:
+                    return None
+            elif media_type in GEOJSON_MEDIA_TYPES:
+                if isinstance(output_data, dict) and "features" in output_data:
+                    geoserver.save_results(
+                        job_id=self._build_storage_job_id(job_id, output_id),
+                        data=output_data,
+                    )
+            else:
+                logger.warning(
+                    "Job %s, output %s: media type '%s' not supported for "
+                    "GeoServer reference conversion",
+                    self.job_id,
+                    output_id,
+                    media_type,
+                )
+                return None
+
+            geoserver_url = geoserver.get_layer_reference_url(
+                self._build_storage_job_id(job_id, output_id)
+            )
 
             # OGC link.yaml compliant object
             return {
                 "href": geoserver_url,
                 "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
-                "type": "application/geo+json",
+                "type": media_type,
                 "title": f"Result '{output_id}' for job {self.job_id}",
             }
 
@@ -657,6 +704,45 @@ class Job:
                 e,
             )
             return None
+
+    def _build_storage_job_id(self, job_id: str, output_id: str) -> str:
+        """Create output-specific storage key while preserving old table schema."""
+        return build_storage_job_id(job_id, output_id)
+
+    def _detect_output_media_type(self, output_data: Any) -> str:
+        """Detect output media type from OGC output payload.
+
+        See :func:`~ump.api.models.output_media_type.detect_output_media_type`
+        for the full detection priority.
+        """
+        return detect_output_media_type(output_data)
+
+    def _store_flatgeobuf_reference_output(
+        self,
+        geoserver: Geoserver,
+        storage_job_id: str,
+        output_data: Any,
+    ) -> bool:
+        """Persist FlatGeobuf output via efficient GDAL/ogr2ogr ingestion.
+
+        See :func:`~ump.api.models.flatgeobuf_ingest.store_flatgeobuf_ingest`
+        for the full routing logic.
+        """
+        return store_flatgeobuf_ingest(
+            geoserver, storage_job_id, output_data, self.job_id or ""
+        )
+
+    def _extract_flatgeobuf_bytes(self, output_data: Any) -> bytes | None:
+        """Extract FlatGeobuf bytes from supported result representations.
+
+        See :func:`~ump.api.models.flatgeobuf_ingest.extract_flatgeobuf_bytes`
+        for supported payload forms.
+        """
+        return extract_flatgeobuf_bytes(output_data)
+
+    def _try_decode_base64(self, candidate: str) -> bytes | None:
+        """Attempt to base64-decode a string, returning ``None`` on failure."""
+        return try_decode_base64(candidate)
 
     def _build_reference_result(self) -> dict | None:
         """Build an OGC-compliant results document with a link to the result.
@@ -699,7 +785,12 @@ class Job:
         }
 
     async def _fetch_inline_results(self) -> dict:
-        """Fetch the results document from the remote model server."""
+        """Fetch results from remote model server.
+
+        Supports JSON (standard OGC results document) and direct binary
+        responses. Binary responses are wrapped into a synthetic single-output
+        OGC-like structure so downstream per-output logic can still run.
+        """
         provider_prefix, remote_job_id = self._require_remote_execution_context()
         provider: ProviderConfig = providers.get_providers()[provider_prefix]
         self.provider_url = provider.server_url
@@ -709,17 +800,49 @@ class Job:
 
         headers = {
             "Content-type": "application/json",
-            "Accept": "application/json",
+            "Accept": (
+                "application/json,application/geo+json,application/vnd.flatgeobuf,*/*"
+            ),
         }
         headers.update(provider_auth.headers)
 
         async with aiohttp.ClientSession(timeout=results_client_timeout) as session:
-            return await fetch_json(
-                session,
-                url=f"{self.provider_url}jobs/{remote_job_id}/results?f=json",
+            url = f"{self.provider_url}jobs/{remote_job_id}/results?f=json"
+            async with session.get(
+                url,
                 headers=headers,
                 auth=provider_auth.auth,
-            )
+            ) as resp:
+                if resp.status >= 400:
+                    resp.raise_for_status()
+
+                content_type = resp.headers.get("Content-Type", "")
+                media_type = content_type.split(";")[0].strip().lower()
+
+                if media_type in FLATGEOBUF_MEDIA_TYPES:
+                    raw = await resp.read()
+                    return {
+                        "result": {
+                            "type": media_type,
+                            "data": base64.b64encode(raw).decode("ascii"),
+                            "encoding": "base64",
+                        }
+                    }
+
+                if (
+                    "application/json" in media_type
+                    or "application/geo+json" in media_type
+                ):
+                    return await resp.json()
+
+                # Fallback: preserve response as text payload
+                text_payload = await resp.text()
+                return {
+                    "result": {
+                        "type": media_type or "text/plain",
+                        "value": text_payload,
+                    }
+                }
 
     async def results_to_geoserver(self):
         try:
