@@ -25,6 +25,7 @@ from ump.api.transmission_policy import (
     TransmissionPolicyError,
     apply_forwarded_mode_to_execute_outputs,
     decide_transmission,
+    extract_output_transmission_modes,
     extract_requested_mode_from_outputs,
 )
 from ump.config import app_settings as config
@@ -427,6 +428,9 @@ class Process:
           outputs. The mode is then interpreted via ``transmission-mode-policy``
           from providers configuration.
 
+        Per-output transmission modes from the original request are preserved
+        and stored with the job for later delivery resolution.
+
         Args:
             request_body: OGC execute request body.
             user: User ID from authentication.
@@ -442,6 +446,12 @@ class Process:
         transmission_decision = self._resolve_transmission_decision(
             request_body, process_config
         )
+
+        # Preserve original per-output transmission modes before rewriting
+        original_output_modes = extract_output_transmission_modes(
+            request_body.get("outputs")
+        )
+
         process_output_ids = (
             list(self.outputs.keys()) if isinstance(self.outputs, dict) else None
         )
@@ -494,6 +504,7 @@ class Process:
                     request_body,
                     user,
                     transmission_decision.delivered_mode,
+                    output_transmission_modes=original_output_modes,
                 )
 
                 headers.pop("Prefer", None)
@@ -637,12 +648,14 @@ class Process:
         request_body,
         user,
         transmission_mode: TransmissionMode = "value",
+        output_transmission_modes: dict | None = None,
     ):
         """Create and persist a local job instance in the UMP database.
 
         Stores the job metadata along with the OGC transmission mode that
         will be used to deliver results when ``/jobs/{jobID}/results`` is
-        queried.
+        queried. Per-output transmission modes from the original request
+        are preserved for later resolution.
 
         Args:
             remote_job_id: Job ID from the remote model server.
@@ -651,6 +664,8 @@ class Process:
             user: User ID from authentication.
             transmission_mode: Resolved OGC transmission mode
                 (``'value'`` or ``'reference'``).
+            output_transmission_modes: Original per-output transmission modes
+                from the execute request (optional).
 
         Returns:
             Job: The created and persisted Job instance.
@@ -666,6 +681,7 @@ class Process:
             user=user,
             process_version=self.version,
             transmission_mode=transmission_mode,
+            output_transmission_modes=output_transmission_modes,
         )
 
         return job

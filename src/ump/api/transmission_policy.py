@@ -133,6 +133,31 @@ def decide_transmission(
     raise TransmissionPolicyError(f"Unknown transmission-mode-policy '{policy}'.")
 
 
+def extract_output_transmission_modes(
+    outputs: dict[str, Any] | None,
+) -> dict[str, TransmissionMode]:
+    """Extract individual transmissionMode per output ID.
+
+    Returns a mapping of output_id -> transmissionMode for all outputs
+    that explicitly specify a transmissionMode, or have it set to "value" by default.
+
+    This is used to preserve the original per-output transmission modes
+    before they are rewritten by the forwarded_mode policy.
+    """
+    if not outputs or not isinstance(outputs, dict):
+        return {}
+
+    modes: dict[str, TransmissionMode] = {}
+    for output_id, output_def in outputs.items():
+        if not isinstance(output_def, dict):
+            continue
+        # Default to "value" if not explicitly specified
+        mode = output_def.get("transmissionMode", "value")
+        if mode in {"value", "reference"}:
+            modes[output_id] = mode
+    return modes
+
+
 def apply_forwarded_mode_to_execute_outputs(
     execute_body: dict[str, Any],
     forwarded_mode: TransmissionMode,

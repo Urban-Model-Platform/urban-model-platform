@@ -87,6 +87,7 @@ class Job:
         self.process_id: str | None = None
         self.provider_url = None
         self.transmission_mode: TransmissionMode = "value"
+        self.output_transmission_modes: dict[str, TransmissionMode] = {}
 
         # TODO: this produces 404 if a job is beeing queried for which was
         # stored with a user id, consider to distinguish between
@@ -120,6 +121,7 @@ class Job:
         user=None,
         process_version=None,
         transmission_mode=None,
+        output_transmission_modes=None,
     ):
         self._set_attributes(
             job_id,
@@ -132,6 +134,10 @@ class Job:
             process_version=process_version,
             transmission_mode=transmission_mode,
         )
+
+        # Store per-output transmission modes (preserved from execute request)
+        if output_transmission_modes is not None:
+            self.output_transmission_modes = dict(output_transmission_modes)
 
         # TODO: these metadata should come from remote job
         # instead of being set here
@@ -150,7 +156,7 @@ class Job:
                 progress, parameters, message, created,
                 started, finished, updated, user_id,
                 process_title, name, process_version, hash,
-                transmission_mode
+                transmission_mode, output_transmission_modes
             )
             VALUES
             (
@@ -172,7 +178,8 @@ class Job:
                 %(name)s,
                 %(process_version)s,
                 %(hash)s,
-                %(transmission_mode)s
+                %(transmission_mode)s,
+                %(output_transmission_modes)s
             )
         """
         params = self._to_dict()
@@ -289,6 +296,19 @@ class Job:
         # OGC default for legacy rows that may pre-date the migration.
         self.transmission_mode = data.get("transmission_mode") or "value"
 
+        # Load per-output transmission modes from serialized JSON.
+        # For backward compatibility with jobs created before this field existed,
+        # an empty dict is used as default.
+        output_modes_raw = data.get("output_transmission_modes")
+        if output_modes_raw:
+            try:
+                self.output_transmission_modes = json.loads(output_modes_raw)
+            except (json.JSONDecodeError, TypeError):
+                # Fall back to empty dict if deserialization fails
+                self.output_transmission_modes = {}
+        else:
+            self.output_transmission_modes = {}
+
     def _raise_invalid_job_state(self, detail: str) -> NoReturn:
         raise OGCProcessException(
             OGCExceptionResponse(
@@ -349,6 +369,7 @@ class Job:
             "user_id": self.user_id,
             "process_version": self.process_version,
             "transmission_mode": self.transmission_mode,
+            "output_transmission_modes": json.dumps(self.output_transmission_modes),
         }
 
     def update(self):
@@ -509,29 +530,133 @@ class Job:
             return {k: job_dict[k] for k in self.DISPLAYED_ATTRIBUTES}
 
     async def results(self):
-        """Return job results following the configured OGC transmission mode.
+        """Return job results following OGC API Processes transmission modes.
 
-        - ``value``: fetch the result document from the model server and
-          return it inline (OGC results.yaml).
-        - ``reference``: return a result link (link.yaml) pointing to the
-          stored representation (e.g. a GeoServer WFS layer). The remote
-          model server is not contacted in this case.
+        Per OGC API Processes - Part 1: Core (Clause 7.13), each output can
+        have its own transmission mode:
+
+        - ``value``: Return the output data inline.
+        - ``reference``: Return an OGC link.yaml object pointing to the
+          stored representation (e.g. a GeoServer WFS layer).
+
+        The per-output modes are determined from ``output_transmission_modes``
+        (preserved from the original execute request). If not available,
+        falls back to the global ``transmission_mode``.
 
         Returns:
-            dict: An OGC results document. For reference mode the document is
-            keyed by output identifier and the value is a link object.
+            dict: An OGC results document where each output is either inline
+            data (value mode) or a link.yaml object (reference mode).
         """
         if self.status != JobStatus.successful.value:
             self.results_not_available()
 
-        if self.transmission_mode == "reference":
-            reference = self._build_reference_result()
-            if reference is not None:
-                return reference
-            # Fall back to inline results if reference mode is not applicable
-            # for the configured result storage backend.
+        # Fetch inline results from remote server (always needed as base)
+        inline_results = await self._fetch_inline_results()
 
-        return await self._fetch_inline_results()
+        # If no per-output modes stored, use legacy global behavior
+        if not self.output_transmission_modes:
+            if self.transmission_mode == "reference":
+                reference = self._build_reference_result()
+                if reference is not None:
+                    return reference
+            return inline_results
+
+        # Apply per-output transmission modes
+        return self._apply_per_output_transmission_modes(inline_results)
+
+    def _apply_per_output_transmission_modes(self, inline_results: dict) -> dict:
+        """Transform inline results based on per-output transmission modes.
+
+        For each output in inline_results:
+        - If mode="reference": Return OGC link.yaml pointing to GeoServer
+        - If mode="value" or unspecified: Return inline data
+
+        Args:
+            inline_results: Raw results fetched from remote server
+
+        Returns:
+            dict: OGC results document with mixed value/reference outputs
+        """
+        if not isinstance(inline_results, dict):
+            logger.warning(
+                "Job %s: inline_results is not a dict, returning as-is",
+                self.job_id,
+            )
+            return inline_results
+
+        result_document = {}
+
+        for output_id, output_data in inline_results.items():
+            # Default to "value" per OGC API Processes spec
+            output_mode = self.output_transmission_modes.get(output_id, "value")
+
+            if output_mode == "reference":
+                ref_link = self._build_reference_link_for_output(output_id)
+                if ref_link is not None:
+                    result_document[output_id] = ref_link
+                else:
+                    # Fallback to inline if reference cannot be created
+                    logger.warning(
+                        "Job %s, output %s: reference mode requested but "
+                        "unavailable, returning inline data",
+                        self.job_id,
+                        output_id,
+                    )
+                    result_document[output_id] = output_data
+            else:
+                # Value mode: return inline data
+                result_document[output_id] = output_data
+
+        return result_document
+
+    def _build_reference_link_for_output(self, output_id: str) -> dict | None:
+        """Build an OGC link.yaml object for a specific output.
+
+        Per OGC API Processes link.yaml schema:
+        - href (required): URL to the result resource
+        - rel: Link relation type
+        - type: Media type of the result
+        - title: Human-readable title
+
+        Args:
+            output_id: The output identifier
+
+        Returns:
+            dict | None: OGC link.yaml object, or None if reference unavailable
+        """
+        try:
+            provider_prefix, process_id = self._require_provider_process_context()
+            result_storage = providers.check_result_storage(provider_prefix, process_id)
+
+            if result_storage != "geoserver":
+                logger.debug(
+                    "Job %s, output %s: result-storage='%s' does not support "
+                    "reference mode",
+                    self.job_id,
+                    output_id,
+                    result_storage,
+                )
+                return None
+
+            job_id = self._require_job_id()
+            geoserver_url = Geoserver().get_layer_reference_url(job_id)
+
+            # OGC link.yaml compliant object
+            return {
+                "href": geoserver_url,
+                "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
+                "type": "application/geo+json",
+                "title": f"Result '{output_id}' for job {self.job_id}",
+            }
+
+        except Exception as e:
+            logger.error(
+                "Job %s, output %s: failed to build reference link: %s",
+                self.job_id,
+                output_id,
+                e,
+            )
+            return None
 
     def _build_reference_result(self) -> dict | None:
         """Build an OGC-compliant results document with a link to the result.

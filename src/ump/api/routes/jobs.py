@@ -7,14 +7,16 @@ from apiflask import APIBlueprint
 from flask import Response, g, request
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
+
+from ump.api.db_handler import engine
+from ump.api.jobs import append_ensemble_list, get_jobs
+from ump.api.keycloak_utils import find_user_id_by_email
 from ump.api.models.ensemble import JobsUsers
 from ump.api.models.job import Job
 from ump.api.models.job_comments import JobComment
-from ump.api.jobs import append_ensemble_list, get_jobs
-from ump.api.keycloak_utils import find_user_id_by_email
-from ump.api.db_handler import engine
 
 jobs = APIBlueprint("jobs", __name__)
+
 
 @jobs.route("/", defaults={"page": "index"})
 def index(page):
@@ -62,8 +64,8 @@ def get_results(job_id=None):
         status=200,
     )
 
-    if job.transmission_mode == "reference":
-        _add_reference_link_headers(response, results, job_id)
+    # Add Link headers for any reference outputs (regardless of global mode)
+    _add_reference_link_headers(response, results, job_id)
 
     return response
 
@@ -203,7 +205,9 @@ def create_comment(job_id):
 def show(job_id=None):
     auth = g.get("auth_token")
     if request.args.get("additionalMetadata") == "true":
-        job = Job(job_id, None if auth is None else auth["sub"]).display(additional_metadata=True)
+        job = Job(job_id, None if auth is None else auth["sub"]).display(
+            additional_metadata=True
+        )
     else:
         job = Job(job_id, None if auth is None else auth["sub"]).display()
     append_ensemble_list(job)
