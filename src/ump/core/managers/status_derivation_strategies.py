@@ -12,7 +12,6 @@ from typing import Optional
 from urllib.parse import urljoin
 
 from ump.core.interfaces.status_derivation import (
-    StatusDerivationStrategy,
     StatusDerivationContext,
     StatusDerivationResult,
 )
@@ -20,7 +19,7 @@ from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.models.job import JobStatusInfo, StatusCode
 from ump.core.settings import logger
 
-REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
+REQUIRED_STATUS_FIELDS = {"jobID", "status"}
 
 
 class DirectStatusInfoStrategy:
