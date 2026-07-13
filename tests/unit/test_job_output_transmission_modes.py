@@ -289,13 +289,39 @@ class TestApplyPerOutputTransmissionModes:
 
         assert result == "not a dict"
 
+    def test_single_output_geojson_payload_is_normalized_and_referenced(self):
+        """Unwrapped single-output GeoJSON is wrapped using output id."""
+        job = _create_test_job(output_transmission_modes={"result": "reference"})
+
+        # Remote provider returns a direct FeatureCollection, not
+        # {'result': <FeatureCollection>}.
+        inline_results = {
+            "type": "FeatureCollection",
+            "features": [{"id": 1}],
+        }
+
+        with patch.object(
+            job,
+            "_build_reference_link_for_output",
+            return_value={"href": "http://geoserver/layer"},
+        ) as mock_build:
+            result = job._apply_per_output_transmission_modes(inline_results)
+
+        assert result == {"result": {"href": "http://geoserver/layer"}}
+        mock_build.assert_called_once_with("result", inline_results)
+
 
 class TestBuildReferenceLinkForOutput:
-    """Tests for _build_reference_link_for_output()."""
+    """Tests for _build_reference_link_for_output().
+
+    Note: Jobs are created with status="accepted" (not "successful")
+    because the optimization skips re-ingesting for successful jobs.
+    These tests verify the ingest logic, so they use accepted status.
+    """
 
     def test_returns_ogc_compliant_link(self):
         """Returns OGC link.yaml compliant object."""
-        job = _create_test_job()
+        job = _create_test_job(status="accepted")  # Must ingest
 
         with (
             patch(
@@ -359,7 +385,7 @@ class TestBuildReferenceLinkForOutput:
 
     def test_flatgeobuf_media_type_is_preserved_in_reference_link(self):
         """Reference link keeps flatgeobuf media type when detected."""
-        job = _create_test_job()
+        job = _create_test_job(status="accepted")  # Must ingest
 
         with (
             patch(
@@ -616,3 +642,29 @@ class TestResultsWithPerOutputModes:
 
         # slope should fall back to inline (reference failed)
         assert result["slope"] == inline_results["slope"]
+
+    def test_results_normalizes_unwrapped_single_output_payload(self):
+        """results() wraps unwrapped single-output payload before mode handling."""
+
+        job = _create_test_job(output_transmission_modes={"result": "reference"})
+
+        inline_results = {
+            "type": "FeatureCollection",
+            "features": [{"id": 1}],
+        }
+
+        with (
+            patch.object(
+                job, "_fetch_inline_results", new_callable=AsyncMock
+            ) as mock_fetch,
+            patch.object(
+                job,
+                "_build_reference_link_for_output",
+                return_value={"href": "http://geoserver/layer"},
+            ) as mock_build,
+        ):
+            mock_fetch.return_value = inline_results
+            result = asyncio.run(job.results())
+
+        assert result == {"result": {"href": "http://geoserver/layer"}}
+        mock_build.assert_called_once_with("result", inline_results)

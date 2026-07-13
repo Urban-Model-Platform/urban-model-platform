@@ -860,8 +860,22 @@ class Process:
 
     async def _store_results_if_needed(self, job: Job):
         try:
-            if job.transmission_mode != "reference":
+            # Check if any output is in "reference" mode (per-output or job-level)
+            has_reference_output = False
+            
+            if job.output_transmission_modes:
+                # Per-output modes: check if ANY output is in reference mode
+                has_reference_output = any(
+                    mode == "reference" 
+                    for mode in job.output_transmission_modes.values()
+                )
+            else:
+                # Fall back to job-level transmission mode
+                has_reference_output = job.transmission_mode == "reference"
+            
+            if not has_reference_output:
                 return
+                
             if (
                 providers.check_result_storage(self.provider_prefix, self.process_id)
                 == "geoserver"

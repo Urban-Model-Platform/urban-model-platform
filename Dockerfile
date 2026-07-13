@@ -49,6 +49,10 @@ LABEL maintainer="Urban Data Analytics" \
     source_commit=$SOURCE_COMMIT \
     version=${IMAGE_TAG}
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gdal-bin \
+    && rm -rf /var/lib/apt/lists/*
+
 # add user and group
 RUN groupadd --gid $USER_GID $USERNAME && \
     useradd --create-home --no-log-init --gid $USER_GID --uid $USER_UID --shell /bin/bash $USERNAME && \

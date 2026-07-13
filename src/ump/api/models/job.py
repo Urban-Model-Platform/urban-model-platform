@@ -401,7 +401,8 @@ class Job:
                 finished,
                 updated,
                 results_metadata,
-                process_version
+                process_version,
+                output_transmission_modes
             )
             =
             (
@@ -417,7 +418,8 @@ class Job:
                 %(finished)s,
                 %(updated)s,
                 %(results_metadata)s,
-                %(process_version)s
+                %(process_version)s,
+                %(output_transmission_modes)s
             )
             WHERE job_id = %(job_id)s
         """
@@ -554,6 +556,9 @@ class Job:
         (preserved from the original execute request). If not available,
         falls back to the global ``transmission_mode``.
 
+        Optimization: For reference outputs that were already stored during job
+        completion, we skip re-fetching from remote and return cached links directly.
+
         Returns:
             dict: An OGC results document where each output is either inline
             data (value mode) or a link.yaml object (reference mode).
@@ -561,18 +566,23 @@ class Job:
         if self.status != JobStatus.successful.value:
             self.results_not_available()
 
-        # Fetch inline results from remote server (always needed as base)
-        inline_results = await self._fetch_inline_results()
-
         # If no per-output modes stored, use legacy global behavior
         if not self.output_transmission_modes:
             if self.transmission_mode == "reference":
                 reference = self._build_reference_result()
                 if reference is not None:
                     return reference
+            # For value mode, fetch from remote
+            inline_results = await self._fetch_inline_results()
             return inline_results
 
-        # Apply per-output transmission modes
+        # For per-output modes: check if all outputs are reference mode
+        # and already stored. If so, return cached links without re-fetching
+        if self._all_outputs_reference_and_stored():
+            return self._build_cached_reference_results()
+
+        # Otherwise, fetch inline results and apply per-output modes
+        inline_results = await self._fetch_inline_results()
         return self._apply_per_output_transmission_modes(inline_results)
 
     def _apply_per_output_transmission_modes(self, inline_results: dict) -> dict:
@@ -594,6 +604,24 @@ class Job:
                 self.job_id,
             )
             return inline_results
+
+        # Some providers return a single output payload directly (e.g.
+        # GeoJSON FeatureCollection) instead of an OGC results document
+        # keyed by output id. If exactly one output mode exists, normalize
+        # to a keyed results document so per-output mode handling can work.
+        if len(self.output_transmission_modes) == 1:
+            only_output_id = next(iter(self.output_transmission_modes.keys()))
+            if (
+                only_output_id not in inline_results
+                and self._looks_like_single_output_payload(inline_results)
+            ):
+                logger.debug(
+                    "Job %s: normalizing unwrapped single-output payload "
+                    "to output id '%s'",
+                    self.job_id,
+                    only_output_id,
+                )
+                inline_results = {only_output_id: inline_results}
 
         result_document: dict = {}
 
@@ -623,6 +651,30 @@ class Job:
 
         return result_document
 
+    @staticmethod
+    def _looks_like_single_output_payload(payload: dict) -> bool:
+        """Heuristically detect an unwrapped single-output payload.
+
+        We only normalize when the payload shape resembles an actual output
+        value (GeoJSON object or link/value wrapper), not a multi-output
+        OGC results document.
+        """
+        if not isinstance(payload, dict):
+            return False
+
+        if "href" in payload:
+            return True
+
+        if "type" in payload and any(
+            key in payload for key in ("features", "geometry", "coordinates")
+        ):
+            return True
+
+        if any(key in payload for key in ("data", "value")):
+            return True
+
+        return False
+
     def _build_reference_link_for_output(
         self,
         output_id: str,
@@ -636,8 +688,12 @@ class Job:
         - type: Media type of the result
         - title: Human-readable title
 
+        Optimization: If data was already stored during job completion
+        (successful status), return cached GeoServer link without re-ingesting.
+
         Args:
             output_id: The output identifier
+            output_data: Output data from remote fetch
 
         Returns:
             dict | None: OGC link.yaml object, or None if reference unavailable
@@ -657,13 +713,36 @@ class Job:
                 return None
 
             job_id = self._require_job_id()
+            storage_job_id = self._build_storage_job_id(job_id, output_id)
+
+            # Optimization: If job is successful (already persisted to
+            # GeoServer during completion), just return cached link without
+            # re-ingesting. This avoids expensive ogr2ogr+PostGIS operations
+            # on every result retrieval for mixed reference/value outputs.
+            if self.status == JobStatus.successful.value:
+                logger.debug(
+                    "Job %s, output %s: returning cached GeoServer link "
+                    "(job already completed)",
+                    self.job_id,
+                    output_id,
+                )
+                geoserver = Geoserver()
+                geoserver_url = geoserver.get_layer_reference_url(storage_job_id)
+                return {
+                    "href": geoserver_url,
+                    "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
+                    "type": "application/geo+json",
+                    "title": f"Result '{output_id}' for job {self.job_id}",
+                }
+
+            # If job is not yet complete, must ingest data now
             media_type = self._detect_output_media_type(output_data)
             geoserver = Geoserver()
 
             if media_type in FLATGEOBUF_MEDIA_TYPES:
                 saved = self._store_flatgeobuf_reference_output(
                     geoserver,
-                    self._build_storage_job_id(job_id, output_id),
+                    storage_job_id,
                     output_data,
                 )
                 if not saved:
@@ -671,7 +750,7 @@ class Job:
             elif media_type in GEOJSON_MEDIA_TYPES:
                 if isinstance(output_data, dict) and "features" in output_data:
                     geoserver.save_results(
-                        job_id=self._build_storage_job_id(job_id, output_id),
+                        job_id=storage_job_id,
                         data=output_data,
                     )
             else:
@@ -684,9 +763,7 @@ class Job:
                 )
                 return None
 
-            geoserver_url = geoserver.get_layer_reference_url(
-                self._build_storage_job_id(job_id, output_id)
-            )
+            geoserver_url = geoserver.get_layer_reference_url(storage_job_id)
 
             # OGC link.yaml compliant object
             return {
@@ -784,6 +861,65 @@ class Job:
             }
         }
 
+    def _all_outputs_reference_and_stored(self) -> bool:
+        """Check if all outputs are in reference mode and stored in GeoServer.
+
+        If true, we can skip remote fetching and return cached links directly.
+
+        Returns:
+            bool: True if all outputs are reference mode AND result-storage
+            is configured to 'geoserver', False otherwise.
+        """
+        if not self.output_transmission_modes:
+            return False
+
+        # Check if all outputs requested reference mode
+        all_reference = all(
+            mode == "reference" for mode in self.output_transmission_modes.values()
+        )
+        if not all_reference:
+            return False
+
+        # Check if result-storage is geoserver for this process
+        try:
+            provider_prefix, process_id = self._require_provider_process_context()
+            result_storage = providers.check_result_storage(provider_prefix, process_id)
+            return result_storage == "geoserver"
+        except Exception:
+            return False
+
+    def _build_cached_reference_results(self) -> dict:
+        """Build OGC results document with GeoServer reference links.
+
+        Returns stored result links without fetching from remote.
+        This is safe because job completion already persisted data.
+
+        Returns:
+            dict: OGC results document with link.yaml objects for each output.
+        """
+        result_document: dict = {}
+        job_id = self._require_job_id()
+        geoserver = Geoserver()
+
+        for output_id in self.output_transmission_modes.keys():
+            storage_job_id = self._build_storage_job_id(job_id, output_id)
+            geoserver_url = geoserver.get_layer_reference_url(storage_job_id)
+
+            result_document[output_id] = {
+                "href": geoserver_url,
+                "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
+                "type": "application/geo+json",
+                "title": f"Result '{output_id}' for job {self.job_id}",
+            }
+
+        logger.debug(
+            "Job %s: returning %d cached GeoServer reference links "
+            "(skipped remote fetch)",
+            self.job_id,
+            len(result_document),
+        )
+        return result_document
+
     async def _fetch_inline_results(self) -> dict:
         """Fetch results from remote model server.
 
@@ -857,16 +993,114 @@ class Job:
             # reference link in transmissionMode='reference', which is not
             # a GeoJSON feature collection and cannot be stored in PostGIS.
             results = await self._fetch_inline_results()
+            results_is_dict = isinstance(results, dict)
             if result_path := process_config.result_path:
                 parts = result_path.split(".")
                 for part in parts:
                     results = results[part]
+                # After extraction, results might no longer be a dict
+                # (e.g., if extracting a single value). Update flag.
+                results_is_dict = isinstance(results, dict)
 
             geoserver = Geoserver()
+            metadata_set = False
 
-            self.set_results_metadata(results)
+            # Per-output persistence path (preferred): preserve output ids and
+            # store each reference output under its dedicated storage key.
+            # Only use this if results remains a dict and we have per-output modes.
+            if self.output_transmission_modes and results_is_dict:
+                stored_any = False
+                for output_id, mode in self.output_transmission_modes.items():
+                    if mode != "reference":
+                        continue
 
-            geoserver.save_results(job_id=job_id, data=results)
+                    output_data = results.get(output_id)
+                    if output_data is None:
+                        logger.warning(
+                            "Job %s, output %s: missing in result payload; "
+                            "skipping persistence",
+                            self.job_id,
+                            output_id,
+                        )
+                        continue
+
+                    storage_job_id = self._build_storage_job_id(job_id, output_id)
+                    media_type = self._detect_output_media_type(output_data)
+
+                    if media_type in FLATGEOBUF_MEDIA_TYPES:
+                        try:
+                            saved = self._store_flatgeobuf_reference_output(
+                                geoserver,
+                                storage_job_id,
+                                output_data,
+                            )
+                            stored_any = stored_any or saved
+                        except Exception as err:
+                            logger.error(
+                                "Job %s, output %s: FlatGeobuf persistence failed: %s",
+                                self.job_id,
+                                output_id,
+                                err,
+                            )
+                        continue
+
+                    if media_type in GEOJSON_MEDIA_TYPES:
+                        if isinstance(output_data, dict) and "features" in output_data:
+                            try:
+                                geoserver.save_results(
+                                    job_id=storage_job_id,
+                                    data=output_data,
+                                )
+                                if not metadata_set:
+                                    self.set_results_metadata(output_data)
+                                    metadata_set = True
+                                stored_any = True
+                            except Exception as err:
+                                logger.error(
+                                    "Job %s, output %s: GeoJSON persistence failed: %s",
+                                    self.job_id,
+                                    output_id,
+                                    err,
+                                )
+                        continue
+
+                    logger.warning(
+                        "Job %s, output %s: media type '%s' not supported for "
+                        "GeoServer persistence",
+                        self.job_id,
+                        output_id,
+                        media_type,
+                    )
+
+                if stored_any:
+                    logger.info(
+                        " --> Successfully stored reference results for job %s "
+                        "(=%s)/%s to geoserver.",
+                        self.process_id_with_prefix,
+                        self.process_id,
+                        self.job_id,
+                    )
+                return
+
+            # Legacy single-output fallback
+            media_type = self._detect_output_media_type(results)
+            if media_type in FLATGEOBUF_MEDIA_TYPES:
+                self._store_flatgeobuf_reference_output(
+                    geoserver,
+                    job_id,
+                    results,
+                )
+            elif media_type in GEOJSON_MEDIA_TYPES:
+                if isinstance(results, dict) and "features" in results:
+                    self.set_results_metadata(results)
+                    geoserver.save_results(job_id=job_id, data=results)
+            else:
+                logger.warning(
+                    "Job %s: media type '%s' not supported for GeoServer persistence",
+                    self.job_id,
+                    media_type,
+                )
+                return
 
             logging.info(
                 " --> Successfully stored results for job %s (=%s)/%s to geoserver.",

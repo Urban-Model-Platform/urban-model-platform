@@ -561,7 +561,15 @@ class Geoserver:
         if response.ok:
             logging.info(f" --> Created job layer {layer_name}")
             return True
-        elif response.status_code == 409:  # Conflict - already exists, try to update
+
+        error_text = response.text.lower() if response.text else ""
+        already_exists = (
+            response.status_code == 409
+            or "already exists" in error_text
+            or "already_exists" in error_text
+        )
+
+        if already_exists:
             logging.info(f" --> Layer {layer_name} already exists, updating...")
             # Update existing layer
             update_response = requests.put(
@@ -577,22 +585,38 @@ class Geoserver:
             if update_response.ok:
                 logging.info(f" --> Updated job layer {layer_name}")
                 return True
-            else:
-                raise GeoserverException(
-                    f"Could not update job layer {layer_name}",
-                    payload={
-                        "status_code": update_response.status_code,
-                        "message": update_response.reason,
-                    },
+
+            update_error_text = (
+                update_response.text.lower() if update_response.text else ""
+            )
+            if (
+                "already exists" in update_error_text
+                or "already_exists" in update_error_text
+            ):
+                logging.info(
+                    f" --> Layer {layer_name} already exists (detected during update)"
                 )
-        else:
+                return True
+
             raise GeoserverException(
-                f"Could not create job layer {layer_name}",
+                f"Could not update job layer {layer_name}",
                 payload={
-                    "status_code": response.status_code,
-                    "message": response.reason,
+                    "status_code": update_response.status_code,
+                    "message": update_response.reason,
+                    "response_text": (
+                        update_response.text[:200] if update_response.text else None
+                    ),
                 },
             )
+
+        raise GeoserverException(
+            f"Could not create job layer {layer_name}",
+            payload={
+                "status_code": response.status_code,
+                "message": response.reason,
+                "response_text": response.text[:200] if response.text else None,
+            },
+        )
 
     def geojson_to_postgis(self, job_id: str, data: dict):
         """
