@@ -700,56 +700,75 @@ class Geoserver:
             raise
 
     def delete_job_results(self, job_id: str):
+        """Delete all results for a job from the geoserver-db and GeoServer layers.
+
+        A single job may have multiple outputs stored under storage IDs of the
+        form ``{job_id}-{output_id}`` (e.g. ``job-abc-result``).  This method
+        discovers all such storage IDs via a prefix query and deletes both the
+        PostGIS rows and the corresponding GeoServer feature-type layers.
+
+        Args:
+            job_id: The raw job identifier (e.g. ``"job-abc123"``).
         """
-        Delete results for a specific job from the central table and remove
-        the Geoserver layer.
-        """
+        store_name = "central_results_store"
+        prefix = f"{job_id}-"
+
         try:
-            # Delete layer from Geoserver
-            layer_name = f"job_{job_id}"
-            store_name = "central_results_store"
+            # --- 1. Find all storage_job_ids that belong to this job ---
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        f"SELECT DISTINCT job_id FROM {self.RESULTS_TABLE_NAME} "
+                        "WHERE job_id = :exact OR job_id LIKE :prefix"
+                    ),
+                    {"exact": job_id, "prefix": f"{prefix}%"},
+                ).fetchall()
+            storage_ids = [r[0] for r in rows]
 
-            response = requests.delete(
-                f"{config.UMP_GEOSERVER_URL_WORKSPACE}/{self.workspace}/datastores/{store_name}/featuretypes/{layer_name}",
-                auth=(
-                    config.UMP_GEOSERVER_USER,
-                    config.UMP_GEOSERVER_PASSWORD.get_secret_value(),
-                ),
-                timeout=config.UMP_GEOSERVER_CONNECTION_TIMEOUT,
-            )
+            if not storage_ids:
+                logging.debug("No geoserver-db rows found for job '%s'", job_id)
 
-            if (
-                response.ok or response.status_code == 404
-            ):  # OK or not found (already deleted)
-                logging.info(f"Deleted Geoserver layer for job '{job_id}'")
-            else:
-                logging.warning(
-                    (
-                        f"Failed to delete Geoserver layer for job '{job_id}': "
-                        f"{response.status_code}"
-                    )
+            # --- 2. Delete GeoServer feature-type layers ---
+            for storage_id in storage_ids:
+                layer_name = f"job_{storage_id}"
+                response = requests.delete(
+                    f"{config.UMP_GEOSERVER_URL_WORKSPACE}/{self.workspace}"
+                    f"/datastores/{store_name}/featuretypes/{layer_name}",
+                    auth=(
+                        config.UMP_GEOSERVER_USER,
+                        config.UMP_GEOSERVER_PASSWORD.get_secret_value(),
+                    ),
+                    timeout=config.UMP_GEOSERVER_CONNECTION_TIMEOUT,
                 )
+                if response.ok or response.status_code == 404:
+                    logging.info("Deleted GeoServer layer '%s'", layer_name)
+                else:
+                    logging.warning(
+                        "Failed to delete GeoServer layer '%s': HTTP %s",
+                        layer_name,
+                        response.status_code,
+                    )
 
-            # Delete data from central table
+            # --- 3. Delete rows from geoserver-db ---
             with engine.connect() as conn:
                 result = conn.execute(
                     text(
-                        f"DELETE FROM {self.RESULTS_TABLE_NAME} WHERE job_id = :job_id"
+                        f"DELETE FROM {self.RESULTS_TABLE_NAME} "
+                        "WHERE job_id = :exact OR job_id LIKE :prefix"
                     ),
-                    {"job_id": job_id},
+                    {"exact": job_id, "prefix": f"{prefix}%"},
                 )
                 deleted_rows = result.rowcount
                 conn.commit()
 
             logging.info(
-                (
-                    f"Deleted {deleted_rows} result rows for job '{job_id}' "
-                    "from central table"
-                )
+                "Deleted %d result row(s) for job '%s' from geoserver-db",
+                deleted_rows,
+                job_id,
             )
 
         except Exception as e:
-            logging.error(f"Failed to delete results for job '{job_id}': {e}")
+            logging.error("Failed to delete results for job '%s': %s", job_id, e)
             raise
 
     def get_layer_wfs_url(self, job_id: str) -> str:
@@ -821,6 +840,26 @@ class Geoserver:
         if config.UMP_GEOSERVER_SERVICE_TYPE == "oaf":
             return self.get_layer_oaf_url(job_id)
         return self.get_layer_wfs_url(job_id)
+
+    def has_results_for_job(self, job_id: str) -> bool:
+        """Check whether persisted results exist for a given storage job id.
+
+        Args:
+            job_id: Storage job id (e.g. ``job-123-result``).
+
+        Returns:
+            True if at least one row exists in ``job_results`` for the id.
+        """
+        with engine.connect() as conn:
+            count = conn.execute(
+                text(
+                    f"SELECT COUNT(*) FROM {self.RESULTS_TABLE_NAME} "
+                    "WHERE job_id = :job_id"
+                ),
+                {"job_id": job_id},
+            ).scalar()
+
+        return bool(count and count > 0)
 
     def cleanup(self):
         if self.path_to_results and os.path.exists(self.path_to_results):

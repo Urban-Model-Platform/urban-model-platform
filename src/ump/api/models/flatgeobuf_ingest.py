@@ -35,10 +35,10 @@ def build_storage_job_id(job_id: str, output_id: str) -> str:
         output_id: Output name from the execute request, e.g. ``"dem"``.
 
     Returns:
-        Combined key such as ``"job-abc123__dem"``.
+        Combined key such as ``"job-abc123-dem"``.
     """
     safe_output = re.sub(r"[^a-zA-Z0-9_-]", "_", output_id)
-    return f"{job_id}__{safe_output}"
+    return f"{job_id}-{safe_output}"
 
 
 def try_decode_base64(candidate: str) -> bytes | None:

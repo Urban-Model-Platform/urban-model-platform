@@ -73,3 +73,41 @@ def test_extract_empty_string_for_non_dict_input():
 
     result = extract_output_transmission_modes(123)
     assert result == {}
+
+
+def test_extract_respects_default_mode():
+    """extract_output_transmission_modes uses provided default_mode."""
+    outputs = {
+        "result": {},  # no explicit mode
+    }
+
+    # Test with reference default
+    result = extract_output_transmission_modes(outputs, default_mode="reference")
+    assert result == {"result": "reference"}
+
+    # Test with value default (explicit)
+    result = extract_output_transmission_modes(outputs, default_mode="value")
+    assert result == {"result": "value"}
+
+
+def test_extract_explicit_mode_overrides_default():
+    """Explicit transmissionMode overrides the default_mode."""
+    outputs = {
+        "output_a": {"transmissionMode": "reference"},
+        "output_b": {},  # no explicit mode, should use default
+    }
+
+    result = extract_output_transmission_modes(outputs, default_mode="value")
+    assert result == {
+        "output_a": "reference",  # Explicit mode preserved
+        "output_b": "value",  # Default applied
+    }
+
+
+def test_extract_empty_outputs_with_reference_default():
+    """Empty outputs dict returns empty dict regardless of default."""
+    result = extract_output_transmission_modes({}, default_mode="reference")
+    assert result == {}
+
+    result = extract_output_transmission_modes(None, default_mode="reference")
+    assert result == {}

@@ -165,14 +165,20 @@ def decide_transmission(
 
 def extract_output_transmission_modes(
     outputs: dict[str, Any] | None,
+    default_mode: TransmissionMode = "value",
 ) -> dict[str, TransmissionMode]:
     """Extract individual transmissionMode per output ID.
 
     Returns a mapping of output_id -> transmissionMode for all outputs
-    that explicitly specify a transmissionMode, or have it set to "value" by default.
+    that explicitly specify a transmissionMode, or have it set to the default_mode.
 
     This is used to preserve the original per-output transmission modes
     before they are rewritten by the forwarded_mode policy.
+
+    Args:
+        outputs: Output definitions from execute request (keyed by output ID)
+        default_mode: Mode to use if output doesn't have explicit transmissionMode.
+                      Should be set based on transmission-mode-policy.
     """
     if not outputs or not isinstance(outputs, dict):
         return {}
@@ -181,8 +187,8 @@ def extract_output_transmission_modes(
     for output_id, output_def in outputs.items():
         if not isinstance(output_def, dict):
             continue
-        # Default to "value" if not explicitly specified
-        mode = output_def.get("transmissionMode", "value")
+        # Use default_mode if not explicitly specified
+        mode = output_def.get("transmissionMode", default_mode)
         if mode in {"value", "reference"}:
             modes[output_id] = mode
     return modes

@@ -386,7 +386,7 @@ class Process:
             policy_default = get_default_transmission_mode(
                 process_config.transmission_mode_policy
             )
-            
+
             requested_mode = extract_requested_mode_from_outputs(
                 request_body.get("outputs"),
                 default_mode=policy_default,
@@ -454,14 +454,27 @@ class Process:
             request_body, process_config
         )
 
-        # Preserve original per-output transmission modes before rewriting
-        original_output_modes = extract_output_transmission_modes(
-            request_body.get("outputs")
-        )
-
         process_output_ids = (
             list(self.outputs.keys()) if isinstance(self.outputs, dict) else None
         )
+
+        # Preserve original per-output transmission modes before rewriting
+        # Use the policy-aware default so modes are correctly captured
+        policy_default = get_default_transmission_mode(
+            process_config.transmission_mode_policy
+        )
+        original_output_modes = extract_output_transmission_modes(
+            request_body.get("outputs"),
+            default_mode=policy_default,
+        )
+
+        # If client didn't specify outputs, populate with process output IDs
+        # using the policy default so they're delivered with correct mode
+        if not original_output_modes and process_output_ids:
+            original_output_modes = {
+                output_id: policy_default for output_id in process_output_ids
+            }
+
         request_body = apply_forwarded_mode_to_execute_outputs(
             request_body,
             transmission_decision.forwarded_mode,
@@ -869,25 +882,31 @@ class Process:
         try:
             # Check if any output is in "reference" mode (per-output or job-level)
             has_reference_output = False
-            
+
             if job.output_transmission_modes:
                 # Per-output modes: check if ANY output is in reference mode
                 has_reference_output = any(
-                    mode == "reference" 
+                    mode == "reference"
                     for mode in job.output_transmission_modes.values()
                 )
             else:
                 # Fall back to job-level transmission mode
                 has_reference_output = job.transmission_mode == "reference"
-            
+
             if not has_reference_output:
                 return
-                
+
             if (
                 providers.check_result_storage(self.provider_prefix, self.process_id)
                 == "geoserver"
             ):
-                await job.results_to_geoserver()
+                stored = await job.results_to_geoserver()
+                if not stored:
+                    logger.warning(
+                        "Job %s: result persistence to GeoServer did not store "
+                        "reference outputs.",
+                        job.job_id,
+                    )
         except Exception as e:
             logger.error("Could not store results for job %s: %s", job.job_id, e)
 

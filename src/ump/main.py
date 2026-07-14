@@ -9,11 +9,12 @@ import atexit
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta
 from logging.config import dictConfig
 
 import requests
-import schedule
 from apiflask import APIBlueprint, APIFlask
 from flask import g, jsonify, request
 from flask_cors import CORS
@@ -71,9 +72,9 @@ dictConfig(
 
 
 def cleanup():
-    """Cleans up jobs and Geoserver layers of anonymous users"""
+    """Deletes jobs of anonymous users older than UMP_JOB_RETENTION_MINUTES."""
     sql = "delete from jobs where user_id is null and finished < %(finished)s returning job_id, provider_prefix, process_id"
-    finished = datetime.now() - timedelta(minutes=config.UMP_JOB_DELETE_INTERVAL)
+    finished = datetime.now() - timedelta(minutes=config.UMP_JOB_RETENTION_MINUTES)
 
     with DBHandler() as conn:
         result = conn.run_query(sql, query_params={"finished": finished})
@@ -90,19 +91,40 @@ def cleanup():
             )
             if result_storage == "geoserver":
                 from ump.geoserver.geoserver import Geoserver
+
                 geoserver = Geoserver()
                 try:
                     geoserver.delete_job_results(job_id)
                 except Exception as e:
-                    logging.error(f"Failed to cleanup geoserver results for job {job_id}: {e}")
+                    logging.error(
+                        f"Failed to cleanup geoserver results for job {job_id}: {e}"
+                    )
 
 
-# TODO: this is NOT good for production environments!
-# cleanup is a different task and should NOT be part of
-# the main app, instead it should be outsourced to a module and should be optionally
-# I suggest to use celery and redis for this task
-# also it does not work, cleanup is called when the routes are accessed, not on a regular basis
-schedule.every(int(config.UMP_JOB_DELETE_INTERVAL)).seconds.do(cleanup)
+# Run the cleanup task in a background daemon thread so it fires independently
+# of incoming requests (the previous schedule.run_pending()-in-before_request
+# approach only triggered when the API was actually being used).
+if config.UMP_JOB_CLEANUP_ENABLED:
+
+    def _cleanup_loop():
+        logging.info(
+            "Job cleanup scheduler started: interval=%ds, retention=%dmin",
+            config.UMP_JOB_CLEANUP_INTERVAL_SECONDS,
+            config.UMP_JOB_RETENTION_MINUTES,
+        )
+        while True:
+            time.sleep(config.UMP_JOB_CLEANUP_INTERVAL_SECONDS)
+            try:
+                cleanup()
+            except Exception as exc:
+                logging.error("Job cleanup failed: %s", exc)
+
+    _cleanup_thread = threading.Thread(
+        target=_cleanup_loop, daemon=True, name="job-cleanup"
+    )
+    _cleanup_thread.start()
+else:
+    logging.info("Job cleanup disabled (UMP_JOB_CLEANUP_ENABLED=False).")
 
 app = APIFlask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -143,15 +165,13 @@ def handle_ogc_exception(error: OGCProcessException):
     response.content_type = "application/problem+json"
 
     if response.status_code in (401, 403):
-        response.headers["WWW-Authenticate"] = 'Bearer'
+        response.headers["WWW-Authenticate"] = "Bearer"
     return response
 
 
 @app.before_request
 def check_jwt():
-    """Decodes the JWT token and runs pending scheduled jobs"""
-    # TODO: this is senseless, too
-    schedule.run_pending()
+    """Decodes the JWT token and stores user info in flask g"""
     auth = request.authorization
 
     # TODO: this needs to be improved, it should not fail the app

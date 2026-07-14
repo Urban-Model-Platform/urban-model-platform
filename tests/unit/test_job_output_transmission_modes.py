@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from ump.api.models.job import Job
@@ -668,3 +669,153 @@ class TestResultsWithPerOutputModes:
 
         assert result == {"result": {"href": "http://geoserver/layer"}}
         mock_build.assert_called_once_with("result", inline_results)
+
+
+class TestResultsToGeoserverHardening:
+    """Hardening tests for results_to_geoserver()."""
+
+    def test_normalizes_unwrapped_single_output_before_persistence(self):
+        """Unwrapped output payload is normalized and stored under output id."""
+        job = _create_test_job(
+            status="successful",
+            transmission_mode="reference",
+            output_transmission_modes={"result": "reference"},
+        )
+        job.process_id_with_prefix = "test-provider:test-process"
+
+        inline_results = {
+            "data": base64.b64encode(b"fgb-bytes").decode("ascii"),
+            "encoding": "base64",
+            "title": "flatgeobuf",
+            "type": "application/x-flatgeobuf",
+        }
+
+        provider = SimpleNamespace(
+            processes={"test-process": SimpleNamespace(result_path=None)}
+        )
+
+        with (
+            patch(
+                "ump.api.models.job.providers.get_providers",
+                return_value={"test-provider": provider},
+            ),
+            patch("ump.api.models.job.Geoserver") as mock_geoserver_class,
+            patch.object(
+                job,
+                "_fetch_inline_results",
+                new_callable=AsyncMock,
+                return_value=inline_results,
+            ),
+            patch.object(
+                job,
+                "_store_flatgeobuf_reference_output",
+                return_value=True,
+            ) as mock_store,
+        ):
+            mock_geoserver_class.return_value = MagicMock()
+            stored = asyncio.run(job.results_to_geoserver())
+
+        assert stored is True
+        mock_store.assert_called_once_with(
+            mock_geoserver_class.return_value,
+            "job-test-123-result",
+            inline_results,
+        )
+
+    def test_returns_false_when_reference_outputs_cannot_be_persisted(self):
+        """Method reports failure instead of succeeding silently."""
+        job = _create_test_job(
+            status="successful",
+            transmission_mode="reference",
+            output_transmission_modes={"result": "reference"},
+        )
+        job.process_id_with_prefix = "test-provider:test-process"
+
+        provider = SimpleNamespace(
+            processes={"test-process": SimpleNamespace(result_path=None)}
+        )
+        wrapped_results = {
+            "result": {
+                "data": base64.b64encode(b"fgb-bytes").decode("ascii"),
+                "encoding": "base64",
+                "type": "application/x-flatgeobuf",
+            }
+        }
+
+        with (
+            patch(
+                "ump.api.models.job.providers.get_providers",
+                return_value={"test-provider": provider},
+            ),
+            patch("ump.api.models.job.Geoserver") as mock_geoserver_class,
+            patch.object(
+                job,
+                "_fetch_inline_results",
+                new_callable=AsyncMock,
+                return_value=wrapped_results,
+            ),
+            patch.object(
+                job,
+                "_store_flatgeobuf_reference_output",
+                return_value=False,
+            ),
+        ):
+            mock_geoserver_class.return_value = MagicMock()
+            stored = asyncio.run(job.results_to_geoserver())
+
+        assert stored is False
+
+
+class TestReferenceCacheValidation:
+    """Tests ensuring reference links are only returned for persisted outputs."""
+
+    def test_all_outputs_reference_and_stored_requires_persisted_data(self):
+        job = _create_test_job(
+            status="successful",
+            transmission_mode="reference",
+            output_transmission_modes={"result": "reference"},
+        )
+
+        with (
+            patch(
+                "ump.api.models.job.providers.check_result_storage",
+                return_value="geoserver",
+            ),
+            patch("ump.api.models.job.Geoserver") as mock_geoserver_class,
+        ):
+            mock_geoserver = MagicMock()
+            mock_geoserver.has_results_for_job.return_value = False
+            mock_geoserver_class.return_value = mock_geoserver
+
+            result = job._all_outputs_reference_and_stored()
+
+        assert result is False
+
+    def test_build_reference_link_falls_back_to_ingest_when_cache_missing(self):
+        job = _create_test_job(
+            status="successful",
+            transmission_mode="reference",
+            output_transmission_modes={"result": "reference"},
+        )
+
+        output_data = {"type": "FeatureCollection", "features": []}
+
+        with (
+            patch(
+                "ump.api.models.job.providers.check_result_storage",
+                return_value="geoserver",
+            ),
+            patch("ump.api.models.job.Geoserver") as mock_geoserver_class,
+        ):
+            mock_geoserver = MagicMock()
+            mock_geoserver.has_results_for_job.return_value = False
+            mock_geoserver.get_layer_reference_url.return_value = (
+                "http://geoserver:8080/wfs?service=WFS&request=GetFeature"
+            )
+            mock_geoserver_class.return_value = mock_geoserver
+
+            result = job._build_reference_link_for_output("result", output_data)
+
+        assert result is not None
+        assert result["href"].startswith("http://geoserver:8080/wfs")
+        mock_geoserver.save_results.assert_called_once()

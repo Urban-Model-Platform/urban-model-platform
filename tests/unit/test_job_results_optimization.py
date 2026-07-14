@@ -213,6 +213,14 @@ class TestResultsOptimization:
             mock_providers,
         )
 
+        # Mock Geoserver so has_results_for_job returns True (no real DB)
+        mock_geoserver = MagicMock()
+        mock_geoserver.has_results_for_job.return_value = True
+        monkeypatch.setattr(
+            "ump.api.models.job.Geoserver",
+            lambda: mock_geoserver,
+        )
+
         result = job._all_outputs_reference_and_stored()
         # Should be True: all outputs are reference AND storage is geoserver
         assert result is True

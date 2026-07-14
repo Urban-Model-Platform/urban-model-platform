@@ -43,7 +43,12 @@ class UmpSettings(BaseSettings):
     UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
     UMP_GEOSERVER_SERVICE_TYPE: Literal["wfs", "oaf"] = "wfs"
     UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
-    UMP_JOB_DELETE_INTERVAL: int = 240  # minutes
+    # How often the cleanup task runs (seconds). Default: every 10 minutes.
+    UMP_JOB_CLEANUP_INTERVAL_SECONDS: int = 600
+    # How long jobs of anonymous users are kept before deletion (minutes). Default: 4 hours.
+    UMP_JOB_RETENTION_MINUTES: int = 240
+    # Set to False to disable automatic job cleanup entirely.
+    UMP_JOB_CLEANUP_ENABLED: bool = True
     UMP_KEYCLOAK_URL: HttpUrl | None = HttpUrl("http://keycloak:8080/auth")
     UMP_KEYCLOAK_REALM: str = "UrbanModelPlatform"
     UMP_KEYCLOAK_CLIENT_ID: str = "ump-client"

@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -28,7 +29,7 @@ from ump.api.models.output_media_type import (
 )
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
 from ump.config import app_settings as config
-from ump.errors import InvalidUsage, OGCProcessException
+from ump.errors import GeoserverException, InvalidUsage, OGCProcessException
 from ump.geoserver.geoserver import Geoserver
 from ump.utils import join_url_parts
 
@@ -39,11 +40,14 @@ logger = logging.getLogger(__name__)
 TransmissionMode = Literal["value", "reference"]
 
 results_client_timeout = aiohttp.ClientTimeout(
-    total=5,  # Set a reasonable timeout for the requests
-    connect=2,  # Connection timeout
-    sock_connect=2,  # Socket connection timeout
-    sock_read=5,  # Socket read timeout
+    total=None,  # No total timeout - large FlatGeobuf responses can take minutes
+    connect=10,  # Connection timeout
+    sock_connect=10,  # Socket connection timeout
+    sock_read=300,  # Allow reading large payloads (e.g. 10k FlatGeobuf points)
 )
+
+REMOTE_RESULTS_MAX_ATTEMPTS = 3
+REMOTE_RESULTS_RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
 
 # TODO class violates Single Responsibility Principle (SRP), it mixes
@@ -719,25 +723,33 @@ class Job:
             # GeoServer during completion), just return cached link without
             # re-ingesting. This avoids expensive ogr2ogr+PostGIS operations
             # on every result retrieval for mixed reference/value outputs.
+            geoserver = Geoserver()
             if self.status == JobStatus.successful.value:
-                logger.debug(
-                    "Job %s, output %s: returning cached GeoServer link "
-                    "(job already completed)",
+                if geoserver.has_results_for_job(storage_job_id):
+                    logger.debug(
+                        "Job %s, output %s: returning cached GeoServer link "
+                        "(job already completed)",
+                        self.job_id,
+                        output_id,
+                    )
+                    geoserver_url = geoserver.get_layer_reference_url(storage_job_id)
+                    return {
+                        "href": geoserver_url,
+                        "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
+                        "type": "application/geo+json",
+                        "title": f"Result '{output_id}' for job {self.job_id}",
+                    }
+
+                logger.warning(
+                    "Job %s, output %s: reference cache missing for '%s'; "
+                    "attempting on-demand persistence",
                     self.job_id,
                     output_id,
+                    storage_job_id,
                 )
-                geoserver = Geoserver()
-                geoserver_url = geoserver.get_layer_reference_url(storage_job_id)
-                return {
-                    "href": geoserver_url,
-                    "rel": "http://www.opengis.net/def/rel/ogc/1.0/results",
-                    "type": "application/geo+json",
-                    "title": f"Result '{output_id}' for job {self.job_id}",
-                }
 
             # If job is not yet complete, must ingest data now
             media_type = self._detect_output_media_type(output_data)
-            geoserver = Geoserver()
 
             if media_type in FLATGEOBUF_MEDIA_TYPES:
                 saved = self._store_flatgeobuf_reference_output(
@@ -884,7 +896,17 @@ class Job:
         try:
             provider_prefix, process_id = self._require_provider_process_context()
             result_storage = providers.check_result_storage(provider_prefix, process_id)
-            return result_storage == "geoserver"
+            if result_storage != "geoserver":
+                return False
+
+            job_id = self._require_job_id()
+            geoserver = Geoserver()
+            return all(
+                geoserver.has_results_for_job(
+                    self._build_storage_job_id(job_id, output_id)
+                )
+                for output_id in self.output_transmission_modes.keys()
+            )
         except Exception:
             return False
 
@@ -944,43 +966,84 @@ class Job:
 
         async with aiohttp.ClientSession(timeout=results_client_timeout) as session:
             url = f"{self.provider_url}jobs/{remote_job_id}/results?f=json"
-            async with session.get(
-                url,
-                headers=headers,
-                auth=provider_auth.auth,
-            ) as resp:
-                if resp.status >= 400:
-                    resp.raise_for_status()
+            for attempt in range(1, REMOTE_RESULTS_MAX_ATTEMPTS + 1):
+                try:
+                    async with session.get(
+                        url,
+                        headers=headers,
+                        auth=provider_auth.auth,
+                    ) as resp:
+                        if resp.status >= 400:
+                            resp.raise_for_status()
 
-                content_type = resp.headers.get("Content-Type", "")
-                media_type = content_type.split(";")[0].strip().lower()
+                        content_type = resp.headers.get("Content-Type", "")
+                        media_type = content_type.split(";")[0].strip().lower()
 
-                if media_type in FLATGEOBUF_MEDIA_TYPES:
-                    raw = await resp.read()
-                    return {
-                        "result": {
-                            "type": media_type,
-                            "data": base64.b64encode(raw).decode("ascii"),
-                            "encoding": "base64",
+                        if media_type in FLATGEOBUF_MEDIA_TYPES:
+                            raw = await resp.read()
+                            return {
+                                "result": {
+                                    "type": media_type,
+                                    "data": base64.b64encode(raw).decode("ascii"),
+                                    "encoding": "base64",
+                                }
+                            }
+
+                        if (
+                            "application/json" in media_type
+                            or "application/geo+json" in media_type
+                        ):
+                            return await resp.json()
+
+                        # Fallback: preserve response as text payload
+                        text_payload = await resp.text()
+                        return {
+                            "result": {
+                                "type": media_type or "text/plain",
+                                "value": text_payload,
+                            }
                         }
-                    }
 
-                if (
-                    "application/json" in media_type
-                    or "application/geo+json" in media_type
-                ):
-                    return await resp.json()
+                except aiohttp.ClientResponseError as exc:
+                    retryable = exc.status in REMOTE_RESULTS_RETRYABLE_STATUS
+                    if (not retryable) or attempt == REMOTE_RESULTS_MAX_ATTEMPTS:
+                        raise
 
-                # Fallback: preserve response as text payload
-                text_payload = await resp.text()
-                return {
-                    "result": {
-                        "type": media_type or "text/plain",
-                        "value": text_payload,
-                    }
-                }
+                    backoff_seconds = min(2 ** (attempt - 1), 5)
+                    logger.warning(
+                        "Job %s: remote results request attempt %d/%d failed "
+                        "with HTTP %s; retrying in %ss",
+                        self.job_id,
+                        attempt,
+                        REMOTE_RESULTS_MAX_ATTEMPTS,
+                        exc.status,
+                        backoff_seconds,
+                    )
+                    await asyncio.sleep(backoff_seconds)
 
-    async def results_to_geoserver(self):
+                except (
+                    asyncio.TimeoutError,
+                    aiohttp.ClientConnectionError,
+                    aiohttp.ServerTimeoutError,
+                ) as exc:
+                    if attempt == REMOTE_RESULTS_MAX_ATTEMPTS:
+                        raise
+
+                    backoff_seconds = min(2 ** (attempt - 1), 5)
+                    logger.warning(
+                        "Job %s: remote results request attempt %d/%d failed "
+                        "with transient error (%s); retrying in %ss",
+                        self.job_id,
+                        attempt,
+                        REMOTE_RESULTS_MAX_ATTEMPTS,
+                        type(exc).__name__,
+                        backoff_seconds,
+                    )
+                    await asyncio.sleep(backoff_seconds)
+
+        raise RuntimeError("Remote result retrieval failed without response.")
+
+    async def results_to_geoserver(self) -> bool:
         try:
             provider_prefix, process_id = self._require_provider_process_context()
             job_id = self._require_job_id()
@@ -1009,6 +1072,24 @@ class Job:
             # store each reference output under its dedicated storage key.
             # Only use this if results remains a dict and we have per-output modes.
             if self.output_transmission_modes and results_is_dict:
+                # Some servers return a single output payload directly (e.g. a
+                # raw FlatGeobuf dict) instead of an OGC results document keyed
+                # by output id.  Normalise to a keyed document if exactly one
+                # output mode exists and the payload looks like an output value.
+                if len(self.output_transmission_modes) == 1:
+                    only_output_id = next(iter(self.output_transmission_modes.keys()))
+                    if (
+                        only_output_id not in results
+                        and self._looks_like_single_output_payload(results)
+                    ):
+                        logger.debug(
+                            "Job %s: normalizing unwrapped single-output payload "
+                            "to output id '%s' for GeoServer persistence",
+                            self.job_id,
+                            only_output_id,
+                        )
+                        results = {only_output_id: results}
+
                 stored_any = False
                 for output_id, mode in self.output_transmission_modes.items():
                     if mode != "reference":
@@ -1080,27 +1161,46 @@ class Job:
                         self.process_id,
                         self.job_id,
                     )
-                return
+                    return True
+
+                logger.warning(
+                    "Job %s: no reference output could be persisted to GeoServer.",
+                    self.job_id,
+                )
+                return False
 
             # Legacy single-output fallback
             media_type = self._detect_output_media_type(results)
             if media_type in FLATGEOBUF_MEDIA_TYPES:
-                self._store_flatgeobuf_reference_output(
+                saved = self._store_flatgeobuf_reference_output(
                     geoserver,
                     job_id,
                     results,
                 )
+                if not saved:
+                    logger.warning(
+                        "Job %s: FlatGeobuf reference persistence returned no data.",
+                        self.job_id,
+                    )
+                    return False
             elif media_type in GEOJSON_MEDIA_TYPES:
                 if isinstance(results, dict) and "features" in results:
                     self.set_results_metadata(results)
                     geoserver.save_results(job_id=job_id, data=results)
+                else:
+                    logger.warning(
+                        "Job %s: GeoJSON persistence skipped, payload has no "
+                        "'features' member.",
+                        self.job_id,
+                    )
+                    return False
             else:
                 logger.warning(
                     "Job %s: media type '%s' not supported for GeoServer persistence",
                     self.job_id,
                     media_type,
                 )
-                return
+                return False
 
             logging.info(
                 " --> Successfully stored results for job %s (=%s)/%s to geoserver.",
@@ -1108,15 +1208,35 @@ class Job:
                 self.process_id,
                 self.job_id,
             )
+            return True
 
-        except Exception as e:
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            GeoserverException,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as e:
             logging.error(
                 " --> Could not store results for job %s (=%s)/%s to geoserver: %s",
                 self.process_id_with_prefix,
                 self.process_id,
                 self.job_id,
                 e,
+                exc_info=True,
             )
+            return False
+
+        except Exception as e:
+            logging.exception(
+                " --> Could not store results for job %s (=%s)/%s to geoserver: %s",
+                self.process_id_with_prefix,
+                self.process_id,
+                self.job_id,
+                e,
+            )
+            return False
 
     def results_not_available(self):
         """
