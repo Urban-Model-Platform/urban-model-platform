@@ -31,6 +31,11 @@ def extract_requested_mode_from_outputs(
 
     All outputs must use the same transmissionMode. If no transmissionMode is
     provided for any output, ``default_mode`` is returned.
+
+    Args:
+        outputs: Output definitions from execute request (keyed by output ID)
+        default_mode: Mode to use if no transmissionMode specified in request.
+                      Should be set based on transmission-mode-policy.
     """
     if not outputs:
         return default_mode
@@ -60,6 +65,31 @@ def extract_requested_mode_from_outputs(
         raise TransmissionPolicyError("All outputs must use the same transmissionMode.")
 
     return next(iter(found_modes))
+
+
+def get_default_transmission_mode(policy: TransmissionModePolicy) -> TransmissionMode:
+    """Determine default transmission mode based on policy.
+
+    When a client doesn't specify transmissionMode in the execute request,
+    use a sensible default that aligns with the provider's policy:
+
+    - ``value-only``: Must default to "value" (only mode allowed)
+    - ``emulate-ref-only``: Must default to "reference" (only mode allowed)
+    - ``emulate-ref``: Default to "reference" (the use case of emulate-ref)
+    - ``pass-through``: Default to "value" (OGC API default)
+
+    Args:
+        policy: The transmission-mode-policy configured for the process
+
+    Returns:
+        TransmissionMode: The appropriate default for the policy
+    """
+    if policy == "emulate-ref-only":
+        return "reference"
+    if policy == "emulate-ref":
+        return "reference"
+    # pass-through and value-only default to value
+    return "value"
 
 
 def decide_transmission(

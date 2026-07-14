@@ -27,6 +27,7 @@ from ump.api.transmission_policy import (
     decide_transmission,
     extract_output_transmission_modes,
     extract_requested_mode_from_outputs,
+    get_default_transmission_mode,
 )
 from ump.config import app_settings as config
 from ump.errors import OGCProcessException
@@ -378,11 +379,17 @@ class Process:
         """Resolve global transmission behavior from request + policy.
 
         Enforces that all configured output transmission modes are identical.
+        Uses policy-aware defaults when client doesn't specify transmissionMode.
         """
         try:
+            # Use policy-specific default when client omits transmissionMode
+            policy_default = get_default_transmission_mode(
+                process_config.transmission_mode_policy
+            )
+            
             requested_mode = extract_requested_mode_from_outputs(
                 request_body.get("outputs"),
-                default_mode="value",
+                default_mode=policy_default,
             )
 
             decision = decide_transmission(
