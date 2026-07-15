@@ -415,6 +415,11 @@ class Job:
         if self.status != JobStatus.successful.value:
             self.results_not_available()
 
+        logging.debug(
+            "Fetching results for job %s from remote (remote job: %s).",
+            self.job_id,
+            self.remote_job_id,
+        )
         headers = {
             "Content-type": "application/json",
             "Accept": "application/json",
@@ -434,7 +439,7 @@ class Job:
                 headers=headers,
                 auth=provider_auth.auth,
             )
-
+            logging.debug("Results for job %s fetched successfully.", self.job_id)
             return results
 
     async def results_to_geoserver(self):
@@ -509,6 +514,13 @@ class Job:
                 "detail": "No results are available for this job.",
             },
         )
+
+        if self.status not in status_map:
+            logging.warning(
+                "Results requested for job %s with unexpected status '%s'.",
+                self.job_id,
+                self.status,
+            )
 
         raise OGCProcessException(
             OGCExceptionResponse(

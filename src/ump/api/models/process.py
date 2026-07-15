@@ -640,6 +640,11 @@ class Process:
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
+            logger.error(
+                "Timed out waiting for remote job %s to finish (limit: %s sec.).",
+                job.job_id,
+                provider_config.timeout,
+            )
             self._set_job_failed(
                 job,
                 (
@@ -673,6 +678,11 @@ class Process:
     async def _poll_job_until_finished(
         self, job: Job, provider_config: ProviderConfig
     ) -> dict:
+        logger.info(
+            "Polling remote job status for job %s (remote: %s).",
+            job.job_id,
+            job.remote_job_id,
+        )
 
         headers = {
             "Content-type": "application/json",
@@ -695,12 +705,25 @@ class Process:
                 )
                 self._update_job_from_status(job, status_info)
                 if self.is_finished(status_info):
+                    logger.info(
+                        "Remote job %s finished with status '%s'.",
+                        job.job_id,
+                        status_info.get("status"),
+                    )
                     break
                 await asyncio.sleep(config.UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL)
 
         return status_info
 
     def _update_job_from_status(self, job: Job, status_info):
+        new_status = status_info.get("status", "")
+        if new_status != job.status:
+            logger.debug(
+                "Job %s status: %s -> %s",
+                job.job_id,
+                job.status,
+                new_status,
+            )
         job.started = status_info.get("started")
         job.created = status_info.get("created")
         job.updated = status_info.get("updated")
@@ -713,6 +736,7 @@ class Process:
         job.update()
 
     def _set_job_failed(self, job: Job, message: str):
+        logger.error("Setting job %s to failed: %s", job.job_id, message)
         job.status = JobStatus.failed.value
         job.message = message
 
@@ -738,7 +762,13 @@ class Process:
                 providers.check_result_storage(self.provider_prefix, self.process_id)
                 == "geoserver"
             ):
+                logger.debug("Storing results for job %s to geoserver.", job.job_id)
                 await job.results_to_geoserver()
+            else:
+                logger.debug(
+                    "No geoserver result storage configured for job %s, skipping.",
+                    job.job_id,
+                )
         except Exception as e:
             logger.error("Could not store results for job %s: %s", job.job_id, e)
 
