@@ -21,10 +21,10 @@ from ump.geoserver.geoserver import Geoserver
 from ump.utils import fetch_json, join_url_parts
 
 results_client_timeout = aiohttp.ClientTimeout(
-    total=5,  # Set a reasonable timeout for the requests
-    connect=2,  # Connection timeout
-    sock_connect=2,  # Socket connection timeout
-    sock_read=5,  # Socket read timeout
+    total=None,  # No hard cap — model outputs can be large
+    connect=10,  # Connection timeout
+    sock_connect=10,  # Socket connection timeout
+    sock_read=120,  # Allow up to 2 minutes without new data before giving up
 )
 
 
@@ -415,6 +415,11 @@ class Job:
         if self.status != JobStatus.successful.value:
             self.results_not_available()
 
+        logging.debug(
+            "Fetching results for job %s from remote (remote job: %s).",
+            self.job_id,
+            self.remote_job_id,
+        )
         headers = {
             "Content-type": "application/json",
             "Accept": "application/json",
@@ -434,7 +439,7 @@ class Job:
                 headers=headers,
                 auth=provider_auth.auth,
             )
-
+            logging.debug("Results for job %s fetched successfully.", self.job_id)
             return results
 
     async def results_to_geoserver(self):
@@ -509,6 +514,13 @@ class Job:
                 "detail": "No results are available for this job.",
             },
         )
+
+        if self.status not in status_map:
+            logging.warning(
+                "Results requested for job %s with unexpected status '%s'.",
+                self.job_id,
+                self.status,
+            )
 
         raise OGCProcessException(
             OGCExceptionResponse(
