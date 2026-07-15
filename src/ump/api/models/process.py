@@ -606,13 +606,32 @@ class Process:
         )
 
     def _wait_for_results_async(self, job: Job):
-        asyncio.run(self._wait_for_results(job))
+        try:
+            asyncio.run(self._wait_for_results(job))
+        except Exception as e:
+            logger.error(
+                "Unhandled exception in background results thread for job %s: %s",
+                job.job_id,
+                e,
+            )
 
     async def _wait_for_results(self, job: Job):
         logger.info("Thread started to wait for results.")
-        provider_config: ProviderConfig = providers.get_providers()[
-            self.provider_prefix
-        ]
+        try:
+            provider_config: ProviderConfig = providers.get_providers()[
+                self.provider_prefix
+            ]
+        except KeyError:
+            logger.error(
+                "Provider '%s' not found in configuration. Cannot wait for results of job %s.",
+                self.provider_prefix,
+                job.job_id,
+            )
+            self._set_job_failed(
+                job,
+                f"Provider '{self.provider_prefix}' is no longer available.",
+            )
+            return
         timeout_seconds = provider_config.timeout
 
         try:
@@ -640,8 +659,16 @@ class Process:
                     "See the logs for details"
                 ),
             )
-        else:
+            return
+
+        try:
             await self._store_results_if_needed(job)
+        except Exception as e:
+            logger.error(
+                "Unexpected error during post-processing of results for job %s: %s",
+                job.job_id,
+                e,
+            )
 
     async def _poll_job_until_finished(
         self, job: Job, provider_config: ProviderConfig
