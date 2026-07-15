@@ -23,10 +23,10 @@ from ump.utils import fetch_json, fetch_response_content
 logger = logging.getLogger(__name__)
 
 metadata_request_timeout = aiohttp.ClientTimeout(
-    total=5,
-    connect=2,
-    sock_connect=2,
-    sock_read=5,
+    total=30,
+    connect=5,
+    sock_connect=5,
+    sock_read=30,
 )
 
 # Submission requests can carry very large payloads, so do not cap total duration.
@@ -657,13 +657,7 @@ class Process:
         # setting job to "failed" even if remote job was successfull!
         except Exception as e:
             logger.error("Error while waiting for job results: %s", e)
-            self._set_job_failed(
-                job,
-                (
-                    "An unexpected error occurred while waiting for job results."
-                    "See the logs for details"
-                ),
-            )
+            self._set_job_failed(job, str(e))
             return
 
         try:
