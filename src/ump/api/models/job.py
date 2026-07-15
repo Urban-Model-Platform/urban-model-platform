@@ -21,10 +21,10 @@ from ump.geoserver.geoserver import Geoserver
 from ump.utils import fetch_json, join_url_parts
 
 results_client_timeout = aiohttp.ClientTimeout(
-    total=5,  # Set a reasonable timeout for the requests
-    connect=2,  # Connection timeout
-    sock_connect=2,  # Socket connection timeout
-    sock_read=5,  # Socket read timeout
+    total=None,  # No hard cap — model outputs can be large
+    connect=10,  # Connection timeout
+    sock_connect=10,  # Socket connection timeout
+    sock_read=120,  # Allow up to 2 minutes without new data before giving up
 )
 
 
