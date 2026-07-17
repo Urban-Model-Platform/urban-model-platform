@@ -127,7 +127,7 @@ class TestHttpClientAdapter(HttpClientPort):
     async def post(self, url: str, json=None, timeout=None, headers=None):
         return self._post_response
 
-    async def get(self, url: str, timeout=None):
+    async def get(self, url: str, timeout=None, headers=None):
         idx = len(self.get_calls)
         self.get_calls.append(url)
         if idx < len(self._get_responses):

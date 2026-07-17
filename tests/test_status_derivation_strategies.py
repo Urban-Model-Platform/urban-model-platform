@@ -62,7 +62,7 @@ def mock_http_client():
         def __init__(self):
             self.get_response = None
         
-        async def get(self, url, timeout=None):
+        async def get(self, url, timeout=None, headers=None):
             if self.get_response is None:
                 raise Exception("No response configured")
             return self.get_response

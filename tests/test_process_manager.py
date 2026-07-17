@@ -62,7 +62,7 @@ class FakeHttpClient(HttpClientPort):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         return False
 
-    async def get(self, url: str, timeout: float | None = None) -> Dict[str, Any]:
+    async def get(self, url: str, timeout: float | None = None, headers: dict | None = None) -> Dict[str, Any]:
         self.requests.append(url)
         # allow prefix matching like the tests use (startswith)
         for k, v in self._responses.items():
