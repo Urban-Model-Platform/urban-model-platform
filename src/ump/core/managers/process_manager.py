@@ -420,7 +420,7 @@ class ProcessManager(ProcessesPort):
                     instance=None,
                 )
             )
-        return await self.job_manager.create_and_forward_ii(
+        return await self.job_manager.run_execution_pipeline(
             process_id, payload or {}, headers
         )
 
