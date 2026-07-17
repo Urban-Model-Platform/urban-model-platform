@@ -21,12 +21,10 @@ from ump.api.models.job import (
 from ump.api.models.ogc_exception import OGCExceptionResponse
 from ump.api.models.providers_config import ProcessConfig, ProviderConfig
 from ump.api.transmission_policy import (
-    TransmissionDecision,
     TransmissionPolicyError,
     apply_forwarded_mode_to_execute_outputs,
     decide_transmission,
     extract_output_transmission_modes,
-    extract_requested_mode_from_outputs,
     get_default_transmission_mode,
 )
 from ump.config import app_settings as config
@@ -371,36 +369,48 @@ class Process:
             )
         )
 
-    def _resolve_transmission_decision(
+    def _resolve_output_transmission_modes(
         self,
-        request_body: dict,
+        output_modes: dict[str, TransmissionMode],
         process_config: ProcessConfig,
-    ) -> TransmissionDecision:
-        """Resolve global transmission behavior from request + policy.
+    ) -> tuple[dict[str, TransmissionMode], TransmissionMode]:
+        """Resolve forwarded transmission mode per output from request + policy.
 
-        Enforces that all configured output transmission modes are identical.
-        Uses policy-aware defaults when client doesn't specify transmissionMode.
+        Returns:
+            tuple[dict[str, TransmissionMode], TransmissionMode]:
+                - Per-output forwarded modes to send upstream.
+                - Legacy global delivered mode for backwards compatibility.
         """
-        try:
-            # Use policy-specific default when client omits transmissionMode
-            policy_default = get_default_transmission_mode(
-                process_config.transmission_mode_policy
-            )
+        forwarded_modes: dict[str, TransmissionMode] = {}
+        delivered_modes: dict[str, TransmissionMode] = {}
 
-            requested_mode = extract_requested_mode_from_outputs(
-                request_body.get("outputs"),
-                default_mode=policy_default,
-            )
+        for output_id, requested_mode in output_modes.items():
+            try:
+                decision = decide_transmission(
+                    requested_mode=requested_mode,
+                    policy=process_config.transmission_mode_policy,
+                    result_storage=process_config.result_storage,
+                )
+            except TransmissionPolicyError as e:
+                raise self._invalid_transmission_mode_error(
+                    f"Output '{output_id}': {e}"
+                ) from e
 
-            decision = decide_transmission(
-                requested_mode=requested_mode,
-                policy=process_config.transmission_mode_policy,
-                result_storage=process_config.result_storage,
-            )
-            logger.debug("Resolved transmission decision: %s", decision)
-            return decision
-        except TransmissionPolicyError as e:
-            raise self._invalid_transmission_mode_error(str(e)) from e
+            forwarded_modes[output_id] = decision.forwarded_mode
+            delivered_modes[output_id] = decision.delivered_mode
+
+        # legacy fallback mode for paths that still read a global mode only
+        if len(set(delivered_modes.values())) == 1 and delivered_modes:
+            legacy_delivered_mode = next(iter(delivered_modes.values()))
+        else:
+            legacy_delivered_mode = "value"
+
+        logger.debug(
+            "Resolved transmission modes per output. forwarded=%s delivered=%s",
+            forwarded_modes,
+            delivered_modes,
+        )
+        return forwarded_modes, legacy_delivered_mode
 
     def execute(self, exec_body, user):
         provider: ProviderConfig = providers.get_providers()[self.provider_prefix]
@@ -428,12 +438,12 @@ class Process:
     async def start_process_execution(self, request_body, user):
         """Start asynchronous process execution.
 
-        The job's transmission mode is resolved per OGC API Processes -
-        Part 1: Core (Clause 7.11.2.5):
+                The job's transmission mode is resolved per OGC API Processes -
+                Part 1: Core (Clause 7.11.2.5):
 
-          The request is normalized to one global output transmission mode for all
-          outputs. The mode is then interpreted via ``transmission-mode-policy``
-          from providers configuration.
+                      Output transmission modes are resolved per output entry and
+                      interpreted via ``transmission-mode-policy`` from providers
+                      configuration.
 
         Per-output transmission modes from the original request are preserved
         and stored with the job for later delivery resolution.
@@ -450,9 +460,6 @@ class Process:
         name = request_body.pop("job_name", None)
 
         process_config: ProcessConfig = provider.processes[self.process_id]
-        transmission_decision = self._resolve_transmission_decision(
-            request_body, process_config
-        )
 
         process_output_ids = (
             list(self.outputs.keys()) if isinstance(self.outputs, dict) else None
@@ -463,9 +470,11 @@ class Process:
         policy_default = get_default_transmission_mode(
             process_config.transmission_mode_policy
         )
-        original_output_modes = extract_output_transmission_modes(
-            request_body.get("outputs"),
-            default_mode=policy_default,
+        original_output_modes: dict[str, TransmissionMode] = (
+            extract_output_transmission_modes(
+                request_body.get("outputs"),
+                default_mode=policy_default,
+            )
         )
 
         # If client didn't specify outputs, populate with process output IDs
@@ -475,9 +484,17 @@ class Process:
                 output_id: policy_default for output_id in process_output_ids
             }
 
+        (
+            forwarded_output_modes,
+            delivered_mode,
+        ) = self._resolve_output_transmission_modes(
+            original_output_modes,
+            process_config,
+        )
+
         request_body = apply_forwarded_mode_to_execute_outputs(
             request_body,
-            transmission_decision.forwarded_mode,
+            forwarded_output_modes,
             process_output_ids,
         )
 
@@ -523,7 +540,7 @@ class Process:
                     name,
                     request_body,
                     user,
-                    transmission_decision.delivered_mode,
+                    delivered_mode,
                     output_transmission_modes=original_output_modes,
                 )
 

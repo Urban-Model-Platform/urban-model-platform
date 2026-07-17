@@ -161,11 +161,125 @@ def test_start_process_execution_rewrites_forward_mode_and_keeps_delivery_mode(
     assert captured["delivered_mode"] == "reference"
 
 
-def test_start_process_execution_rejects_mixed_output_modes(monkeypatch):
+def test_start_process_execution_accepts_mixed_output_modes_for_pass_through(
+    monkeypatch,
+):
     process = _make_process_instance()
+    setattr(process, "outputs", {"a": {}, "b": {}})
 
     process_config = _make_process_config(
         policy="pass-through",
+        result_storage="remote",
+    )
+    provider = SimpleNamespace(
+        server_url="http://modelserver:5005/",
+        timeout=5,
+        authentication=SimpleNamespace(type="NoAuth"),
+        processes={"hello-geo-world": process_config},
+    )
+
+    import ump.api.models.process as process_module
+
+    monkeypatch.setattr(
+        process_module.providers,
+        "get_providers",
+        lambda: {"modelserver": provider},
+    )
+    monkeypatch.setattr(
+        process_module.remote_auth,
+        "get_auth_strategy",
+        lambda _auth: _FakeAuthStrategy(),
+    )
+
+    captured = {}
+
+    async def _fake_submit_remote_job(
+        _session,
+        _url,
+        request_body,
+        _auth,
+        _headers,
+        max_submit_seconds,
+    ):
+        captured["submitted_body"] = request_body
+        captured["submit_timeout"] = max_submit_seconds
+        return _FakeResponse()
+
+    async def _fake_fetch_response_content(_response):
+        return ("ok", "")
+
+    async def _fake_extract_remote_job_id(_response):
+        return "remote-1"
+
+    async def _fake_create_local_job_instance(
+        _remote_job_id,
+        _name,
+        _request_body,
+        _user,
+        transmission_mode,
+        output_transmission_modes=None,
+    ):
+        captured["delivered_mode"] = transmission_mode
+        captured["output_transmission_modes"] = output_transmission_modes
+        return _FakeJob()
+
+    async def _fake_fetch_remote_job_status(
+        _session,
+        _url,
+        _remote_job_id,
+        _auth,
+        _headers,
+    ):
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(process, "check_for_cache", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(process, "_submit_remote_job", _fake_submit_remote_job)
+    monkeypatch.setattr(
+        process_module,
+        "fetch_response_content",
+        _fake_fetch_response_content,
+    )
+    monkeypatch.setattr(process, "_extract_remote_job_id", _fake_extract_remote_job_id)
+    monkeypatch.setattr(
+        process,
+        "_create_local_job_instance",
+        _fake_create_local_job_instance,
+    )
+    monkeypatch.setattr(
+        process,
+        "_fetch_remote_job_status",
+        _fake_fetch_remote_job_status,
+    )
+
+    request_body = {
+        "inputs": {"name": "Me"},
+        "outputs": {
+            "a": {"transmissionMode": "value"},
+            "b": {"transmissionMode": "reference"},
+        },
+    }
+
+    job = asyncio.run(process.start_process_execution(request_body, user="u1"))
+
+    assert job.job_id == "job-1"
+    # pass-through keeps per-output forwarding unchanged
+    assert captured["submitted_body"]["outputs"]["a"]["transmissionMode"] == "value"
+    assert captured["submitted_body"]["outputs"]["b"]["transmissionMode"] == "reference"
+    # legacy global delivery mode remains value for pass-through
+    assert captured["delivered_mode"] == "value"
+    # original per-output request modes are preserved for job-level handling
+    assert captured["output_transmission_modes"] == {
+        "a": "value",
+        "b": "reference",
+    }
+
+
+def test_start_process_execution_rejects_reference_output_for_value_only(monkeypatch):
+    process = _make_process_instance()
+    setattr(process, "outputs", {"a": {}, "b": {}})
+
+    process_config = _make_process_config(
+        policy="value-only",
         result_storage="remote",
     )
     provider = SimpleNamespace(
@@ -195,7 +309,7 @@ def test_start_process_execution_rejects_mixed_output_modes(monkeypatch):
         asyncio.run(process.start_process_execution(request_body, user="u1"))
 
     assert exc.value.response.status == 400
-    assert "same transmissionMode" in exc.value.response.detail
+    assert "value-only" in exc.value.response.detail
 
 
 def test_start_process_execution_preserves_per_output_transmission_modes(monkeypatch):

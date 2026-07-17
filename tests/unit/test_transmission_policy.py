@@ -96,3 +96,33 @@ def test_apply_forwarded_mode_creates_outputs_when_missing():
     )
 
     assert rewritten["outputs"]["result"]["transmissionMode"] == "reference"
+
+
+def test_apply_forwarded_mode_supports_per_output_mapping():
+    body = {
+        "inputs": {"x": 1},
+        "outputs": {
+            "out1": {},
+            "out2": {},
+        },
+    }
+
+    rewritten = apply_forwarded_mode_to_execute_outputs(
+        body,
+        {"out1": "value", "out2": "reference"},
+    )
+
+    assert rewritten["outputs"]["out1"]["transmissionMode"] == "value"
+    assert rewritten["outputs"]["out2"]["transmissionMode"] == "reference"
+
+
+def test_apply_forwarded_mode_mapping_creates_outputs_when_missing():
+    body = {"inputs": {"x": 1}}
+
+    rewritten = apply_forwarded_mode_to_execute_outputs(
+        body,
+        {"result": "reference"},
+        process_output_ids=["result"],
+    )
+
+    assert rewritten["outputs"]["result"]["transmissionMode"] == "reference"

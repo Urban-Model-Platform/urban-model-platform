@@ -196,23 +196,29 @@ def extract_output_transmission_modes(
 
 def apply_forwarded_mode_to_execute_outputs(
     execute_body: dict[str, Any],
-    forwarded_mode: TransmissionMode,
+    forwarded_mode: TransmissionMode | dict[str, TransmissionMode],
     process_output_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Rewrite execute request outputs to one global forwarded mode.
+    """Rewrite execute request outputs to the forwarded mode(s).
 
-    - If outputs are present, all listed outputs get ``forwarded_mode``.
+    - If outputs are present, listed outputs get their configured forwarded
+      mode. ``forwarded_mode`` may be a global mode or a per-output mapping.
     - If outputs are absent and process output ids are known, outputs are created
       explicitly so downstream gets deterministic behavior.
     """
     body = dict(execute_body)
     outputs = body.get("outputs")
 
+    def _mode_for_output(output_id: str) -> TransmissionMode:
+        if isinstance(forwarded_mode, dict):
+            return forwarded_mode.get(output_id, "value")
+        return forwarded_mode
+
     if isinstance(outputs, dict) and outputs:
         rewritten: dict[str, Any] = {}
         for output_id, output_def in outputs.items():
             entry = dict(output_def) if isinstance(output_def, dict) else {}
-            entry["transmissionMode"] = forwarded_mode
+            entry["transmissionMode"] = _mode_for_output(output_id)
             rewritten[output_id] = entry
 
         body["outputs"] = rewritten
@@ -220,7 +226,7 @@ def apply_forwarded_mode_to_execute_outputs(
 
     if process_output_ids:
         body["outputs"] = {
-            output_id: {"transmissionMode": forwarded_mode}
+            output_id: {"transmissionMode": _mode_for_output(output_id)}
             for output_id in process_output_ids
         }
 
