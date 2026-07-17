@@ -66,7 +66,7 @@ _Last updated: 2026-07-04_
 | Status derivation strategies (orchestrator + strategy pattern) | ✅ | `src/ump/core/managers/status_derivation_orchestrator.py` |
 | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/results` routes | ✅ | `src/ump/adapters/web/fastapi.py` |
 | `POST /processes/{id}/execution` route | ✅ | `src/ump/adapters/web/fastapi.py` |
-| `JobExecutionPipeline` scaffolding (classes only — no step implementations yet) | ✅ | `src/ump/core/managers/job_manager.py` |
+| `JobExecutionPipeline` — all 9 steps implemented, active via `create_and_forward_ii` | ✅ | `src/ump/core/managers/steps/execution_steps.py` |
 
 ### ✅ Developer tooling
 
@@ -135,7 +135,7 @@ _Last updated: 2026-07-04_
 ### feature extension
 The following missing features must be implemented:
 
-#### Feature 0: Landing page (completed)
+#### ✅ Feature 0: Landing page (completed)
 A simple landing page (HTML) which informs visitors about:
 - licence
 - contact
@@ -148,7 +148,7 @@ Notes:
   - `src/ump/adapters/web/static/style.css`
   These are mounted and served by the FastAPI adapter; the landing route also supports a JSON fallback (`?f=json` or Accept header).
 
-#### Feature I: API versioning (implemented)
+#### ✅ Feature I: API versioning (implemented)
 
 - Strategy: route-based versioning using path prefixes of the form `/v{major}.{minor}/` (for example `/v1.0/`). The landing page at `/` lists the available versions and links to each version's OpenAPI document (e.g. `/v1.0/openapi.json`) and docs (e.g. `/v1.0/docs`).
 - Implementation notes:
@@ -159,7 +159,7 @@ Notes:
 
 This approach keeps the landing page at `/` (as required by the OGC draft) and makes breaking changes explicit by assigning them to a new version prefix.
 
-#### Feature II: /processes/{process_id} (implemented - current state)
+#### ✅ Feature II: /processes/{process_id} (implemented)
 
 Status: implemented in code and wired into the web adapter. The following pieces have been completed:
 
@@ -343,7 +343,7 @@ aiohttp chunks large bodies automatically. Any standard HTTP server (RFC 7230) r
 **Option 2 — URL/Href referencing (OGC-native)**
 Send `{ "inputs": { "geospatial_data": { "href": "http://s3.../file.json" } } }`. Remote server fetches the reference on-demand. Eliminates local memory spike. Requires server-side support (`href` pattern) and stable external storage.
 
-**Recommended future step**: add an input pre-processor that detects payloads above a configurable threshold (e.g. >100 MB) and automatically stores them externally, replacing inline data with `href` references before forwarding.
+**Recommended future step**: add an input pre-processor that detects payloads above a configurable threshold (e.g. >100 MB) and automatically stores them externally, replacing inline data with `href` references before forwarding. -> REJECTED: not in-line with OGC API Processes (`transmissionMode: reference | value` determines when href-ing)
 
 ##### Design notes: job history / CQRS decision
 
@@ -399,29 +399,29 @@ Deferred execution modes (all belong in Feature VI pipeline implementation):
 - create an adapter for geoserver result storage (wfs, wms)
 - create an adapter for ldproxy result storage (ogc api features)
 
-#### 🔲 Feature VI: Job Execution Pipeline refactoring
+#### ✅ Feature VI: Job Execution Pipeline (implemented)
 
 **Goal**: replace the monolithic `create_and_forward` method (~200 lines) with a composable `JobExecutionPipeline` of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort by setting `context.should_halt = True`.
 
-**Sync execution is a primary driver for completing this refactoring.** The monolithic `create_and_forward` currently hard-codes "always return 201 + accepted statusInfo". Full OGC compliance requires the core to select among 8+ different response shapes depending on execution mode × response mode × transmissionMode × number of outputs. A pipeline step `ShapeClientResponseStep` is the right place to encode this decision without polluting the adapter.
+**Status**: pipeline is implemented and active. `ProcessManager.execute_process` calls `create_and_forward_ii` (pipeline entrypoint). The old `create_and_forward` remains as dead code and can be deleted in a cleanup pass.
 
-**Current state**: scaffolding exists (`PipelineStep`, `ExecutionResult`, `JobExecutionContext`, `JobExecutionPipeline`, `create_and_forward_ii`) in `src/ump/core/managers/job_manager.py`. Steps are empty — `_build_execution_pipeline()` returns `JobExecutionPipeline(steps=[])`. `create_and_forward` remains the active production path.
+**`ShapeClientResponseStep` currently implements the async row only** (201 + accepted statusInfo). The full OGC sync response table is deferred until sync execution is added (see deferred items below).
 
-**Planned steps** (each a `PipelineStep` subclass under `src/ump/core/managers/steps/`):
+**Implemented steps** (`src/ump/core/managers/steps/execution_steps.py`):
 
-| Step | Responsibility | Extracts from |
+| Step | Responsibility | Status |
 |---|---|---|
-| `ValidateAndResolveStep` | Validate process_id, resolve provider prefix/raw id | `_resolve_provider` |
-| `CreateLocalJobStep` | Create `Job` with UUID and inline inputs | `_init_job` |
-| `PersistAcceptedStep` | Persist job + accepted snapshot; notify observers | `_persist_accepted` + `_notify_job_created` |
-| `ForwardToProviderStep` | POST to remote OGC endpoint with retry | `_safe_forward` |
-| `HandleProviderResponseStep` | Detect upstream errors ≥ 400, propagate or absorb | `_handle_upstream_error_response` |
-| `DeriveStatusInfoStep` | Select derivation strategy via `StatusDerivationOrchestrator` | `_derive_status_info` |
-| `FinalizeJobStep` | Persist derived status, notify observers | `_finalize_job` |
-| `ShapeClientResponseStep` | Select the correct OGC response shape from the table below | **new** |
-| `InitiatePollingStep` | Schedule background poll if non-terminal (async only) | `_schedule_poll` |
+| `ValidateAndResolveStep` | Validate process_id, resolve provider prefix; looks up verbatim remote ID from config | ✅ |
+| `CreateLocalJobStep` | Create `Job` with UUID and inline inputs | ✅ |
+| `PersistAcceptedStep` | Persist job + accepted snapshot; notify observers | ✅ |
+| `ForwardToProviderStep` | POST to remote OGC endpoint with retry | ✅ |
+| `HandleProviderResponseStep` | Detect upstream errors ≥ 400, propagate or absorb | ✅ |
+| `DeriveStatusInfoStep` | Select derivation strategy via `StatusDerivationOrchestrator` | ✅ |
+| `FinalizeJobStep` | Persist derived status, notify observers | ✅ |
+| `ShapeClientResponseStep` | Async path: 201 + accepted statusInfo. Sync path deferred. | ✅ (async only) |
+| `InitiatePollingStep` | Schedule background poll if non-terminal | ✅ |
 
-Future extension steps (insert without touching others):
+**Deferred extension steps** (not yet implemented):
 - `ResolveOutputFormatsStep` — per-output `(media_type, is_binary)` from execute request + process description
 - `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` per provider config
 - `ApplyResponseModePolicyStep` — override `response` field sent to remote
@@ -472,11 +472,11 @@ class JobExecutionContext(BaseModel):
     response: Optional[Dict] = None  # final response dict (set by ShapeClientResponseStep)
 ```
 
-**Migration strategy**:
-1. Implement steps one at a time; unit-test each against a `JobExecutionContext` fixture.
-2. Wire into `_build_execution_pipeline()`.
-3. Shadow-run `create_and_forward_ii` alongside `create_and_forward` in tests; compare outputs.
-4. Switch `ProcessManager.execute_process` to call `_ii`; delete old method.
+**Migration status**:
+1. ✅ Implemented steps one at a time.
+2. ✅ Wired into `_build_execution_pipeline()`.
+3. ✅ Switched `ProcessManager.execute_process` to call `create_and_forward_ii`.
+4. 🔲 Delete `create_and_forward` (now dead code) and rename `_ii` → `create_and_forward`.
 
 **Minimal DDD scaffolding** (optional, for future evolution toward CQRS):
 - `src/ump/core/commands.py` — `CreateJobCommand`, `ForwardExecutionCommand`, etc.
