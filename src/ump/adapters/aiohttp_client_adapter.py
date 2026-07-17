@@ -36,7 +36,7 @@ class AioHttpClientAdapter(HttpClientPort):
         await self.close()
         return False
     
-    async def get(self, url: str, timeout: float | None = None) -> Dict[str, Any]:
+    async def get(self, url: str, timeout: float | None = None, headers: Dict[str, str] | None = None) -> Dict[str, Any]:
         if self._session is None:
             raise RuntimeError("HTTP client not initialized. Use 'async with' context manager.")
         # Use provided timeout (total seconds) or fall back to adapter default
@@ -54,6 +54,7 @@ class AioHttpClientAdapter(HttpClientPort):
             url,
             timeout=client_timeout,
             raise_for_status=True,
+            headers=headers or {},
         )
     
     async def _fetch_json(

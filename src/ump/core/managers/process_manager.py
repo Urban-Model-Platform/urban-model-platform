@@ -9,6 +9,7 @@ from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.processes import ProcessesPort
 from ump.core.interfaces.providers import ProvidersPort
+from ump.core.interfaces.remote_auth import RemoteAuthPort
 from ump.core.managers.job_manager import JobManager
 from ump.core.managers.process_cache import ProcessCache, ProcessListCache
 from ump.core.models.link import Link
@@ -25,11 +26,13 @@ class ProcessManager(ProcessesPort):
         provider_config_service: ProvidersPort,
         http_client: HttpClientPort,
         process_id_validator: ProcessIdValidatorPort,
+        remote_auth: RemoteAuthPort | None = None,
         cache_expiry_seconds: int = 300,
     ) -> None:
         self.provider_config_service = provider_config_service
         self.http_client = http_client
         self.process_id_validator = process_id_validator
+        self._remote_auth = remote_auth
         self._process_cache = ProcessListCache[ProcessSummary](
             expiry_seconds=cache_expiry_seconds
         )
@@ -266,8 +269,13 @@ class ProcessManager(ProcessesPort):
     async def _fetch_process(self, provider_name: str, raw_id: str) -> Process:
         provider = self.provider_config_service.get_provider(provider_name)
         url = str(provider.url).rstrip("/") + f"/processes/{raw_id}"
+        auth_headers = (
+            self._remote_auth.resolve(provider.authentication).headers
+            if self._remote_auth
+            else {}
+        )
         try:
-            data = await self.http_client.get(url)
+            data = await self.http_client.get(url, headers=auth_headers or None)
             proc = dict(data)
             for handler in self._process_handlers:
                 proc = handler(provider_name, proc)

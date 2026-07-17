@@ -181,6 +181,9 @@ class JobManager:
             Any
         ] = None,  # RetryPort protocol; kept generic to avoid tight coupling
         result_storage_port: Optional[Any] = None,  # ResultStoragePort protocol
+        remote_auth: Optional[
+            Any
+        ] = None,  # RemoteAuthPort; kept generic to avoid tight coupling
         observers: Optional[
             list[JobStateObserver]
         ] = None,  # Observer pattern for state transitions
@@ -194,6 +197,7 @@ class JobManager:
         self._shutdown = False
         self._retry = retry_port
         self._result_storage = result_storage_port
+        self._remote_auth = remote_auth
         self._observers = observers or []
 
         # Initialize status derivation orchestrator
@@ -289,7 +293,9 @@ class JobManager:
                 ValidateAndResolveStep(self._validator, self._providers),
                 CreateLocalJobStep(self.config),
                 PersistAcceptedStep(self._repo, self._observers),
-                ForwardToProviderStep(self._http, self._repo, self._retry, self.config),
+                ForwardToProviderStep(
+                    self._http, self._repo, self._retry, self.config, self._remote_auth
+                ),
                 HandleProviderResponseStep(self._repo),
                 DeriveStatusInfoStep(self._status_orchestrator),
                 FinalizeJobStep(self._repo, self._observers),
@@ -846,7 +852,17 @@ class JobManager:
 
         try:
             # Fetch remote status
-            resp = await self._http.get(job.remote_status_url)
+            provider = (
+                self._providers.get_provider(job.provider) if job.provider else None
+            )
+            auth_headers = (
+                self._remote_auth.resolve(provider.authentication).headers
+                if self._remote_auth and provider
+                else {}
+            )
+            resp = await self._http.get(
+                job.remote_status_url, headers=auth_headers or None
+            )
             status_info = self._extract_status_info(resp)
 
             # Guard: skip if no valid status info
@@ -949,11 +965,16 @@ class JobManager:
         provider = self._providers.get_provider(job.provider)
         base = str(provider.url).rstrip("/")
         results_url = f"{base}/jobs/{job.remote_job_id}/results"
+        auth_headers = (
+            self._remote_auth.resolve(provider.authentication).headers
+            if self._remote_auth
+            else {}
+        )
         logger.debug(
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
         )
         try:
-            resp = await self._http.get(results_url)
+            resp = await self._http.get(results_url, headers=auth_headers or None)
             # Normalize into dict response
             body = resp if isinstance(resp, dict) else {"raw": resp}
             return {"status": 200, "body": body}

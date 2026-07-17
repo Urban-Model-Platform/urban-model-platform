@@ -382,11 +382,15 @@ class ForwardToProviderStep(PipelineStep):
         repo: JobRepositoryPort,
         retry: Optional[Any],
         config: JobManagerConfig,
+        remote_auth: Optional[
+            Any
+        ] = None,  # RemoteAuthPort; kept generic to avoid circular import
     ) -> None:
         self._http = http
         self._repo = repo
         self._retry = retry
         self._config = config
+        self._remote_auth = remote_auth
 
     async def process(self, context: JobExecutionContext) -> None:
         if context.job is None or context.provider is None:
@@ -403,7 +407,12 @@ class ForwardToProviderStep(PipelineStep):
             + f"/processes/{context.provider_process_id}/execution"
         )
         prefer = context.headers.get("Prefer") or context.headers.get("prefer")
-        forward_headers = {"Prefer": prefer} if prefer else {}
+        auth_headers = (
+            self._remote_auth.resolve(context.provider.authentication).headers
+            if self._remote_auth
+            else {}
+        )
+        forward_headers = {**auth_headers, **(({"Prefer": prefer}) if prefer else {})}
         payload = context.execute_payload or {}
 
         logger.debug(f"[step:forward] exec_url={exec_url} job_id={context.job.id}")

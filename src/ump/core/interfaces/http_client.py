@@ -14,7 +14,7 @@ class HttpClientPort(ABC):
         pass
 
     @abstractmethod
-    async def get(self, url: str, timeout: float | None = None) -> Dict[str, Any]:
+    async def get(self, url: str, timeout: float | None = None, headers: Dict[str, str] | None = None) -> Dict[str, Any]:
         """Make a GET request and return JSON response.
 
         The timeout is optional; adapters may use an internal default ClientTimeout

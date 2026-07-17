@@ -2,26 +2,32 @@
 import os
 
 import uvicorn
+
 from ump.adapters.aiohttp_client_adapter import AioHttpClientAdapter
 from ump.adapters.colon_process_id_validator import ColonProcessId
-from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
-from ump.adapters.site_info_static_adapter import StaticSiteInfoAdapter
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.adapters.logging_adapter import LoggingAdapter
+from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
+from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
+from ump.adapters.retry_tenacity import TenacityRetryAdapter
+from ump.adapters.site_info_static_adapter import StaticSiteInfoAdapter
 from ump.adapters.web.fastapi import create_app
 from ump.core.config import JobManagerConfig
-from ump.core.managers.process_manager import ProcessManager
-from ump.core.managers.job_manager import JobManager
-from ump.core.managers.observers import StatusHistoryObserver, PollingSchedulerObserver, ResultsVerificationObserver
-from ump.adapters.retry_tenacity import TenacityRetryAdapter
-from ump.core.settings import set_logger, app_settings
 from ump.core.logging_config import configure_logging
-
+from ump.core.managers.job_manager import JobManager
+from ump.core.managers.observers import (
+    PollingSchedulerObserver,
+    ResultsVerificationObserver,
+    StatusHistoryObserver,
+)
+from ump.core.managers.process_manager import ProcessManager
+from ump.core.settings import app_settings, set_logger
 
 # main lives at the outermost layer (not in core)
 # Instantiates all the concrete adapters
 # Wires dependencies together
 # Starts the application
+
 
 def main():
     config_path = os.path.join(os.path.dirname(__file__), "../../providers.yaml")
@@ -32,9 +38,11 @@ def main():
     providers_port.start_file_watcher()
     http_client = AioHttpClientAdapter()
     process_id_validator = ColonProcessId()
+    remote_auth = RemoteAuthAdapter()
     # Select job repository adapter based on UMP_JOB_STORE setting
     if app_settings.UMP_JOB_STORE == "postgres":
         from ump.adapters.job_repository_sql import SQLModelJobRepository
+
         if not app_settings.UMP_DATABASE_URL:
             raise RuntimeError(
                 "UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres"
@@ -55,6 +63,7 @@ def main():
             providers_port,
             client,
             process_id_validator=process_id_validator,
+            remote_auth=remote_auth,
         )
 
     def job_manager_factory(client, process_manager):
@@ -64,9 +73,9 @@ def main():
         retry_adapter = TenacityRetryAdapter(
             attempts=job_config.forward_max_retries,
             wait_initial=job_config.forward_retry_base_wait,
-            wait_max=job_config.forward_retry_max_wait
+            wait_max=job_config.forward_retry_max_wait,
         )
-        
+
         # Create JobManager first (observers need reference to its methods)
         jm = JobManager(
             providers=providers_port,
@@ -75,19 +84,20 @@ def main():
             job_repo=job_repo,
             config=job_config,
             retry_port=retry_adapter,
+            remote_auth=remote_auth,
             observers=[],  # Will be set after creation
         )
-        
+
         # Create observers with callback to JobManager's _schedule_poll
         observers = [
             StatusHistoryObserver(repository=job_repo),
             PollingSchedulerObserver(schedule_callback=jm._schedule_poll),
             ResultsVerificationObserver(http_client=client),
         ]
-        
+
         # Wire observers into JobManager
         jm._observers = observers
-        
+
         # Attach here (composition root) so adapters remain pure HTTP concerns.
         process_manager.attach_job_manager(jm)
         return jm
