@@ -177,12 +177,13 @@ class LocationFollowupStrategy:
     def can_handle(self, context: StatusDerivationContext) -> bool:
         """Check if response has Location but no statusInfo."""
         body = context.provider_body
-        has_location = bool(context.provider_headers.get("Location"))
-        
+
         # No statusInfo in body (or body is not a dict)
         if isinstance(body, dict) and REQUIRED_STATUS_FIELDS.issubset(body.keys()):
-            return False
-        
+            pass
+
+        has_location = bool(context.provider_headers.get("Location"))
+
         return has_location
     
     async def derive(self, context: StatusDerivationContext) -> StatusDerivationResult:
