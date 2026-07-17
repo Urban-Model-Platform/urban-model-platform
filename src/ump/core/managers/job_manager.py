@@ -239,13 +239,13 @@ class JobManager:
                     f"job_id={job.id} error={exc}"
                 )
 
-    async def create_and_forward_ii(
+    async def run_execution_pipeline(
         self,
         process_id: str,
         execute_payload: Optional[Dict[str, Any]],
         headers: Dict[str, str],
     ) -> Dict[str, Any]:
-        """Pipeline-based execution entrypoint — replacement for create_and_forward.
+        """Pipeline-based execution entrypoint. - Renamed from "create_and_forward"
 
         Extracts execution_mode and response_mode as first-class context fields
         so pipeline steps (especially ShapeClientResponseStep) can make OGC-correct
@@ -297,133 +297,6 @@ class JobManager:
                 InitiatePollingStep(self._schedule_poll),
             ]
         )
-
-    async def create_and_forward(
-        self,
-        process_id: str,
-        execute_payload: Optional[Dict[str, Any]],
-        headers: Dict[str, str],
-    ) -> Dict[str, Any]:
-        """Primary orchestration entrypoint.
-
-        `execute_payload` is the full normalized ExecuteRequest provider payload.
-        We persist only inputs (inline small) locally but forward the complete
-        structure downstream, preserving outputs/response/subscriber options.
-        On provider error responses that are NOT statusInfo JSON we propagate
-        the upstream body (JSON or text) and status code to the caller instead
-        of collapsing to a generic 'missing statusInfo'.
-        """
-        logger.info(
-            f"[job:create] incoming execute request for process_id={process_id} headers_prefer={headers.get('Prefer') or headers.get('prefer')}"
-        )
-        provider_prefix, raw_id = await self._resolve_provider(process_id)
-        provider = self._providers.get_provider(provider_prefix)
-        logger.debug(
-            f"[job:create] resolved provider prefix={provider_prefix} raw_id={raw_id} provider_url={getattr(provider, 'url', None)}"
-        )
-
-        inputs = (
-            execute_payload.get("inputs") if isinstance(execute_payload, dict) else None
-        )
-        if inputs:
-            logger.debug(
-                f"[job:create] inputs keys={list(inputs.keys())[:8]} total_keys={len(inputs.keys())}"
-            )
-        job = await self._init_job(process_id, provider_prefix, inputs)
-        logger.debug(
-            f"[job:create] initialized local job id={job.id} inline_inputs={'yes' if job.inputs else 'no'}"
-        )
-        accepted_si = await self._persist_accepted(job, process_id)
-        logger.debug(
-            f"[job:create] persisted accepted snapshot job_id={job.id} created={accepted_si.created}"
-        )
-
-        prefer = headers.get("Prefer") or headers.get("prefer")
-        forward_headers = {"Prefer": prefer} if prefer else {}
-
-        exec_url = str(provider.url).rstrip("/") + f"/processes/{raw_id}/execution"
-        logger.debug(
-            f"[job:forward] forwarding to exec_url={exec_url} prefer={prefer} payload_keys={list(execute_payload.keys()) if isinstance(execute_payload, dict) else 'n/a'}"
-        )
-
-        provider_resp = await self._safe_forward(
-            job, exec_url, execute_payload or {}, forward_headers
-        )
-
-        # Handle immediate forward failure — return the accepted snapshot, not the failed
-        # state. The client receives HTTP 201 as an acknowledgement that the job was
-        # registered; the failed status is visible via GET /jobs/{id}. This follows
-        # OGC async semantics: 201 = job accepted, poll for status.
-        if provider_resp is None:
-            logger.debug(
-                f"[job:forward] upstream forward failed immediately job_id={job.id} "
-                "returning accepted snapshot; failed status visible via GET /jobs/{id}"
-            )
-            return self._response(job.id, accepted_si)
-
-        # Handle upstream error responses (>=400) with non-statusInfo bodies
-        upstream_status = provider_resp.get("status")
-        upstream_body = provider_resp.get("body")
-        logger.debug(
-            f"[job:forward] upstream response status={upstream_status} has_location={bool(provider_resp.get('headers', {}).get('Location'))} body_type={type(upstream_body).__name__}"
-        )
-
-        if upstream_status:
-            error_response = await self._handle_upstream_error_response(
-                job, upstream_status, upstream_body
-            )
-            if error_response:
-                return error_response
-
-        (
-            status_info,
-            remote_status_url,
-            remote_job_id,
-            diagnostic,
-        ) = await self._derive_status_info(
-            job, process_id, provider, provider_resp, accepted_si
-        )
-        logger.debug(
-            (
-                f"[job:derive] job_id={job.id} "
-                f"derived_status={status_info.status if status_info else None} "
-                f"remote_status_url={remote_status_url} "
-                f"remote_job_id={remote_job_id} diagnostic_set={bool(diagnostic)}"
-            )
-        )
-
-        # Inject local timestamps if remote snapshot omitted them
-        if status_info and status_info.created is None:
-            status_info.created = accepted_si.created
-        if status_info and status_info.updated is None:
-            status_info.updated = datetime.now(timezone.utc)
-
-        # If remote reports immediate success, verify results before accepting
-        if (
-            self.config.verify_remote_results
-            and status_info
-            and status_info.status == StatusCode.successful
-            and remote_job_id
-        ):
-            logger.debug(
-                f"[job:verify] remote immediate success; verifying results job_id={job.id} remote_job_id={remote_job_id}"
-            )
-            verified = await self._verify_remote_results(
-                provider, process_id, remote_job_id
-            )
-            if not verified:
-                logger.warning(
-                    f"[job:verify] results fetch failed; downgrading to failed job_id={job.id}"
-                )
-                status_info.status = StatusCode.failed
-                status_info.message = "Result fetch failed after remote success"
-                diagnostic = (diagnostic or "") + " | result fetch failed"
-
-        await self._finalize_job(
-            job, status_info, remote_status_url, remote_job_id, diagnostic
-        )
-        # Return initial accepted snapshot (client can poll for transition)
-        return self._response(job.id, accepted_si)
 
     # ----------------- Helper methods -----------------
     def _enrich_status_info(
