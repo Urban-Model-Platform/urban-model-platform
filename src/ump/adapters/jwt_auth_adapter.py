@@ -13,6 +13,7 @@ Key features:
 - UMP_AUTH_ENABLED=false: returns unauthenticated context for every token
   (including malformed ones) — safe bypass for dev/test
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -149,7 +150,9 @@ class JwtAuthAdapter(AuthPort):
 
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    async with session.get(
+                        url, timeout=aiohttp.ClientTimeout(total=10)
+                    ) as resp:
                         resp.raise_for_status()
                         data = await resp.json()
             except Exception as exc:
