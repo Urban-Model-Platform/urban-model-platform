@@ -29,7 +29,7 @@ class UmpSettings(BaseSettings):
     }
     UMP_LOG_LEVEL: str = "INFO"
     UMP_PROVIDERS_FILE: FilePath = Path("providers.yaml")
-    UMP_API_SERVER_URL: str = "http://localhost:3000"
+    UMP_API_SERVER_URL: str = "http://localhost:3000/"
     UMP_API_SERVER_HOST: str = "0.0.0.0"
     UMP_API_SERVER_PORT: int = 8000
     UMP_API_SERVER_WORKERS: int = 1
@@ -49,19 +49,19 @@ class UmpSettings(BaseSettings):
     UMP_DATABASE_USER: str = "postgres"
     UMP_DATABASE_PASSWORD: SecretStr = SecretStr("postgres")
     # ---- to be overhauled -----
-    UMP_GEOSERVER_URL: HttpUrl | None = HttpUrl("http://geoserver:8080/geoserver")
-    UMP_GEOSERVER_DB_HOST: str = "postgis"
-    UMP_GEOSERVER_DB_PORT: int = 5432
-    UMP_GEOSERVER_DB_NAME: str = "ump"
-    UMP_GEOSERVER_DB_USER: str = "ump"
-    UMP_GEOSERVER_DB_PASSWORD: SecretStr = SecretStr("ump")
+    # UMP_GEOSERVER_URL: HttpUrl | None = HttpUrl("http://geoserver:8080/geoserver")
+    # UMP_GEOSERVER_DB_HOST: str = "postgis"
+    # UMP_GEOSERVER_DB_PORT: int = 5432
+    # UMP_GEOSERVER_DB_NAME: str = "ump"
+    # UMP_GEOSERVER_DB_USER: str = "ump"
+    # UMP_GEOSERVER_DB_PASSWORD: SecretStr = SecretStr("ump")
     # Internal Geoserver datastore configuration (used by Geoserver container for internal datastores)
-    UMP_GEOSERVER_INTERNAL_DB_HOST: str = "geoserver-db"
-    UMP_GEOSERVER_INTERNAL_DB_PORT: int = 5432
-    UMP_GEOSERVER_WORKSPACE_NAME: str = "UMP"
-    UMP_GEOSERVER_USER: str = "geoserver"
-    UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
-    UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
+    # UMP_GEOSERVER_INTERNAL_DB_HOST: str = "geoserver-db"
+    # UMP_GEOSERVER_INTERNAL_DB_PORT: int = 5432
+    # UMP_GEOSERVER_WORKSPACE_NAME: str = "UMP"
+    # UMP_GEOSERVER_USER: str = "geoserver"
+    # UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
+    # UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
     # ---------------------------
     UMP_JOB_DELETE_INTERVAL: int = 240  # minutes
     # jwt-based user-facing auth
@@ -108,29 +108,10 @@ class UmpSettings(BaseSettings):
     # Per-process anonymous access is still controlled by providers.yaml anonymous-access.
     UMP_PUBLIC_PROCESSES: bool = False
 
-    @computed_field
-    @property
-    def UMP_GEOSERVER_URL_REST(self) -> HttpUrl:
-        """Constructs the full URL for the GeoServer REST API"""
-        return HttpUrl(str(self.UMP_GEOSERVER_URL) + "/rest")
-
-    @computed_field
-    @property
-    def UMP_GEOSERVER_URL_WORKSPACE(self) -> HttpUrl:
-        """Constructs the full URL for the GeoServer workspace"""
-        return HttpUrl(str(self.UMP_GEOSERVER_URL) + "/rest/workspaces")
-
     def print_settings(self, logger: LoggingPort):
         """Prints the settings for debugging purposes"""
         logger.info("UMP Settings:")
         print(self)
-
-    @field_validator("UMP_KEYCLOAK_URL", mode="before")
-    def ensure_trailing_slash(cls, value: str) -> str:
-        """Ensure UMP_KEYCLOAK_URL has a trailing slash."""
-        if not value.endswith("/"):
-            value += "/"
-        return value
 
 
 app_settings = UmpSettings()
