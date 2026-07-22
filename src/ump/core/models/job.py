@@ -43,6 +43,7 @@ class Job(BaseModel):
     """
 
     id: str  # local UUID
+    user_id: Optional[str] = None  # authenticated user who started the job; None = anonymous / public
     process_id: Optional[str] = None
     provider: Optional[str] = None  # provider name or identifier
     remote_job_id: Optional[str] = None  # upstream job id if provider manages jobs (can differ from local UUID)

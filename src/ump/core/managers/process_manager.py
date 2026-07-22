@@ -408,7 +408,7 @@ class ProcessManager(ProcessesPort):
         await self.http_client.close()
 
     async def execute_process(
-        self, process_id: str, payload: dict, headers: dict
+        self, process_id: str, payload: dict, headers: dict, user_id: str | None = None
     ) -> dict:
         """Delegate execution to JobManager (always async semantics Step 1).
 
@@ -429,7 +429,7 @@ class ProcessManager(ProcessesPort):
                 )
             )
         return await self.job_manager.run_execution_pipeline(
-            process_id, payload or {}, headers
+            process_id, payload or {}, headers, user_id=user_id
         )
 
     def attach_job_manager(self, job_manager: JobManager) -> None:

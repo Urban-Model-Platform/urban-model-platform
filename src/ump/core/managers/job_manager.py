@@ -41,9 +41,9 @@ from ump.core.settings import logger
 REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
 
 
-# ---------------------------------------------------------------------------
-# Pipeline primitives (for future refactoring of create_and_forward)
-# ---------------------------------------------------------------------------
+# -------------------------------------------
+# Pipeline primitives 
+# -------------------------------------------
 
 
 class PipelineStep(ABC):
@@ -88,6 +88,7 @@ class JobExecutionContext(BaseModel):
     process_id: str = ""
     execute_payload: Dict[str, Any] = {}
     headers: Dict[str, str] = {}
+    user_id: Optional[str] = None  # authenticated user; None = anonymous
     # First-class execution context (used by ShapeClientResponseStep)
     execution_mode: str = "async"  # "sync" | "async" — derived from Prefer header
     response_mode: str = "raw"  # "raw" | "document" — from ExecuteRequest.response
@@ -248,6 +249,7 @@ class JobManager:
         process_id: str,
         execute_payload: Optional[Dict[str, Any]],
         headers: Dict[str, str],
+        user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Pipeline-based execution entrypoint. - Renamed from "create_and_forward"
 
@@ -266,6 +268,7 @@ class JobManager:
             process_id=process_id,
             execute_payload=payload,
             headers=headers,
+            user_id=user_id,
             execution_mode=execution_mode,
             response_mode=response_mode,
             output_specs=output_specs,

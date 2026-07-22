@@ -301,6 +301,7 @@ class CreateLocalJobStep(PipelineStep):
             id=str(uuid.uuid4()),
             process_id=context.process_id,
             provider=context.provider.name,
+            user_id=context.user_id,
             status=str(StatusCode.accepted),
             inputs=inline,
             inputs_storage=storage,

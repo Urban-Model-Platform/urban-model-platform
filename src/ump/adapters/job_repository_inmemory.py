@@ -89,6 +89,9 @@ class InMemoryJobRepository(JobRepositoryPort):
         provider: Optional[str] = None,
         process_id: Optional[str] = None,
         status: Optional[str] = None,
+        user_id: Optional[str] = None,
+        public_only: bool = False,
+        include_public: bool = True,
     ) -> Sequence[Job]:
         async with self._lock:
             jobs = list(self._jobs.values())
@@ -98,6 +101,13 @@ class InMemoryJobRepository(JobRepositoryPort):
                 jobs = [j for j in jobs if j.process_id == process_id]
             if status is not None:
                 jobs = [j for j in jobs if j.status == status]
+            if public_only:
+                jobs = [j for j in jobs if j.user_id is None]
+            elif user_id is not None:
+                if include_public:
+                    jobs = [j for j in jobs if j.user_id == user_id or j.user_id is None]
+                else:
+                    jobs = [j for j in jobs if j.user_id == user_id]
             return [deepcopy(j) for j in jobs]
 
     async def mark_failed(self, job_id: str, reason: str, diagnostic: Optional[str] = None) -> Optional[Job]:

@@ -49,6 +49,7 @@ class JobRecord(SQLModel, table=True):
     provider: Optional[str] = Field(default=None, index=True)
     remote_job_id: Optional[str] = Field(default=None)
     remote_status_url: Optional[str] = Field(default=None)
+    user_id: Optional[str] = Field(default=None, index=True)
     # Denormalized status string for fast WHERE filters
     status: Optional[str] = Field(default=None, index=True)
     created: datetime = Field(
@@ -86,6 +87,7 @@ class JobRecord(SQLModel, table=True):
             provider=job.provider,
             remote_job_id=job.remote_job_id,
             remote_status_url=job.remote_status_url,
+            user_id=job.user_id,
             status=job.status,
             created=job.created,
             updated=job.updated,
@@ -113,6 +115,7 @@ class JobRecord(SQLModel, table=True):
             provider=self.provider,
             remote_job_id=self.remote_job_id,
             remote_status_url=self.remote_status_url,
+            user_id=self.user_id,
             status=self.status,
             created=self.created,
             updated=self.updated,
@@ -207,6 +210,9 @@ class SQLModelJobRepository(JobRepositoryPort):
         provider: Optional[str] = None,
         process_id: Optional[str] = None,
         status: Optional[str] = None,
+        user_id: Optional[str] = None,
+        public_only: bool = False,
+        include_public: bool = True,
     ) -> Sequence[Job]:
         async with self._session_factory() as session:
             stmt = select(JobRecord)
@@ -216,6 +222,14 @@ class SQLModelJobRepository(JobRepositoryPort):
                 stmt = stmt.where(JobRecord.process_id == process_id)
             if status is not None:
                 stmt = stmt.where(JobRecord.status == status)
+            if public_only:
+                stmt = stmt.where(JobRecord.user_id.is_(None))
+            elif user_id is not None:
+                from sqlalchemy import or_
+                if include_public:
+                    stmt = stmt.where(or_(JobRecord.user_id == user_id, JobRecord.user_id.is_(None)))
+                else:
+                    stmt = stmt.where(JobRecord.user_id == user_id)
             stmt = stmt.order_by(JobRecord.created.desc())
             result = await session.execute(stmt)
             return [row.to_domain() for row in result.scalars().all()]
