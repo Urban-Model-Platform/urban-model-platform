@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 
 from ump.core.exceptions import OGCProcessException
+from ump.core.interfaces.auth import AuthContext, AuthPort
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
@@ -78,6 +79,7 @@ def create_app(
     job_manager_factory: Callable[[HttpClientPort, ProcessManager], JobManager],
     job_repo: JobRepositoryPort,
     process_id_validator: ProcessIdValidatorPort | None = None,
+    auth_port: AuthPort | None = None,
     site_info: SiteInfoPort | None = None,
 ):
     """Create the FastAPI app.
@@ -100,6 +102,7 @@ def create_app(
             app.state.process_port = process_port
             app.state.job_manager = job_manager
             app.state.job_repo = job_repo
+            app.state.auth_port = auth_port
 
             try:
                 yield
@@ -138,6 +141,89 @@ def create_app(
 
     templates = Jinja2Templates(directory=str(adapter_templates))
 
+    # ------------------------------------------------------------------
+    # Auth helpers (used as FastAPI dependencies in routes below)
+    # ------------------------------------------------------------------
+
+    def _extract_bearer(request: Request) -> str | None:
+        """Extract the Bearer token string from the Authorization header, or None."""
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        if auth_header and auth_header.lower().startswith("bearer "):
+            return auth_header[7:].strip() or None
+        return None
+
+    async def _get_auth(request: Request) -> AuthContext:
+        """FastAPI dependency: resolve the caller's AuthContext from the request."""
+        port: AuthPort | None = app.state.auth_port
+        if port is None:
+            return AuthContext(user_id=None, roles=[], is_authenticated=False)
+        token = _extract_bearer(request)
+        return await port.verify(token)
+
+    def _check_process_access(auth: AuthContext, process_id: str, request: Request) -> None:
+        """Raise 401/403 when the caller lacks access to execute *process_id*.
+
+        Rules:
+        - Auth disabled (auth_port is None)  → always allow
+        - Process has anonymous_access=True   → allow without token
+        - Valid token + provider or process role → allow
+        - Valid token but no matching role    → 403
+        - No token (unauthenticated)          → 401
+        """
+        if app.state.auth_port is None:
+            return  # auth disabled globally
+
+        # Determine provider and check anonymous_access from config
+        provider_name = process_id.split(":", 1)[0] if ":" in process_id else None
+        is_anonymous = False
+        if provider_name:
+            try:
+                provider = app.state.process_port.provider_config_service.get_provider(provider_name)
+                if provider:
+                    for proc_cfg in provider.processes:
+                        configured = proc_cfg.id
+                        canonical = (
+                            configured
+                            if configured.startswith(f"{provider_name}:")
+                            else f"{provider_name}:{configured}"
+                        )
+                        if canonical == process_id or configured == process_id:
+                            is_anonymous = proc_cfg.anonymous_access
+                            break
+            except Exception:
+                pass
+
+        if is_anonymous:
+            return
+
+        if not auth.is_authenticated:
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank", title="Unauthorized", status=401,
+                    detail="Authentication required to execute this process.",
+                    instance=str(request.url),
+                )
+            )
+        # Role check: provider_name role grants access to all processes of that provider;
+        # full canonical process_id role grants access to one specific process.
+        if provider_name in auth.roles or process_id in auth.roles:
+            return
+        raise OGCProcessException(
+            OGCExceptionResponse(
+                type="about:blank", title="Forbidden", status=403,
+                detail=f"Missing role '{provider_name}' or '{process_id}'.",
+                instance=str(request.url),
+            )
+        )
+
+    def _check_job_access(job, auth: AuthContext, request: Request) -> bool:
+        """Return True if the caller may see this job, False if it should appear as 404."""
+        if job.user_id is None:
+            return True  # public job
+        if not auth.is_authenticated:
+            return False  # private job, caller unauthenticated
+        return job.user_id == auth.user_id
+
     # API routes — defined once, mounted under each supported version prefix
     api_router = APIRouter()
 
@@ -165,8 +251,12 @@ def create_app(
         return await app.state.process_port.get_process(process_id)
 
     @api_router.get("/jobs", response_model=JobList, response_model_exclude_none=True)
-    async def list_jobs():
-        jobs = await app.state.job_repo.list()
+    async def list_jobs(request: Request):
+        auth = await _get_auth(request)
+        if not auth.is_authenticated:
+            jobs = await app.state.job_repo.list(public_only=True)
+        else:
+            jobs = await app.state.job_repo.list(user_id=auth.user_id, include_public=True)
         status_infos = [j.status_info for j in jobs if j.status_info]
         return JobList(jobs=status_infos, links=[])
 
@@ -176,19 +266,20 @@ def create_app(
         response_model_exclude_none=True,
     )
     async def get_job(job_id: str, request: Request):
+        auth = await _get_auth(request)
         job = await app.state.job_repo.get(job_id)
-        if not job or not job.status_info:
-            problem = build_problem(
-                status=404,
-                title="Job Not Found",
-                detail=f"Job '{job_id}' not found",
-                request=request,
-            )
-            return render_problem(problem)
+        if not job or not job.status_info or not _check_job_access(job, auth, request):
+            return render_problem(build_problem(status=404, title="Job Not Found",
+                detail=f"Job '{job_id}' not found", request=request))
         return job.status_info
 
     @api_router.get("/jobs/{job_id}/results")
     async def get_job_results(job_id: str, request: Request):
+        auth = await _get_auth(request)
+        job = await app.state.job_repo.get(job_id)
+        if not job or not _check_job_access(job, auth, request):
+            return render_problem(build_problem(status=404, title="Job Not Found",
+                detail=f"Job '{job_id}' not found", request=request))
         jm = app.state.job_manager
         if jm is None:
             problem = build_problem(
@@ -259,9 +350,12 @@ def create_app(
             headers["Prefer"] = prefer
 
         provider_payload = exec_req.as_provider_payload()
+        # Resolve auth and check process access before forwarding
+        auth = await _get_auth(request)
+        _check_process_access(auth, process_id, request)
         # Forward full normalized payload (includes inputs, outputs, response, subscriber)
         resp = await app.state.process_port.execute_process(
-            process_id, provider_payload, headers
+            process_id, provider_payload, headers, user_id=auth.user_id
         )
 
         # If the backend returned structured dict with status/headers/body, map to response
