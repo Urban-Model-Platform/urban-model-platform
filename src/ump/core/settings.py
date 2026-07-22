@@ -8,6 +8,7 @@ an implementation at startup. A lightweight NoOpLogger is used until then so
 imports do not fail when modules call `logger.info` during initialization.
 """
 
+import logging
 from pathlib import Path
 
 from pydantic import FilePath, HttpUrl, SecretStr, computed_field, field_validator
@@ -15,7 +16,7 @@ from pydantic_settings import BaseSettings
 from rich import print
 
 from ump.core.interfaces.logging import LoggingPort
-import logging
+
 
 # using pydantic_settings to manage environment variables
 # and do automatic type casting in a central place
@@ -24,14 +25,18 @@ class UmpSettings(BaseSettings):
         "env_file": ".env",
         "env_file_encoding": "utf-8",
         "case_sensitive": True,
-        "extra": "ignore"  # Ignoriere unbekannte Umgebungsvariablen
+        "extra": "ignore",  # Ignoriere unbekannte Umgebungsvariablen
     }
     UMP_LOG_LEVEL: str = "INFO"
     UMP_PROVIDERS_FILE: FilePath = Path("providers.yaml")
     UMP_API_SERVER_URL: str = "http://localhost:3000"
-    UMP_API_SERVER_WORKERS: int = 4
+    UMP_API_SERVER_HOST: str = "0.0.0.0"
+    UMP_API_SERVER_PORT: int = 8000
+    UMP_API_SERVER_WORKERS: int = 1
     UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: int = 5
-    UMP_REMOTE_JOB_TTW: int | None = None  # Time-to-wait timeout for remote jobs (seconds)
+    UMP_REMOTE_JOB_TTW: int | None = (
+        None  # Time-to-wait timeout for remote jobs (seconds)
+    )
     # Job store adapter selection: "memory" (default, no DB required) or "postgres"
     UMP_JOB_STORE: str = "memory"
     # Async PostgreSQL DSN for SQLModel adapter, e.g.
@@ -43,6 +48,7 @@ class UmpSettings(BaseSettings):
     UMP_DATABASE_PORT: int = 5432
     UMP_DATABASE_USER: str = "postgres"
     UMP_DATABASE_PASSWORD: SecretStr = SecretStr("postgres")
+    # ---- to be overhauled -----
     UMP_GEOSERVER_URL: HttpUrl | None = HttpUrl("http://geoserver:8080/geoserver")
     UMP_GEOSERVER_DB_HOST: str = "postgis"
     UMP_GEOSERVER_DB_PORT: int = 5432
@@ -56,12 +62,9 @@ class UmpSettings(BaseSettings):
     UMP_GEOSERVER_USER: str = "geoserver"
     UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
     UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
+    # ---------------------------
     UMP_JOB_DELETE_INTERVAL: int = 240  # minutes
-    UMP_KEYCLOAK_URL: HttpUrl | None = HttpUrl("http://keycloak:8080/auth")
-    UMP_KEYCLOAK_REALM: str = "UrbanModelPlatform"
-    UMP_KEYCLOAK_CLIENT_ID: str = "ump-client"
-    UMP_KEYCLOAK_USER: str = "admin"
-    UMP_KEYCLOAK_PASSWORD: SecretStr = SecretStr("admin")
+    # jwt-based user-facing auth
     UMP_API_SERVER_URL_PREFIX: str = "/"
     # Supported API versions (major.minor strings). Used to mount versioned routes like /v1.0/
     UMP_SUPPORTED_API_VERSIONS: list[str] = ["1.0"]
@@ -105,9 +108,6 @@ class UmpSettings(BaseSettings):
     # Per-process anonymous access is still controlled by providers.yaml anonymous-access.
     UMP_PUBLIC_PROCESSES: bool = False
 
-    # Gunicorn default timeout is 30 seconds
-    UMP_SERVER_TIMEOUT: int = 30
-
     @computed_field
     @property
     def UMP_GEOSERVER_URL_REST(self) -> HttpUrl:
@@ -139,10 +139,13 @@ app_settings = UmpSettings()
 class NoOpLogger(LoggingPort):
     def info(self, msg: str, *args):
         pass
+
     def warning(self, msg: str, *args):
         pass
+
     def error(self, msg: str, *args):
         pass
+
     def debug(self, msg: str, *args):
         pass
 
@@ -155,6 +158,7 @@ class DelegatingLogger(LoggingPort):
     hold the old object (NoOpLogger). This delegator keeps a stable reference
     while swapping underlying implementation when `set_logger` is called.
     """
+
     def __init__(self):
         self._delegate: LoggingPort = NoOpLogger()
 
@@ -163,10 +167,13 @@ class DelegatingLogger(LoggingPort):
 
     def info(self, msg: str, *args):
         self._delegate.info(msg, *args)
+
     def warning(self, msg: str, *args):
         self._delegate.warning(msg, *args)
+
     def error(self, msg: str, *args):
         self._delegate.error(msg, *args)
+
     def debug(self, msg: str, *args):
         self._delegate.debug(msg, *args)
 
@@ -183,7 +190,9 @@ def set_logger(l: LoggingPort):
     try:
         app_settings.print_settings(logger)
     except Exception:
-        logging.getLogger("UMP").warning("Failed printing settings with injected logger")
+        logging.getLogger("UMP").warning(
+            "Failed printing settings with injected logger"
+        )
 
 
 def get_logger() -> LoggingPort:
