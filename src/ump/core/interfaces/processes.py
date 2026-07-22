@@ -1,6 +1,7 @@
 # ump/core/interfaces/processes.py
 from abc import ABC, abstractmethod
-from ump.core.models.process import ProcessList, Process
+
+from ump.core.models.process import Process, ProcessList
 
 
 class ProcessesPort(ABC):
@@ -25,7 +26,9 @@ class ProcessesPort(ABC):
         pass
 
     @abstractmethod
-    async def execute_process(self, process_id: str, body: dict, headers: dict) -> dict:
+    async def execute_process(
+        self, process_id: str, body: dict, headers: dict, user_id: str | None = None
+    ) -> dict:
         """Execute a process identified by process_id. Implementations should
         respect common OGC semantics, including honoring the Prefer header
         (e.g. Prefer: respond-async) when forwarding requests to providers.
