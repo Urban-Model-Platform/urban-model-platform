@@ -39,6 +39,7 @@ def render_problem(
         response.headers["X-Request-ID"] = problem.additional.requestId
     return response
 
+
 def build_problem(
     status: int,
     title: str,
@@ -54,9 +55,11 @@ def build_problem(
         instance=str(request.url),
     )
 
+
 def validate_process_id(
-        process_id: str, request: Request,
-        process_id_validator: ProcessIdValidatorPort | None = None
+    process_id: str,
+    request: Request,
+    process_id_validator: ProcessIdValidatorPort | None = None,
 ) -> JSONResponse | None:
     """Returns a 400 problem response if process_id fails validation, else None."""
     if process_id_validator and not process_id_validator.validate(process_id):
@@ -68,6 +71,7 @@ def validate_process_id(
         )
         return render_problem(problem)
     return None
+
 
 # Note: this a driver adapter, so it depends on the core interface (ProcessesPort)
 # but the core does not depend on this adapter
@@ -112,7 +116,6 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
 
-
     # Correlation ID middleware: assigns per-request id (header override) and exposes it to logging
     @app.middleware("http")
     async def correlation_id_middleware(request: Request, call_next):
@@ -147,7 +150,9 @@ def create_app(
 
     def _extract_bearer(request: Request) -> str | None:
         """Extract the Bearer token string from the Authorization header, or None."""
-        auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+        auth_header = request.headers.get("Authorization") or request.headers.get(
+            "authorization"
+        )
         if auth_header and auth_header.lower().startswith("bearer "):
             return auth_header[7:].strip() or None
         return None
@@ -160,7 +165,9 @@ def create_app(
         token = _extract_bearer(request)
         return await port.verify(token)
 
-    def _check_process_access(auth: AuthContext, process_id: str, request: Request) -> None:
+    def _check_process_access(
+        auth: AuthContext, process_id: str, request: Request
+    ) -> None:
         """Raise 401/403 when the caller lacks access to execute *process_id*.
 
         Rules:
@@ -178,7 +185,9 @@ def create_app(
         is_anonymous = False
         if provider_name:
             try:
-                provider = app.state.process_port.provider_config_service.get_provider(provider_name)
+                provider = app.state.process_port.provider_config_service.get_provider(
+                    provider_name
+                )
                 if provider:
                     for proc_cfg in provider.processes:
                         configured = proc_cfg.id
@@ -199,7 +208,9 @@ def create_app(
         if not auth.is_authenticated:
             raise OGCProcessException(
                 OGCExceptionResponse(
-                    type="about:blank", title="Unauthorized", status=401,
+                    type="about:blank",
+                    title="Unauthorized",
+                    status=401,
                     detail="Authentication required to execute this process.",
                     instance=str(request.url),
                 )
@@ -210,7 +221,9 @@ def create_app(
             return
         raise OGCProcessException(
             OGCExceptionResponse(
-                type="about:blank", title="Forbidden", status=403,
+                type="about:blank",
+                title="Forbidden",
+                status=403,
                 detail=f"Missing role '{provider_name}' or '{process_id}'.",
                 instance=str(request.url),
             )
@@ -244,7 +257,8 @@ def create_app(
     )
     async def get_process(process_id: str, request: Request):
         if err := validate_process_id(
-            process_id, request,
+            process_id,
+            request,
             process_id_validator,
         ):
             return err
@@ -256,7 +270,9 @@ def create_app(
         if not auth.is_authenticated:
             jobs = await app.state.job_repo.list(public_only=True)
         else:
-            jobs = await app.state.job_repo.list(user_id=auth.user_id, include_public=True)
+            jobs = await app.state.job_repo.list(
+                user_id=auth.user_id, include_public=True
+            )
         status_infos = [j.status_info for j in jobs if j.status_info]
         return JobList(jobs=status_infos, links=[])
 
@@ -269,8 +285,14 @@ def create_app(
         auth = await _get_auth(request)
         job = await app.state.job_repo.get(job_id)
         if not job or not job.status_info or not _check_job_access(job, auth, request):
-            return render_problem(build_problem(status=404, title="Job Not Found",
-                detail=f"Job '{job_id}' not found", request=request))
+            return render_problem(
+                build_problem(
+                    status=404,
+                    title="Job Not Found",
+                    detail=f"Job '{job_id}' not found",
+                    request=request,
+                )
+            )
         return job.status_info
 
     @api_router.get("/jobs/{job_id}/results")
@@ -278,8 +300,14 @@ def create_app(
         auth = await _get_auth(request)
         job = await app.state.job_repo.get(job_id)
         if not job or not _check_job_access(job, auth, request):
-            return render_problem(build_problem(status=404, title="Job Not Found",
-                detail=f"Job '{job_id}' not found", request=request))
+            return render_problem(
+                build_problem(
+                    status=404,
+                    title="Job Not Found",
+                    detail=f"Job '{job_id}' not found",
+                    request=request,
+                )
+            )
         jm = app.state.job_manager
         if jm is None:
             problem = build_problem(
@@ -307,10 +335,7 @@ def create_app(
 
     @api_router.post("/processes/{process_id}/execution")
     async def execute_process(request: Request, process_id: str):
-        if err := validate_process_id(
-            process_id, request,
-            process_id_validator
-        ):
+        if err := validate_process_id(process_id, request, process_id_validator):
             return err
         # Parse and validate execute request body against ExecuteRequest model.
         try:
