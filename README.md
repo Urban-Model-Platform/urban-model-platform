@@ -18,7 +18,26 @@ This architecture is independent of any frontend application. One could use e.g.
 
 ➡️🗓️ Find the latest [Changes](CHANGELOG.md)
 
+## Running the app
 
+On the command line run:
+
+```sh
+Development:
+  ump                                          # starts uvicorn → ump.asgi:app
+
+Production — single worker:
+  uvicorn ump.asgi:app --host 0.0.0.0 --port 8000
+
+Production — multiple workers (same container):
+  gunicorn -k uvicorn.workers.UvicornWorker -w 4 ump.asgi:app
+
+Production — horizontal scaling (recommended for containers/k8s):
+  Run N containers each with UMP_API_SERVER_WORKERS=1
+
+Docker:
+  scripts/entrypoint.sh                        # auto-selects based on UMP_API_SERVER_WORKERS
+```
 
 ## Application architecture and dependency diagram
 
