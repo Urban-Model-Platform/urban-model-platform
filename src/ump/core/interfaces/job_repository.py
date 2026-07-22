@@ -35,8 +35,18 @@ class JobRepositoryPort(ABC):
 		provider: Optional[str] = None,
 		process_id: Optional[str] = None,
 		status: Optional[str] = None,
+		user_id: Optional[str] = None,
+		public_only: bool = False,
+		include_public: bool = True,
 	) -> Sequence[Job]:
-		"""List jobs filtered by provider / process_id / status."""
+		"""List jobs with optional filters.
+
+		Visibility rules:
+			public_only=True          → only jobs where user_id IS NULL
+			user_id set, include_public=True  → user's own + public jobs
+			user_id set, include_public=False → user's own jobs only
+			no user_id, public_only=False     → all jobs (auth disabled / admin)
+		"""
 		raise NotImplementedError
 
 	@abstractmethod
