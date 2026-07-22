@@ -1,16 +1,30 @@
 #!/bin/bash
 set -e
 
-export UMP_SERVER_TIMEOUT="${UMP_SERVER_TIMEOUT:-30}"
-
-# Set the correct Python path and Flask app
-export FLASK_APP="ump.main:app"
 export PATH="/app/.venv/bin:$PATH"
 
 echo "Running database migrations..."
-/app/.venv/bin/flask db upgrade
+ump-migrate upgrade head
 
-echo "Running API Server in production mode."
-UMP_API_SERVER_WORKERS="${UMP_API_SERVER_WORKERS:-1}"
-echo "Running gunicorn with ${UMP_API_SERVER_WORKERS} workers."
-exec /app/.venv/bin/gunicorn --workers=$UMP_API_SERVER_WORKERS --bind=0.0.0.0:5000 ump.main:app
+echo "Starting API server..."
+WORKERS="${UMP_API_SERVER_WORKERS:-1}"
+HOST="${UMP_API_SERVER_HOST:-0.0.0.0}"
+PORT="${UMP_API_SERVER_PORT:-8000}"
+
+echo "uvicorn workers=${WORKERS} bind=${HOST}:${PORT}"
+
+if [ "$WORKERS" -gt 1 ]; then
+  # Multi-worker: gunicorn manages process lifecycle, uvicorn handles ASGI
+  exec gunicorn \
+    --workers "$WORKERS" \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --bind "${HOST}:${PORT}" \
+    --log-level "${UMP_LOG_LEVEL:-info}" \
+    ump.asgi:app
+else
+  # Single worker: uvicorn directly (simpler, same behaviour)
+  exec uvicorn ump.asgi:app \
+    --host "$HOST" \
+    --port "$PORT" \
+    --log-level "${UMP_LOG_LEVEL:-info}"
+fi
