@@ -246,7 +246,19 @@ def create_app(
         response_model_exclude_none=True,
         response_model_by_alias=True,
     )
-    async def get_all_processes():
+    async def get_all_processes(request: Request):
+        if app.state.auth_port is not None and not app_settings.UMP_PUBLIC_PROCESSES:
+            auth = await _get_auth(request)
+            if not auth.is_authenticated:
+                raise OGCProcessException(
+                    OGCExceptionResponse(
+                        type="about:blank",
+                        title="Unauthorized",
+                        status=401,
+                        detail="Authentication required to view processes.",
+                        instance=str(request.url),
+                    )
+                )
         return await app.state.process_port.get_all_processes()
 
     @api_router.get(
@@ -256,12 +268,24 @@ def create_app(
         response_model_by_alias=True,
     )
     async def get_process(process_id: str, request: Request):
-        if err := validate_process_id(
-            process_id,
-            request,
-            process_id_validator,
-        ):
+        if err := validate_process_id(process_id, request, process_id_validator):
             return err
+        if app.state.auth_port is not None and not app_settings.UMP_PUBLIC_PROCESSES:
+            auth = await _get_auth(request)
+            if not auth.is_authenticated:
+                raise OGCProcessException(
+                    OGCExceptionResponse(
+                        type="about:blank",
+                        title="Unauthorized",
+                        status=401,
+                        detail=(
+                            "Authentication required to view process details. "
+                            "If you think this is an error reach out to the platform "
+                            "administrator and give them the following requestId for debugging."
+                        ),
+                        instance=str(request.url),
+                    )
+                )
         return await app.state.process_port.get_process(process_id)
 
     @api_router.get("/jobs", response_model=JobList, response_model_exclude_none=True)
@@ -466,14 +490,12 @@ def create_app(
     # Exception handler for OGC Process exceptions
     @app.exception_handler(OGCProcessException)
     async def ogc_exception_handler(request: Request, exc: OGCProcessException):
-        # Decide whether to surface requestId (only for unexpected / upstream server side errors)
-        status_code = exc.response.status
+        # Always surface the requestId so clients can correlate errors to log entries.
+        # The X-Request-ID header is already set on every response by the middleware;
+        # we also embed it in the body so it is visible in the JSON payload.
         cid = correlation_id_var.get()
-        include_request_id = status_code >= 500
-        problem = exc.response.model_copy()
-        if include_request_id:
-            problem = problem.with_request_id(cid)
-        return render_problem(problem, include_request_id=include_request_id)
+        problem = exc.response.model_copy().with_request_id(cid)
+        return render_problem(problem, include_request_id=True)
 
     @app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):
