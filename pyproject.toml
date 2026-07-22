@@ -75,6 +75,7 @@ sqlmodel = "^0.0.39"
 alembic = "^1.14"
 asyncpg = "^0.30"
 greenlet = "^3.5.3"
+python-jose = {version = "^3.3.0", extras = ["cryptography"]}
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests
