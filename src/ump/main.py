@@ -6,6 +6,7 @@ import uvicorn
 from ump.adapters.aiohttp_client_adapter import AioHttpClientAdapter
 from ump.adapters.colon_process_id_validator import ColonProcessId
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
+from ump.adapters.jwt_auth_adapter import JwtAuthAdapter
 from ump.adapters.logging_adapter import LoggingAdapter
 from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
 from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
@@ -39,6 +40,8 @@ def main():
     http_client = AioHttpClientAdapter()
     process_id_validator = ColonProcessId()
     remote_auth = RemoteAuthAdapter()
+    # JWT auth adapter (UMP ← client): validates inbound bearer tokens
+    jwt_auth = JwtAuthAdapter(app_settings)
     # Select job repository adapter based on UMP_JOB_STORE setting
     if app_settings.UMP_JOB_STORE == "postgres":
         from ump.adapters.job_repository_sql import SQLModelJobRepository
@@ -108,6 +111,7 @@ def main():
         job_manager_factory=job_manager_factory,
         job_repo=job_repo,
         process_id_validator=process_id_validator,
+        auth_port=jwt_auth,
         site_info=site_info_adapter,
     )
 
