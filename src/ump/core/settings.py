@@ -79,6 +79,32 @@ class UmpSettings(BaseSettings):
     UMP_SITE_DESCRIPTION: str = "An OGC API Processes gateway for urban models."
     UMP_SITE_CONTACT: str = "maintainers@example.org"
 
+    # ── JWT / OIDC authentication (Feature IV) ────────────────────────────────
+    # Master switch.  Set to false in development to bypass all auth checks.
+    UMP_AUTH_ENABLED: bool = False
+    # JWKS endpoint from which UMP fetches public keys for offline token validation.
+    # Example (Keycloak): https://keycloak:8080/auth/realms/UMP/protocol/openid-connect/certs
+    # Example (generic):  https://idp.example.com/.well-known/jwks.json
+    UMP_JWKS_URL: str | None = None
+    # Expected 'iss' claim — must exactly match the issuer in every token.
+    # Example (Keycloak): https://keycloak:8080/auth/realms/UrbanModelPlatform
+    UMP_JWT_ISSUER: str | None = None
+    # Expected 'aud' claim — must be present in every token.
+    # Typically the Keycloak client-id or the API's own identifier.
+    UMP_JWT_AUDIENCE: str | None = None
+    # Comma-separated dot-notation paths to role arrays inside the JWT payload.
+    # UMP walks each path and merges the results into a flat role list.
+    #   Keycloak: realm_access.roles,resource_access.ump-client.roles
+    #   Azure AD: roles
+    #   Auth0:    https://myapp.example.com/roles
+    UMP_JWT_ROLES_CLAIMS: str = "realm_access.roles"
+    # How long (seconds) to cache the fetched JWKS public keys.
+    # On cache miss or unknown 'kid', UMP re-fetches immediately (key-rotation defence).
+    UMP_JWKS_CACHE_TTL_SECONDS: int = 3600
+    # When true, GET /processes and GET /processes/{id} require no token.
+    # Per-process anonymous access is still controlled by providers.yaml anonymous-access.
+    UMP_PUBLIC_PROCESSES: bool = False
+
     # Gunicorn default timeout is 30 seconds
     UMP_SERVER_TIMEOUT: int = 30
 
