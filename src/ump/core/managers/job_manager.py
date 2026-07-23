@@ -42,7 +42,7 @@ REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
 
 
 # -------------------------------------------
-# Pipeline primitives 
+# Pipeline primitives
 # -------------------------------------------
 
 
@@ -195,6 +195,10 @@ class JobManager:
         self._repo = job_repo
         self.config = config
         self._poll_tasks: Set[asyncio.Task] = set()
+        # Job IDs with an active poll loop. Prevents duplicate loops from
+        # being spawned when PollingSchedulerObserver re-triggers _schedule_poll
+        # during an already-running poll cycle.
+        self._active_poll_jobs: Set[str] = set()
         self._shutdown = False
         self._retry = retry_port
         self._result_storage = result_storage_port
@@ -787,10 +791,19 @@ class JobManager:
     def _schedule_poll(self, job_id: str) -> None:
         if self._shutdown:
             return
+        if job_id in self._active_poll_jobs:
+            logger.debug(f"[job:poll] poll already active, skipping job_id={job_id}")
+            return
+        self._active_poll_jobs.add(job_id)
         logger.debug(f"[job:poll] scheduling poll loop job_id={job_id}")
         task = asyncio.create_task(self._poll_loop(job_id))
         self._poll_tasks.add(task)
-        task.add_done_callback(lambda t: self._poll_tasks.discard(t))
+        task.add_done_callback(
+            lambda t: (
+                self._poll_tasks.discard(t),
+                self._active_poll_jobs.discard(job_id),
+            )
+        )
 
     async def _poll_loop(self, job_id: str) -> None:
         """Continuously poll remote status until terminal or shutdown.
@@ -920,8 +933,14 @@ class JobManager:
         job.apply_status_info(status_info)
         await self._repo.update(job)
 
-        # Notify observers
-        await self._notify_status_changed(job, old_status, status_info)
+        # Only fire the observer event on a real status transition.
+        # Polling frequently returns the same status (e.g. accepted→accepted while
+        # a job is queued). Firing on no-change would: (a) flood status_history with
+        # duplicate records and (b) cause PollingSchedulerObserver to spawn a new
+        # poll loop on every iteration, creating unbounded fan-out.
+        old_code = old_status.status if old_status else None
+        if old_code != status_info.status:
+            await self._notify_status_changed(job, old_status, status_info)
 
         # Check if terminal
         if job.is_in_terminal_state():
