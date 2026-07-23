@@ -163,11 +163,11 @@ _delegating_logger = DelegatingLogger()
 logger: LoggingPort = _delegating_logger
 
 
-def set_logger(l: LoggingPort):
+def set_logger(logger: LoggingPort):
     """Inject a concrete logger adapter from the composition root.
     Safe for modules that imported `logger` early: the delegator pointer updates.
     """
-    _delegating_logger.set_delegate(l)
+    _delegating_logger.set_delegate(logger)
     try:
         app_settings.print_settings(logger)
     except Exception:
