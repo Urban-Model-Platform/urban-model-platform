@@ -35,8 +35,15 @@ _Last updated: 2026-07-04_
 | FastAPI web adapter with lifespan DI | ✅ | `src/ump/adapters/web/fastapi.py` |
 | Landing page (Jinja2 + JSON fallback) | ✅ | `src/ump/adapters/web/templates/`, `static/` |
 | Route-based API versioning (`/v1.0/`) | ✅ | `src/ump/adapters/web/fastapi.py` |
-| Composition root (all adapters wired in `main.py`) | ✅ | `src/ump/main.py` |
+| Composition root (single root in `asgi.py`, CLI entry in `main.py`) | ✅ | `src/ump/asgi.py`, `src/ump/main.py` |
 | Site info adapter (landing page routes) | ✅ | `src/ump/adapters/site_info_static_adapter.py` |
+| `AuthPort` + `AuthContext` (JWT auth interface) | ✅ | `src/ump/core/interfaces/auth.py` |
+| `JwtAuthAdapter` (OIDC, JWKS cache, role extraction) | ✅ | `src/ump/adapters/jwt_auth_adapter.py` |
+| Per-route auth dependency + `_check_process_access` | ✅ | `src/ump/adapters/web/fastapi.py` |
+| `Job.user_id` + user-aware job visibility filtering | ✅ | `src/ump/core/models/job.py`, repositories |
+| DB migration: `user_id` column on `jobs` table | ✅ | `migrations/versions/0002_add_user_id_to_jobs.py` |
+| `UMP_PUBLIC_PROCESSES` gate on process routes | ✅ | `src/ump/adapters/web/fastapi.py` |
+| Request ID in all error responses (body + header) | ✅ | `src/ump/adapters/web/fastapi.py` |
 
 ### ✅ Process management
 
@@ -389,7 +396,7 @@ Deferred execution modes (all belong in Feature VI pipeline implementation):
 - Transmission direct / local-by-ref
 - Streaming results to clients
 
-#### 🔲 Feature IV: JWT-based Auth (user → UMP)
+#### ✅ Feature IV: JWT-based Auth (user → UMP)
 
 ##### Scope
 
@@ -649,8 +656,8 @@ The adapter's `resolve()` method fetches and caches a token using the `token_url
 
 | File | Action | Notes |
 |---|---|---|
-| `src/ump/core/interfaces/remote_auth.py` | CREATE | `RemoteAuthPort` + `ProviderCredentials` |
-| `src/ump/adapters/remote_auth_adapter.py` | CREATE | `RemoteAuthAdapter` implementing all four auth types |
+| `RemoteAuthPort` + `ProviderCredentials` | ✅ | `src/ump/core/interfaces/remote_auth.py` |
+| `RemoteAuthAdapter` (BasicAuth, BearerToken, ApiKey, NoAuth) | ✅ | `src/ump/adapters/remote_auth_adapter.py` |
 | `src/ump/core/managers/process_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in `_fetch_process` |
 | `src/ump/core/managers/steps/execution_steps.py` | MODIFY | `ForwardToProviderStep` accepts + uses `RemoteAuthPort` |
 | `src/ump/core/managers/job_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in polling and results proxy |
