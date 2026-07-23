@@ -193,10 +193,7 @@ _Last updated: 2026-07-04_
 - A small utility `src/ump/core/utils/link_rewriter.py` performs the rewriting and is used by the manager.
 - Fetched processes are passed through an explicit handler pipeline in `ProcessManager` (ID enforcement, link rewriting, and future handlers). This makes transformation/validation of remote process metadata explicit and extensible.
 
-### feature extension
-The following missing features must be implemented:
-
-#### ✅ Feature 0: Landing page (completed)
+### ✅ Feature 0: Landing page (completed)
 A simple landing page (HTML) which informs visitors about:
 - licence
 - contact
@@ -209,7 +206,7 @@ Notes:
   - `src/ump/adapters/web/static/style.css`
   These are mounted and served by the FastAPI adapter; the landing route also supports a JSON fallback (`?f=json` or Accept header).
 
-#### ✅ Feature I: API versioning (implemented)
+### ✅ Feature I: API versioning (implemented)
 
 - Strategy: route-based versioning using path prefixes of the form `/v{major}.{minor}/` (for example `/v1.0/`). The landing page at `/` lists the available versions and links to each version's OpenAPI document (e.g. `/v1.0/openapi.json`) and docs (e.g. `/v1.0/docs`).
 - Implementation notes:
@@ -220,7 +217,7 @@ Notes:
 
 This approach keeps the landing page at `/` (as required by the OGC draft) and makes breaking changes explicit by assigning them to a new version prefix.
 
-#### ✅ Feature II: /processes/{process_id} (implemented)
+### ✅ Feature II: /processes/{process_id} (implemented)
 
 Status: implemented in code and wired into the web adapter. The following pieces have been completed:
 
@@ -253,13 +250,13 @@ Notes:
 - Link rewriting (controlled by `UMP_REWRITE_REMOTE_LINKS`) still happens inside the manager as a handler in the processing pipeline; it will rewrite remote links into local API links when enabled.
 
 
-#### ✅ Feature III: Execution proxy, Jobs, and Persistence
+### ✅ Feature III: Execution proxy, Jobs, and Persistence
 
 The goal of Feature III is to enable UMP to act as an OGC API Processes execution proxy: forwarding execution requests to remote model servers, maintaining a local federated job registry with full status lifecycle, and persisting jobs durably in PostgreSQL.
 
 **Feature III is functionally complete for the core use case.** The remaining items are refinements and extensions.
 
-##### Quick status
+#### Quick status
 
 | Area | Status |
 |---|---|
@@ -276,7 +273,7 @@ The goal of Feature III is to enable UMP to act as an OGC API Processes executio
 | ResultStoragePort placeholder injection | ✅ |
 | Large-object input separation | ✅ rejected (OGC transmissionMode governs href-ing) |
 
-##### ✅ What is implemented
+#### ✅ What is implemented
 
 **Domain models**
 
@@ -334,7 +331,7 @@ Error handling: transport errors, upstream 4xx/5xx, missing statusInfo, and TTW 
 - Remote job id: stored for correlation/polling; never exposed externally.
 - Public route id = local UUID (no leakage of provider semantics).
 
-##### ✅ Persistence layer (SQLModel + Alembic)
+#### ✅ Persistence layer (SQLModel + Alembic)
 
 **Two-model ORM pattern** (hexagonal-correct): the core `Job` (`BaseModel`) stays pure Pydantic with no ORM annotations. The adapter owns separate ORM classes:
 
@@ -385,7 +382,7 @@ ump-migrate downgrade -1     # any alembic subcommand
 
 **Session management**: async session factory injected at construction in `main.py`; each repository method opens its own session context (no session leaks).
 
-##### 🔲 Remaining work
+#### 🔲 Remaining work
 
 What is still pending for Feature III:
 1. `/jobs/{id}/inputs` or presigned URL strategy to expose stored inputs (ensuring they remain segregated from `statusInfo`).
@@ -398,7 +395,7 @@ What is still pending for Feature III:
 7. **Status history endpoint** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
 8. **Test coverage gap** — retry-exhaustion path (forward retries exhausted → `failed` diagnostic) is not yet exercised. All other planned paths are covered: polling timeout ✅, immediate results ✅, link normalization ✅, results endpoint ✅, polling stop conditions ✅, auth/JWT ✅, job visibility ✅.
 
-##### Design notes: job history / CQRS decision
+#### Design notes: job history / CQRS decision
 
 Chosen approach: CRUD `jobs` table + append-only `job_status_history` table (hybrid). This gives fast reads, simple writes, a full audit trail, and replay capability for most needs, without the complexity of full CQRS or event sourcing. Migration path to CQRS is available if/when advanced projections or heavy scaling become necessary.
 
@@ -442,13 +439,13 @@ Deferred execution modes (all belong in Feature VI pipeline implementation):
 - Transmission direct / local-by-ref
 - Streaming results to clients
 
-#### ✅ Feature IV: JWT-based Auth (user → UMP)
+### ✅ Feature IV: JWT-based Auth (user → UMP)
 
-##### Scope
+#### Scope
 
 User-to-UMP authentication via JWT (OIDC standard). Distinct from Feature VII (UMP → remote servers). Supports any OIDC-compliant IdP (Keycloak, Auth0, Okta, Azure AD, …) with no IdP-specific adapter — differences in claim location are handled by configuration.
 
-##### Authentication flow
+#### Authentication flow
 
 ```
 Client              UMP                     IdP (Keycloak / any OIDC)
@@ -620,101 +617,12 @@ JWKS fetching uses `aiohttp` (already a dependency) with a simple in-memory asyn
 | `src/ump/adapters/web/fastapi.py` | MODIFY | Add `_require_auth` dependency; inject `auth_port`; add `_check_process_access` helper |
 | `src/ump/main.py` | MODIFY | Instantiate `JwtAuthAdapter`; wire into `create_app` |
 
-#### ✅ Feature VII: Remote server authentication (UMP → provider)
-
-This is a distinct concern from Feature IV. Feature IV secures *inbound* requests (clients authenticating against UMP). Feature VII secures *outbound* requests (UMP authenticating against remote OGC API Processes servers).
-
-##### Current state
-
-`ProviderConfig.authentication: AuthConfig` already exists in the core model (`src/ump/core/models/providers_config.py`) with four variants:
-
-| Type | Fields | Use case |
-|---|---|---|
-| `NoAuth` | — | Public servers (default) |
-| `BasicAuth` | `user`, `password: SecretStr` | HTTP Basic Auth |
-| `ApiKey` | `key_name`, `key_value: SecretStr` | API key header (any header name) |
-| `BearerToken` | `token: SecretStr` | Static bearer token |
-
-The data model is complete. What is missing is the port + adapter that converts `AuthConfig` to HTTP headers, and the wiring that applies them at every outbound call site.
-
-##### Hexagonal architecture split
-
-**Core** (no infrastructure knowledge):
-- `ProviderCredentials` — a simple `dataclass` with `headers: Dict[str, str]`; result of credential resolution
-- `RemoteAuthPort` — interface: `resolve(auth_config: AuthConfig) -> ProviderCredentials`
-
-**Adapter** (owns encoding knowledge):
-- `RemoteAuthAdapter` — implements `RemoteAuthPort`; converts each auth type to headers:
-  - `BasicAuth` → `Authorization: Basic base64(user:pass)`
-  - `BearerToken` → `Authorization: Bearer <token>`
-  - `ApiKey` → `{key_name}: <key_value>` (uses the configured header name)
-  - `NoAuth` → empty headers
-  
-  The adapter imports `base64`; the core does not. `HttpClientPort` stays unchanged — auth is expressed purely as additional `headers` entries.
-
-##### Call sites that need auth headers
-
-All four places where UMP makes outbound requests to a remote provider need the credentials merged into the request headers:
-
-| Call site | File | Has `ProviderConfig`? |
-|---|---|---|
-| `ProcessManager._fetch_process` | `process_manager.py` | ✅ via `provider.authentication` |
-| `ForwardToProviderStep.process` | `steps/execution_steps.py` | ✅ via `context.provider.authentication` |
-| `JobManager._poll_and_update_status` | `job_manager.py` | ✅ via `job.provider` → `get_provider()` |
-| `JobManager.get_results` | `job_manager.py` | ✅ via `job.provider` → `get_provider()` |
-
-The pattern at each site is:
-```python
-auth_headers = self._remote_auth.resolve(provider.authentication).headers
-merged_headers = {**auth_headers, **forward_headers}
-await self._http.post(url, json=payload, headers=merged_headers)
-```
-
-##### Injection
-
-`RemoteAuthAdapter` is stateless — a single shared instance injected at the composition root:
-
-```python
-# main.py
-from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
-remote_auth = RemoteAuthAdapter()
-# pass to process_manager_factory and job_manager_factory
-```
-
-`ProcessManager.__init__` and `JobManager.__init__` gain `remote_auth: RemoteAuthPort`; `ForwardToProviderStep.__init__` gains it too (injected via `_build_execution_pipeline()`).
-
-##### Future extension: OAuth2 client credentials
-
-When a provider requires dynamic token refresh (OAuth2 client credentials flow), add a new union member to `AuthConfig`:
-
-```python
-class OAuthClientCredentialsConfig(BaseModel):
-    type: Literal["OAuthClientCredentials"]
-    client_id: str
-    client_secret: SecretStr
-    token_url: HttpUrl
-    scope: Optional[str] = None
-```
-
-The adapter's `resolve()` method fetches and caches a token using the `token_url`. The port signature (`resolve(AuthConfig) -> ProviderCredentials`) remains unchanged. No core changes needed.
-
-##### Files to create / modify
-
-| File | Action | Notes |
-|---|---|---|
-| `RemoteAuthPort` + `ProviderCredentials` | ✅ | `src/ump/core/interfaces/remote_auth.py` |
-| `RemoteAuthAdapter` (BasicAuth, BearerToken, ApiKey, NoAuth) | ✅ | `src/ump/adapters/remote_auth_adapter.py` |
-| `src/ump/core/managers/process_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in `_fetch_process` |
-| `src/ump/core/managers/steps/execution_steps.py` | MODIFY | `ForwardToProviderStep` accepts + uses `RemoteAuthPort` |
-| `src/ump/core/managers/job_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in polling and results proxy |
-| `src/ump/main.py` | MODIFY | Instantiate `RemoteAuthAdapter`, inject into factories |
-
-#### 🔲 Feature V: Add support for result storage
+### 🔲 Feature V: Add support for result storage
 - add result storage business logic
 - create an adapter for geoserver result storage (wfs, wms)
 - create an adapter for ldproxy result storage (ogc api features)
 
-#### ✅ Feature VI: Job Execution Pipeline (implemented)
+### ✅ Feature VI: Job Execution Pipeline (implemented)
 
 **Goal**: replace the monolithic `create_and_forward` method (~200 lines) with a composable `JobExecutionPipeline` of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort by setting `context.should_halt = True`.
 
@@ -736,7 +644,7 @@ The adapter's `resolve()` method fetches and caches a token using the `token_url
 | `ShapeClientResponseStep` | Async path: 201 + accepted statusInfo. Sync path deferred. | ✅ (async only) |
 | `InitiatePollingStep` | Schedule background poll if non-terminal | ✅ |
 
-**Deferred extension steps** (not yet implemented):
+**Deferred extension steps** (not yet implemented) 🔲:
 - `ResolveOutputFormatsStep` — per-output `(media_type, is_binary)` from execute request + process description
 - `ApplyTransmissionModePolicyStep` — rewrite `transmissionMode` per provider config
 - `ApplyResponseModePolicyStep` — override `response` field sent to remote
@@ -855,56 +763,99 @@ Design trade-offs accepted in Step 1:
 - StatusInfo snapshots currently overwritten (history table planned to preserve transitions).
 - Object storage integration postponed to keep test surface small.
 
-### Large input data: implementation strategies
+### ✅ Feature VII: Remote server authentication (UMP → provider)
 
-When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there are two primary approaches; the key constraint is **the receiving server must support the chosen approach**:
+This is a distinct concern from Feature IV. Feature IV secures *inbound* requests (clients authenticating against UMP). Feature VII secures *outbound* requests (UMP authenticating against remote OGC API Processes servers).
 
-**Option 1: Chunked Transfer Encoding (automatic)**
-- How it works: aiohttp automatically chunks large request bodies; no client-side code changes needed.
-  ```python
-  # aiohttp handles chunking transparently for large payloads
-  async with session.post(url, json=large_dict) as resp:
-      ...
-  ```
-- Receiving side requirement: ANY standard HTTP server automatically reassembles chunks (RFC 7230). OGC API Processes servers support this natively with no modifications.
-- Pros: transparent, works with existing servers, no schema changes.
-- Cons: no progress visibility from client; doesn't reduce memory footprint of the UMP pod during ingestion (still parses full body into Python dict).
+#### Current state
 
-**Option 2: URL/Href Referencing (OGC-native)**
-- How it works: instead of embedding large data inline, reference it by URL.
-  ```json
-  {
-    "inputs": {
-      "geospatial_data": { "href": "http://s3.../buildings.json" }
-    }
-  }
-  ```
-- Receiving side requirement: the OGC API Processes server MUST implement the `href` reference pattern (most modern servers do, including pygeoapi). Server fetches the referenced data on-demand.
-- Pros: minimal payload size, server-driven retrieval, can validate checksums, supports range requests.
-- Cons: requires remote server capability; adds latency for reference resolution; requires stable external storage.
+`ProviderConfig.authentication: AuthConfig` already exists in the core model (`src/ump/core/models/providers_config.py`) with four variants:
 
-**Memory impact mitigation:**
-- Option 1 still loads full JSON into Python memory (360–600MB for 120MB raw). Mitigate by:
-  - Using a streaming JSON parser (e.g., `ijson`) instead of `request.json` to avoid full deserialization.
-  - Storing large inputs temporarily and passing a URL reference instead.
-- Option 2 avoids local memory spike entirely by outsourcing data hosting.
+| Type | Fields | Use case |
+|---|---|---|
+| `NoAuth` | — | Public servers (default) |
+| `BasicAuth` | `user`, `password: SecretStr` | HTTP Basic Auth |
+| `ApiKey` | `key_name`, `key_value: SecretStr` | API key header (any header name) |
+| `BearerToken` | `token: SecretStr` | Static bearer token |
 
-**Recommendation for Step 2:**
-- Keep chunked transfer (Option 1) as the baseline; aiohttp handles it automatically.
-- Investigate adding an input pre-processor that detects payloads above a threshold (e.g., >100MB) and automatically:
-  - Stores large input objects in a temporary location (local, S3, or GCS).
-  - Replaces inline data with `href` references before forwarding to the provider.
-  - Cleans up temporary storage after the job completes or expires.
-- This hybrid approach avoids memory pressure while remaining transparent to callers.
+The data model is complete. What is missing is the port + adapter that converts `AuthConfig` to HTTP headers, and the wiring that applies them at every outbound call site.
 
-# Ideas (not ordered, no exact location within the current implementation plan)
+#### Hexagonal architecture split
 
-## adding a mocked OGC API Processes remote server
-- for easier testing and users to try out without additional infrastructure mocking an OGC API Processes server would be helpful instead of relying on a (PyGeoApi) modelserver
+**Core** (no infrastructure knowledge):
+- `ProviderCredentials` — a simple `dataclass` with `headers: Dict[str, str]`; result of credential resolution
+- `RemoteAuthPort` — interface: `resolve(auth_config: AuthConfig) -> ProviderCredentials`
 
-## UMP - execution proxy: add additional skills to remote Models
+**Adapter** (owns encoding knowledge):
+- `RemoteAuthAdapter` — implements `RemoteAuthPort`; converts each auth type to headers:
+  - `BasicAuth` → `Authorization: Basic base64(user:pass)`
+  - `BearerToken` → `Authorization: Bearer <token>`
+  - `ApiKey` → `{key_name}: <key_value>` (uses the configured header name)
+  - `NoAuth` → empty headers
+  
+  The adapter imports `base64`; the core does not. `HttpClientPort` stays unchanged — auth is expressed purely as additional `headers` entries.
 
-### Kontext
+#### Call sites that need auth headers
+
+All four places where UMP makes outbound requests to a remote provider need the credentials merged into the request headers:
+
+| Call site | File | Has `ProviderConfig`? |
+|---|---|---|
+| `ProcessManager._fetch_process` | `process_manager.py` | ✅ via `provider.authentication` |
+| `ForwardToProviderStep.process` | `steps/execution_steps.py` | ✅ via `context.provider.authentication` |
+| `JobManager._poll_and_update_status` | `job_manager.py` | ✅ via `job.provider` → `get_provider()` |
+| `JobManager.get_results` | `job_manager.py` | ✅ via `job.provider` → `get_provider()` |
+
+The pattern at each site is:
+```python
+auth_headers = self._remote_auth.resolve(provider.authentication).headers
+merged_headers = {**auth_headers, **forward_headers}
+await self._http.post(url, json=payload, headers=merged_headers)
+```
+
+#### Injection
+
+`RemoteAuthAdapter` is stateless — a single shared instance injected at the composition root:
+
+```python
+# main.py
+from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
+remote_auth = RemoteAuthAdapter()
+# pass to process_manager_factory and job_manager_factory
+```
+
+`ProcessManager.__init__` and `JobManager.__init__` gain `remote_auth: RemoteAuthPort`; `ForwardToProviderStep.__init__` gains it too (injected via `_build_execution_pipeline()`).
+
+#### Future extension: OAuth2 client credentials
+
+When a provider requires dynamic token refresh (OAuth2 client credentials flow), add a new union member to `AuthConfig`:
+
+```python
+class OAuthClientCredentialsConfig(BaseModel):
+    type: Literal["OAuthClientCredentials"]
+    client_id: str
+    client_secret: SecretStr
+    token_url: HttpUrl
+    scope: Optional[str] = None
+```
+
+The adapter's `resolve()` method fetches and caches a token using the `token_url`. The port signature (`resolve(AuthConfig) -> ProviderCredentials`) remains unchanged. No core changes needed.
+
+#### Files to create / modify
+
+| File | Action | Notes |
+|---|---|---|
+| `RemoteAuthPort` + `ProviderCredentials` | ✅ | `src/ump/core/interfaces/remote_auth.py` |
+| `RemoteAuthAdapter` (BasicAuth, BearerToken, ApiKey, NoAuth) | ✅ | `src/ump/adapters/remote_auth_adapter.py` |
+| `src/ump/core/managers/process_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in `_fetch_process` |
+| `src/ump/core/managers/steps/execution_steps.py` | MODIFY | `ForwardToProviderStep` accepts + uses `RemoteAuthPort` |
+| `src/ump/core/managers/job_manager.py` | MODIFY | Accept + use `RemoteAuthPort` in polling and results proxy |
+| `src/ump/main.py` | MODIFY | Instantiate `RemoteAuthAdapter`, inject into factories |
+
+
+### Feature VIII: UMP as execution proxy: add or remove skills to/from remote Models
+
+#### Context
 
 Data is transferred from modelserver to UMP to client. The Problem: Large geodata and missing filtering. OGC API Processes v1.0.0 does not allow for subsetting or filtering of large geodata. The Results object is always passed as a block. Models can generate very large
 geodata sets, which can cause bottlenecks.
@@ -914,9 +865,6 @@ problem too late: for this to work, the data must already have flowed completely
 
 The solution lies in expanding the UMP into an **execution proxy** that can actively
 control the data flow-even before the data has completely passed through the UMP.
-
-
-### UMP as Execution Proxy
 
 The UMP acts as a broker for the entire execution lifecycle according to OGC API Processes:
 
@@ -934,13 +882,13 @@ The UMP acts as a broker for the entire execution lifecycle according to OGC API
 
 This proposal addresses `result-storage`, `transmission-mode-policy`, and `response-mode-policy`
 
-### Configuration: `transmission-mode-policy`
+#### Configuration: `transmission-mode-policy`
 
 For each process, the `providers.yaml` file explicitly configures how the UMP handles the
 `transmissionMode` parameter of the OGC standard. The parameter can take four possible values:
 ---
 
-#### `pass-through`
+##### `pass-through`
 
 The UMP acts as a transparent proxy. The `transmissionMode` from the client request
 is forwarded to the model server unchanged. The UMP’s result store is not
@@ -956,7 +904,7 @@ capabilities of the model server.
 
 ---
 
-#### `emulate-ref`
+##### `emulate-ref`
 
 The UMP adds the `transmissionMode: reference` capability to the process, even if the
 model server does not natively support it.
@@ -979,7 +927,7 @@ If the configuration is missing, `emulate-ref` results in a configuration error.
 
 ---
 
-#### `emulate-ref-only`
+##### `emulate-ref-only`
 
 Like `emulate-ref`, but `value` is completely blocked as the transmission mode for the client.
 The UMP authoritatively removes `value` from the process description.
@@ -999,10 +947,9 @@ All results are routed through the result store without exception.
   (e.g., for auditing, caching, or access reasons)
 - Model servers whose native storage is temporarily unavailable or inaccessible to clients
 
-
 ---
 
-#### `value-only`
+##### `value-only`
 
 The UMP completely blocks `transmissionMode: ref`- even if the model server natively
 supports it. The process description is cleaned up accordingly.
@@ -1016,7 +963,7 @@ The result store is not used.
   where no UMP store is to be operated
 
 
-### Configuration: `result-storage`
+#### Configuration: `result-storage`
 
 `result-storage` defines the **storage destination** for results managed by the UMP. It is
 a parameter separate from `transmission-mode`:
@@ -1034,7 +981,7 @@ a parameter separate from `transmission-mode`:
 `emulate-ref-only` is configured and the client requests `transmission-mode: reference`. In all other cases, it is ignored.
 
 
-### Behaviour Overview
+#### Behaviour Overview
 
 | Model skills | `transmission-mode` | Client wants `ref` | Client wants `value` | Store active? |
 |---|---|---|---|---|
@@ -1053,7 +1000,7 @@ The UMP would have to follow the model's native link, download the data, and res
 This combination is treated as a configuration error.
 
 
-### Validierungsregeln für die Konfiguration
+#### Validierungsregeln für die Konfiguration
 
 When starting the UMP (or reloading `providers.yaml`), the configuration should be validated
 as follows:
@@ -1065,7 +1012,7 @@ as follows:
 - Model can only be configured with `ref` or `result-storage` → **Error** (not supported)
 
 
-### Impact on the Process Description
+#### Impact on the Process Description
 
 The UMP is the **authoritative source** of the process description for all configured processes.
 It may modify the process description provided by the model server:
@@ -1077,12 +1024,12 @@ It may modify the process description provided by the model server:
 | `emulate-ref-only` | `transmissionMode` is set to `[“ref”]` |
 | `value-only` | `transmissionMode` is set to `[“value”]` |
 
-This modification is intentional and must be transparent to UMP operators. Clients
-should act exclusively based on the Process Description and should not have to consult the
-model server’s Process description.
+
+This modification is intentional and must be transparent to UMP operators. Clients should act exclusively based on the Process Description and should not have to consult the model server’s Process description.
+
 ---
 
-### Configuration: `response-mode-policy`
+#### Configuration: `response-mode-policy`
 
 The OGC API Processes standard defines a `response` field in the execute request body with two values:
 
@@ -1280,3 +1227,47 @@ When serving `GET /jobs/{id}/results`, UMP fetches the result from the remote se
 - `src/ump/core/models/job.py` — add `output_formats: dict[str, ResolvedOutputFormat]` field (serializable to JSON for DB storage).
 - `src/ump/core/managers/job_manager.py` — call `resolve_output_formats` at job creation time and store on the job record.
 - `src/ump/adapters/web/fastapi.py` — update `GET /jobs/{id}/results` route to read `job.output_formats` and apply the correct proxy/unwrap logic.
+
+### Large input data: implementation strategies
+
+When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there are two primary approaches; the key constraint is **the receiving server must support the chosen approach**:
+
+**Option 1: Chunked Transfer Encoding (automatic)**
+- How it works: aiohttp automatically chunks large request bodies; no client-side code changes needed.
+  ```python
+  # aiohttp handles chunking transparently for large payloads
+  async with session.post(url, json=large_dict) as resp:
+      ...
+  ```
+- Receiving side requirement: ANY standard HTTP server automatically reassembles chunks (RFC 7230). OGC API Processes servers support this natively with no modifications.
+- Pros: transparent, works with existing servers, no schema changes.
+- Cons: no progress visibility from client; doesn't reduce memory footprint of the UMP pod during ingestion (still parses full body into Python dict).
+
+**Option 2: URL/Href Referencing (OGC-native)**
+- How it works: instead of embedding large data inline, reference it by URL.
+  ```json
+  {
+    "inputs": {
+      "geospatial_data": { "href": "http://s3.../buildings.json" }
+    }
+  }
+  ```
+- Receiving side requirement: the OGC API Processes server MUST implement the `href` reference pattern (most modern servers do, including pygeoapi). Server fetches the referenced data on-demand.
+- Pros: minimal payload size, server-driven retrieval, can validate checksums, supports range requests.
+- Cons: requires remote server capability; adds latency for reference resolution; requires stable external storage.
+
+**Memory impact mitigation:**
+- Option 1 still loads full JSON into Python memory (360–600MB for 120MB raw). Mitigate by:
+  - Using a streaming JSON parser (e.g., `ijson`) instead of `request.json` to avoid full deserialization.
+  - Storing large inputs temporarily and passing a URL reference instead.
+- Option 2 avoids local memory spike entirely by outsourcing data hosting.
+
+**Recommendation for Step 2:**
+- Keep chunked transfer (Option 1) as the baseline; aiohttp handles it automatically.
+- Investigate adding an input pre-processor that detects payloads above a threshold (e.g., >100MB) and automatically:
+  - Stores large input objects in a temporary location (local, S3, or GCS).
+  - Replaces inline data with `href` references before forwarding to the provider.
+  - Cleans up temporary storage after the job completes or expires.
+- This hybrid approach avoids memory pressure while remaining transparent to callers.
+
+# Ideas (not ordered, no exact location within the current implementation plan)
