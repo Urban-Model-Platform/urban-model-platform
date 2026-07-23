@@ -1,3 +1,57 @@
+_Last_updated: 2026-07-23
+
+# Notes for the assistant
+
+- The user prefers explicit dependency injection. Do not instantiate adapters inside adapters; instantiate them in `main.py` and inject.
+- Keep the core free of framework code.
+- When proposing changes, include small tests where feasible and run quick syntax/type checks.
+- `providers.yaml` uses a list-based format under a `providers:` key — not the old dict-keyed format. See `providers.yaml.example`.
+- When the user asks for implementation details for "ensembles": ask for reference code to gain insights; do not reuse the provided code — find a better solution and inform the user.
+
+# How to run
+
+## Install dependencies
+```bash
+poetry install
+```
+
+## Start the API server
+```bash
+ump                         # uses .env or environment variables
+```
+
+With PostgreSQL persistence:
+```bash
+UMP_JOB_STORE=postgres \
+UMP_DATABASE_URL=postgresql+asyncpg://ump:ump@localhost:5432/ump \
+ump
+```
+
+## Run database migrations
+```bash
+# Uses UMP_DATABASE_* env vars (or UMP_DATABASE_URL):
+ump-migrate                 # upgrade head
+ump-migrate downgrade -1    # any alembic subcommand passes through
+```
+
+## Start the mock OGC server (for local testing without a real model server)
+```bash
+PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001 --reload
+```
+Then set `providers.yaml` to point at `http://localhost:5001` with process ids `echo`, `hello-world`, `slow`, `failing-job`.
+
+## Run tests
+```bash
+PYTHONPATH=src .venv/bin/pytest tests/ -q
+```
+
+## Docker Compose (dev environment)
+```bash
+docker compose -f docker-compose-dev.yaml up mock-ogc-server ump-db
+ump-migrate
+ump
+```
+
 # Refactoring status and next steps
 
 This document captures where the refactor to a hexagonal architecture left off and what the next steps are. Use this as a personal reference and to inform you as the coding assistant.
@@ -131,7 +185,7 @@ _Last updated: 2026-07-04_
 
 
 
-## Outstanding issues / TODOs
+## Feature Implementation Guide
 
 ### small changes
 - Improve logging usage across modules (inject `logger` where useful).
@@ -218,9 +272,9 @@ The goal of Feature III is to enable UMP to act as an OGC API Processes executio
 | Observer pattern (history, polling scheduler, results verification) | ✅ |
 | /jobs/{id}/inputs endpoint | 🔲 |
 | Status history reads (DB writes exist; no read endpoint yet) | 🔲 |
-| Expanded test coverage | 🔲 |
-| ResultStoragePort placeholder injection | 🔲 |
-| Large-object input separation | 🔲 |
+| Expanded test coverage | ⚠️ retry-exhaustion path missing |
+| ResultStoragePort placeholder injection | ✅ |
+| Large-object input separation | ✅ rejected (OGC transmissionMode governs href-ing) |
 
 ##### ✅ What is implemented
 
@@ -256,10 +310,10 @@ Error handling: transport errors, upstream 4xx/5xx, missing statusInfo, and TTW 
 **Observer pattern** (`src/ump/core/managers/observers.py`):
 - `StatusHistoryObserver` — calls `repo.append_status()` on every status transition (writes to `job_status_history` table in postgres).
 - `PollingSchedulerObserver` — calls `_schedule_poll()` when a non-terminal job needs polling.
-- `ResultsVerificationObserver` — attempts to fetch remote results for immediate-success jobs; downgrades to `failed` if unavailable.
+- `ResultsVerificationObserver` — attempts to fetch remote results for immediate-success jobs; logs a warning on failure (best-effort, does not downgrade job status).
 
 **Routes** (on parent app and each versioned sub-app):
-- `POST /processes/{id}/execution` → `JobManager.create_and_forward`
+- `POST /processes/{id}/execution` → `JobManager.run_execution_pipeline`
 - `GET /jobs` → list all jobs (from repo)
 - `GET /jobs/{id}` → current `statusInfo` snapshot
 - `GET /jobs/{id}/results` → remote results proxy (404 if not successful)
@@ -269,7 +323,7 @@ Error handling: transport errors, upstream 4xx/5xx, missing statusInfo, and TTW 
 **Lifecycle sequence (happy path)**:
 1. `POST /processes/{id}/execution` with raw JSON body.
 2. Web adapter parses body; `ExecuteRequest.from_raw` normalizes.
-3. `ProcessManager.execute_process` delegates to `JobManager.create_and_forward`.
+3. `ProcessManager.execute_process` delegates to `JobManager.run_execution_pipeline`.
 4. Job created locally (status=accepted); forwarded to provider.
 5. StatusInfo derived; job updated (running/successful/failed).
 6. Polling scheduled if non-terminal.
@@ -333,24 +387,16 @@ ump-migrate downgrade -1     # any alembic subcommand
 
 ##### 🔲 Remaining work
 
-1. **`/jobs/{id}/inputs` endpoint** — inputs are stored on the `Job` record but never exposed via a dedicated route. Implement and segregate inputs from `statusInfo` (OGC compliance).
-2. **Status history reads** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
-3. **Test coverage** — expand: polling loop (including TTW timeout path), immediate results synthesis, retry exhaustion, link normalization invariants, `/jobs/{id}/results` edge cases.
-4. **`ResultStoragePort` placeholder** — inject a no-op placeholder into `JobManager` at the composition root so the slot exists for Feature V adapters.
-5. **Large-object input separation** — inputs above `inline_inputs_size_limit` should be stored externally (object storage) with a URL reference; see large input strategies below.
-6. **Ambiguous bare process IDs** — current behavior picks the first matching provider; consider a deterministic policy (error on duplicates, or require fully-qualified IDs).
+What is still pending for Feature III:
+1. `/jobs/{id}/inputs` or presigned URL strategy to expose stored inputs (ensuring they remain segregated from `statusInfo`).
+2. Result storage abstraction: introduce `ResultStoragePort` (placeholder injected) and adapters (e.g., GeoServer, ldproxy) for optional persistence after success (Feature V).
+3. Test coverage: finalize unit tests for JobManager helpers (including timeout & immediate results paths), remote polling, ExecuteRequest normalization, ProcessManager handler pipeline, `/jobs/{id}/results`, and future /jobs endpoints.
+4. Optional minimal DDD scaffolding (commands/events/aggregate) – deferred unless complexity grows; current CRUD + snapshot history sufficient.
+5. Enhanced status history (append-only table) and event log optional.
+6. Authorization layer (JWT) to restrict job visibility (ties into Feature IV).
 
-##### Design notes: large input data strategies
-
-When processing large payloads (e.g. 4×30 MB = 120 MB geospatial data):
-
-**Option 1 — Chunked Transfer Encoding (automatic, current baseline)**
-aiohttp chunks large bodies automatically. Any standard HTTP server (RFC 7230) reassembles them. Works transparently — no code changes needed. Downside: full JSON still loaded into Python memory (~360–600 MB for 120 MB raw).
-
-**Option 2 — URL/Href referencing (OGC-native)**
-Send `{ "inputs": { "geospatial_data": { "href": "http://s3.../file.json" } } }`. Remote server fetches the reference on-demand. Eliminates local memory spike. Requires server-side support (`href` pattern) and stable external storage.
-
-**Recommended future step**: add an input pre-processor that detects payloads above a configurable threshold (e.g. >100 MB) and automatically stores them externally, replacing inline data with `href` references before forwarding. -> REJECTED: not in-line with OGC API Processes (`transmissionMode: reference | value` determines when href-ing)
+7. **Status history endpoint** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
+8. **Test coverage gap** — retry-exhaustion path (forward retries exhausted → `failed` diagnostic) is not yet exercised. All other planned paths are covered: polling timeout ✅, immediate results ✅, link normalization ✅, results endpoint ✅, polling stop conditions ✅, auth/JWT ✅, job visibility ✅.
 
 ##### Design notes: job history / CQRS decision
 
@@ -745,7 +791,7 @@ class JobExecutionContext(BaseModel):
 1. ✅ Implemented steps one at a time.
 2. ✅ Wired into `_build_execution_pipeline()`.
 3. ✅ Switched `ProcessManager.execute_process` to call `create_and_forward_ii`.
-4. 🔲 Delete `create_and_forward` (now dead code) and rename `_ii` → `create_and_forward`.
+4. ✅ Delete `create_and_forward` (now dead code) and rename `_ii` → `create_and_forward`. -> renamed to `run_execution_pipeline`
 
 **Minimal DDD scaffolding** (optional, for future evolution toward CQRS):
 - `src/ump/core/commands.py` — `CreateJobCommand`, `ForwardExecutionCommand`, etc.
@@ -756,7 +802,7 @@ These are optional and deferred unless complexity grows sufficiently to justify 
 
 
 2. `JobRepositoryPort` (`src/ump/core/interfaces/job_repository.py`) and in-memory adapter `InMemoryJobRepository` for fast TDD; ready to swap with SQLModel adapter later.
-3. `JobManager` (`src/ump/core/managers/job_manager.py`): orchestrates `create_and_forward` by:
+3. `JobManager` (`src/ump/core/managers/job_manager.py`): orchestrates `run_execution_pipeline` by:
    - Creating local job immediately.
    - Forwarding execute request downstream.
    - Capturing statusInfo directly from provider body OR following a `Location` header to GET remote status when needed.
@@ -768,7 +814,7 @@ These are optional and deferred unless complexity grows sufficiently to justify 
 6. Link & metadata leniency: handler pipeline in `ProcessManager` now includes `_handle_fill_defaults` (injects `version`, `jobControlOptions`, `outputTransmission`, minimal self link) and `_handle_sanitize_metadata` (drops malformed metadata dicts). This ensures partially non-spec processes are still exposed.
 7. Per-process fetch strategy is now the default: the previous `UMP_PER_PROCESS_FETCH` toggle was removed; we always fetch each configured process individually for richer metadata.
 8. Logger decoupling: core no longer directly imports `LoggingAdapter`; `main.py` acts as composition root and injects logging via `set_logger` before building factories handed to the FastAPI adapter.
-9. Composition root refactor: `main.py` now wires all concrete adapters (providers, HTTP client, repository, process id validator, logging) and passes factories to `create_app`. Web adapter no longer instantiates infra objects.
+9. Composition root refactor: `asgi.py` now wires all concrete adapters (providers, HTTP client, repository, process id validator, logging) and passes factories to `create_app`. Web adapter no longer instantiates infra objects. `main.py` became the entrypoint for development
 10. Remote status polling: background tasks query `remote_status_url` until terminal state (success/failed/ dismissed etc.) then stop; tasks are tracked for cleanup.
 11. Results endpoint `/jobs/{job_id}/results` added (remote-only proxy, no local persistence yet) returning provider results; 404 if job not successful.
 12. Retry adapter (Tenacity-based `RetryPort`) integrated into remote results verification for immediate-success jobs to handle transient availability gaps.
@@ -803,29 +849,13 @@ Normalization decisions:
 - Default jobControlOptions/outputTransmission/version injected for sparse upstream process definitions.
 - Malformed metadata safely ignored (logged debug).
 
-What is still pending for Feature III:
-1. `/jobs` list & `/jobs/{id}` detail endpoints (read snapshots + metadata).
-2. `/jobs/{id}/inputs` or presigned URL strategy to expose stored inputs (ensuring they remain segregated from `statusInfo`).
-3. SQLModel-based repository + Alembic migrations (job table + status history table).
-4. Inputs large-object separation (object storage integration, checksum & size metadata fields).
-5. Result storage abstraction: introduce `ResultStoragePort` (placeholder injected) and adapters (e.g., GeoServer, ldproxy) for optional persistence after success.
-6. Test coverage: finalize unit tests for JobManager helpers (including timeout & immediate results paths), remote polling, ExecuteRequest normalization, ProcessManager handler pipeline, `/jobs/{id}/results`, and future /jobs endpoints.
-7. Optional minimal DDD scaffolding (commands/events/aggregate) – deferred unless complexity grows; current CRUD + snapshot history sufficient.
-8. Enhanced status history (append-only table) and event log optional.
-9. Authorization layer (JWT) to restrict job visibility (ties into Feature IV).
-
-Removed or superseded tasks (were proposals, now done): Add Job model, JobRepositoryPort, in-memory repo, JobManager, execute delegation, normalization factory, polling loop, leniency handlers, composition root decoupling.
-
 Design trade-offs accepted in Step 1:
 - Always async semantics (no sync shortcut yet) simplifies initial implementation; sync execute deferred.
 - Polling interval is global; per-provider backoff not yet implemented.
 - StatusInfo snapshots currently overwritten (history table planned to preserve transitions).
 - Object storage integration postponed to keep test surface small.
 
-Next incremental enhancements (suggested order): implement /jobs endpoints → inputs separation & endpoint → SQLModel repo & migrations → status history/events → auth gating of job resources.
-
-
-Large input data: implementation strategies
+### Large input data: implementation strategies
 
 When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there are two primary approaches; the key constraint is **the receiving server must support the chosen approach**:
 
@@ -867,69 +897,6 @@ When processing large payloads (e.g., 4×30MB = 120MB geospatial data), there ar
   - Cleans up temporary storage after the job completes or expires.
 - This hybrid approach avoids memory pressure while remaining transparent to callers.
 
-
-## Next non-immediate steps
-
-- Add unit tests for `ProcessManager`, `ProcessCache`, and `ProviderConfigFileAdapter` (happy path + failure fallback).
-- Add unit tests for the cache and manager (Task 10).
-
-## How to run
-
-### Install dependencies
-```bash
-poetry install
-```
-
-### Start the API server
-```bash
-ump                         # uses .env or environment variables
-```
-
-With PostgreSQL persistence:
-```bash
-UMP_JOB_STORE=postgres \
-UMP_DATABASE_URL=postgresql+asyncpg://ump:ump@localhost:5432/ump \
-ump
-```
-
-### Run database migrations
-```bash
-# Uses UMP_DATABASE_* env vars (or UMP_DATABASE_URL):
-ump-migrate                 # upgrade head
-ump-migrate downgrade -1    # any alembic subcommand passes through
-```
-
-### Start the mock OGC server (for local testing without a real model server)
-```bash
-PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001 --reload
-```
-Then set `providers.yaml` to point at `http://localhost:5001` with process ids `echo`, `hello-world`, `slow`, `failing-job`.
-
-### Run tests
-```bash
-PYTHONPATH=src .venv/bin/pytest tests/ -q
-```
-
-### Docker Compose (dev environment)
-```bash
-docker compose -f docker-compose-dev.yaml up mock-ogc-server ump-db
-ump-migrate
-ump
-```
-
-## Notes for the assistant
-
-- The user prefers explicit dependency injection. Do not instantiate adapters inside adapters; instantiate them in `main.py` and inject.
-- Keep the core free of framework code.
-- When proposing changes, include small tests where feasible and run quick syntax/type checks.
-- `providers.yaml` uses a list-based format under a `providers:` key — not the old dict-keyed format. See `providers.yaml.example`.
-- When the user asks for implementation details for "ensembles": ask for reference code to gain insights; do not reuse the provided code — find a better solution and inform the user.
-
----
-
-
-_Last updated: 2026-05-29
-
 # Ideas (not ordered, no exact location within the current implementation plan)
 
 ## adding a mocked OGC API Processes remote server
@@ -957,7 +924,7 @@ The UMP acts as a broker for the entire execution lifecycle according to OGC API
 - `GET /jobs` / `GET /jobs/{id}` - Federated job registry across all model servers
 - `GET /jobs/{id}/results` - Intercept results and, if necessary, write them to an external store
 
-**Zentrale Fähigkeiten eines execution proxies:**
+**execution proxies central skills:**
 
 - federated job registry
 - central auth management
