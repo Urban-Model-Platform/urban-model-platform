@@ -325,7 +325,7 @@ def create_app(
             return render_problem(problem)
 
         try:
-            exec_req = ExecuteRequest.from_raw(raw)
+            ExecuteRequest.from_raw(raw)  # structural validation — raises 400 if malformed
         except ValidationError as ve:
             detail_messages = []
             for err in ve.errors():
@@ -349,13 +349,15 @@ def create_app(
         if prefer:
             headers["Prefer"] = prefer
 
-        provider_payload = exec_req.as_provider_payload()
+        # Structural validation passed; forward the original body unchanged.
+        # UMP does not transform execute request payloads — the process
+        # description is the authority, not UMP.
         # Resolve auth and check process access before forwarding
         auth = await _get_auth(request)
         _check_process_access(auth, process_id, request)
-        # Forward full normalized payload (includes inputs, outputs, response, subscriber)
+        # Forward the original raw body; pipeline extracts response/outputs from it.
         resp = await app.state.process_port.execute_process(
-            process_id, provider_payload, headers, user_id=auth.user_id
+            process_id, raw, headers, user_id=auth.user_id
         )
 
         # If the backend returned structured dict with status/headers/body, map to response
