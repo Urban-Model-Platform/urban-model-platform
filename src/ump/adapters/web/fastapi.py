@@ -24,6 +24,7 @@ from ump.core.models.execute_request import ExecuteRequest
 from ump.core.models.job import JobList, JobStatusInfo
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList
+from ump.core.services.authorization import AuthorizationService
 from ump.core.settings import app_settings, logger
 
 
@@ -84,6 +85,7 @@ def create_app(
     job_repo: JobRepositoryPort,
     process_id_validator: ProcessIdValidatorPort | None = None,
     auth_port: AuthPort | None = None,
+    authorization_service: AuthorizationService | None = None,
     site_info: SiteInfoPort | None = None,
 ):
     """Create the FastAPI app.
@@ -107,6 +109,7 @@ def create_app(
             app.state.job_manager = job_manager
             app.state.job_repo = job_repo
             app.state.auth_port = auth_port
+            app.state.authz = authorization_service
 
             try:
                 yield
@@ -168,66 +171,14 @@ def create_app(
     def _check_process_access(
         auth: AuthContext, process_id: str, request: Request
     ) -> None:
-        """Raise 401/403 when the caller lacks access to execute *process_id*.
+        """Enforce execution access, delegating the decision to the core.
 
-        Rules:
-        - Auth disabled (auth_port is None)  → always allow
-        - Process has anonymous_access=True   → allow without token
-        - Valid token + provider or process role → allow
-        - Valid token but no matching role    → 403
-        - No token (unauthenticated)          → 401
+        The web adapter only owns the "is auth wired at all?" gate; the actual
+        role/anonymous-access policy lives in ``AuthorizationService``.
         """
-        if app.state.auth_port is None:
+        if app.state.auth_port is None or app.state.authz is None:
             return  # auth disabled globally
-
-        # Determine provider and check anonymous_access from config
-        provider_name = process_id.split(":", 1)[0] if ":" in process_id else None
-        is_anonymous = False
-        if provider_name:
-            try:
-                provider = app.state.process_port.provider_config_service.get_provider(
-                    provider_name
-                )
-                if provider:
-                    for proc_cfg in provider.processes:
-                        configured = proc_cfg.id
-                        canonical = (
-                            configured
-                            if configured.startswith(f"{provider_name}:")
-                            else f"{provider_name}:{configured}"
-                        )
-                        if canonical == process_id or configured == process_id:
-                            is_anonymous = proc_cfg.anonymous_access
-                            break
-            except Exception:
-                pass
-
-        if is_anonymous:
-            return
-
-        if not auth.is_authenticated:
-            raise OGCProcessException(
-                OGCExceptionResponse(
-                    type="about:blank",
-                    title="Unauthorized",
-                    status=401,
-                    detail="Authentication required to execute this process.",
-                    instance=str(request.url),
-                )
-            )
-        # Role check: provider_name role grants access to all processes of that provider;
-        # full canonical process_id role grants access to one specific process.
-        if provider_name in auth.roles or process_id in auth.roles:
-            return
-        raise OGCProcessException(
-            OGCExceptionResponse(
-                type="about:blank",
-                title="Forbidden",
-                status=403,
-                detail=f"Missing role '{provider_name}' or '{process_id}'.",
-                instance=str(request.url),
-            )
-        )
+        app.state.authz.check_process_access(auth, process_id)
 
     def _check_job_access(job, auth: AuthContext, request: Request) -> bool:
         """Return True if the caller may see this job, False if it should appear as 404."""
