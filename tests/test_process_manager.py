@@ -27,9 +27,15 @@ class FakeProvidersService(ProvidersPort):
         return []
 
     def get_provider(self, provider_name: str) -> ProviderConfig:
-        # Build ProviderConfig using model_validate so Pydantic parses the URL
+        # Build ProviderConfig using model_validate so Pydantic parses the URL.
+        # A single 'echo' process is declared so config-driven (bare-id)
+        # resolution can find it without fetching the remote process list.
         return ProviderConfig.model_validate(
-            {"name": self._provider.name, "url": self._provider.url}
+            {
+                "name": self._provider.name,
+                "url": self._provider.url,
+                "processes": [{"id": "echo"}],
+            }
         )
 
     def get_process_config(self, provider_name: str, process_id: str):
@@ -126,21 +132,11 @@ async def test_get_process_bare_id_fallback():
     providers = FakeProvidersService(provider)
     validator = ColonProcessId()
 
-    list_url = "http://provider.local/processes"
     fetch_url = "http://provider.local/processes/echo"
-    # summary contains provider-prefixed id; full description available at fetch_url
+    # config-driven resolution fetches the process description directly.
+    # (Note: list_url would be a prefix of fetch_url and collide under the
+    # fake's prefix matching, so only the fetch response is registered.)
     responses = {
-        list_url: {
-            "processes": [
-                {
-                    "id": "infra:echo",
-                    "version": "1.0",
-                    "jobControlOptions": ["sync-execute"],
-                    "outputTransmission": ["value"],
-                    "links": [],
-                }
-            ]
-        },
         fetch_url: {
             "id": "infra:echo",
             "version": "1.0",
@@ -162,25 +158,32 @@ async def test_get_process_bare_id_fallback():
         )
         model = await manager.get_process("echo")
         assert model.pid == "infra:echo"
-        # verify manager attempted to fetch the list and the full description
-        assert any(list_url in r for r in http_client.requests)
+        # bare-id resolution is config-driven: it resolves the provider from
+        # providers.yaml and fetches the process description directly (no list fetch).
         assert any(fetch_url in r for r in http_client.requests)
 
 
 @pytest.mark.asyncio
-async def test_execute_process_forwards_and_honors_prefer_header():
+async def test_execute_process_delegates_to_job_manager():
     provider = FakeProvider(name="infra", url="http://provider.local/")
     providers = FakeProvidersService(provider)
     validator = ColonProcessId()
 
-    exec_url = "http://provider.local/processes/echo/execution"
-    fake_response = {
-        "status": 202,
-        "headers": {"Location": "/jobs/1"},
-        "body": {"job": "1"},
-    }
+    http_client = FakeHttpClient({})
 
-    http_client = FakeHttpClient({("POST", exec_url): fake_response})
+    class FakeJobManager:
+        def __init__(self) -> None:
+            self.calls: List[Any] = []
+
+        async def run_execution_pipeline(
+            self, process_id, payload, headers, user_id=None
+        ):
+            self.calls.append((process_id, payload, headers, user_id))
+            return {
+                "status": 202,
+                "headers": {"Location": "/jobs/1"},
+                "body": {"job": "1"},
+            }
 
     async with http_client as client:
         manager = ProcessManager(
@@ -188,10 +191,17 @@ async def test_execute_process_forwards_and_honors_prefer_header():
             cast(HttpClientPort, client),
             process_id_validator=cast(ProcessIdValidatorPort, validator),
         )
+        fake_jm = FakeJobManager()
+        manager.attach_job_manager(cast(Any, fake_jm))
         resp = await manager.execute_process(
             "infra:echo",
             payload={"x": 1},
-            headers={"Prefer": "respond-async"}
+            headers={"Prefer": "respond-async"},
         )
         assert isinstance(resp, dict)
         assert resp.get("status") == 202
+        # ProcessManager delegates verbatim to JobManager, forwarding the
+        # Prefer header and payload unchanged.
+        assert fake_jm.calls == [
+            ("infra:echo", {"x": 1}, {"Prefer": "respond-async"}, None)
+        ]
