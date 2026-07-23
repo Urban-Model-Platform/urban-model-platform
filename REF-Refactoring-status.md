@@ -394,6 +394,8 @@ What is still pending for Feature III:
 
 7. **Status history endpoint** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
 8. **Test coverage gap** — retry-exhaustion path (forward retries exhausted → `failed` diagnostic) is not yet exercised. All other planned paths are covered: polling timeout ✅, immediate results ✅, link normalization ✅, results endpoint ✅, polling stop conditions ✅, auth/JWT ✅, job visibility ✅.
+9. **Execute request payload forwarding** — `ExecuteRequest.from_raw()` now acts as a structural validator only; the original raw body is forwarded to the remote server unchanged (no lossy re-serialization). ✅ Done.
+10. **Process-description-aware input validation (Feature X)** — `ExecuteRequest` validates structure only (is `value` or `href` present? is `href` a URL?). It does not validate whether input names or value types match the process description. A future `ValidateInputsStep` should optionally (via `UMP_VALIDATE_EXEC_REQUESTS=true`) validate each input against its `ProcessInput.scheme: Schema` from the cached process description before forwarding. The `ProcessInput` and `Schema` models already exist in `src/ump/core/models/process.py` and provide the full JSON Schema structure needed. This step must be optional because: (a) the process description may not be cached yet; (b) some schemas use `oneOf`/`anyOf` which require a JSON Schema validator; (c) operators may want lax mode for non-spec-compliant servers.
 
 #### Design notes: job history / CQRS decision
 
