@@ -26,6 +26,7 @@ from ump.adapters.retry_tenacity import TenacityRetryAdapter
 from ump.adapters.site_info_static_adapter import StaticSiteInfoAdapter
 from ump.adapters.web.fastapi import create_app
 from ump.core.config import JobManagerConfig
+from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.logging_config import configure_logging
 from ump.core.managers.job_manager import JobManager
 from ump.core.managers.observers import (
@@ -34,6 +35,7 @@ from ump.core.managers.observers import (
     StatusHistoryObserver,
 )
 from ump.core.managers.process_manager import ProcessManager
+from ump.core.services.authorization import AuthorizationService
 from ump.core.settings import app_settings, set_logger
 
 # ---------------------------------------------------------------------------
@@ -56,7 +58,7 @@ if app_settings.UMP_JOB_STORE == "postgres":
 
     if not app_settings.UMP_DATABASE_URL:
         raise RuntimeError("UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres")
-    job_repo: object = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
+    job_repo: JobRepositoryPort = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
 else:
     job_repo = InMemoryJobRepository("scratch/ump_jobs")
 
@@ -110,5 +112,6 @@ app = create_app(
     job_repo=job_repo,
     process_id_validator=process_id_validator,
     auth_port=jwt_auth,
+    authorization_service=AuthorizationService(providers_port),
     site_info=StaticSiteInfoAdapter(),
 )
