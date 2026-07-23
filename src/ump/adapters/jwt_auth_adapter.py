@@ -17,6 +17,7 @@ Key features:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any, Dict, List, Optional
 
@@ -31,14 +32,35 @@ from ump.core.settings import UmpSettings
 # Clock-skew tolerance applied to 'exp' and 'nbf' claims (seconds)
 _LEEWAY_SECONDS = 30
 
+_log = logging.getLogger(__name__)
+
 
 def _401(detail: str) -> OGCProcessException:
+    """Client error: the token itself is invalid/expired."""
     return OGCProcessException(
         OGCExceptionResponse(
             type="about:blank",
             title="Unauthorized",
             status=401,
             detail=detail,
+            instance=None,
+        )
+    )
+
+
+def _503(public_detail: str, internal_detail: str) -> OGCProcessException:
+    """Infrastructure error: auth service misconfigured or unreachable.
+
+    Logs *internal_detail* (may contain URLs / config names) at ERROR level
+    and exposes only the generic *public_detail* to the client.
+    """
+    _log.error("[jwt-auth] %s", internal_detail)
+    return OGCProcessException(
+        OGCExceptionResponse(
+            type="about:blank",
+            title="Service Unavailable",
+            status=503,
+            detail=public_detail,
             instance=None,
         )
     )
@@ -124,8 +146,8 @@ class JwtAuthAdapter(AuthPort):
             return next(iter(self._jwks.values()))
 
         raise _401(
-            f"No matching public key found for kid={kid!r}. "
-            "Check UMP_JWKS_URL points to the correct IdP."
+            "Token signature could not be verified. "
+            "Please obtain a new token from your identity provider."
         )
 
     async def _refresh_if_stale(self) -> None:
@@ -143,9 +165,9 @@ class JwtAuthAdapter(AuthPort):
 
             url = self._settings.UMP_JWKS_URL
             if not url:
-                raise _401(
-                    "UMP_JWKS_URL is not configured. "
-                    "Set it to the JWKS endpoint of your IdP."
+                raise _503(
+                    "Authentication service is not available.",
+                    "UMP_JWKS_URL is not configured — set it to the JWKS endpoint of your IdP.",
                 )
 
             try:
@@ -156,7 +178,10 @@ class JwtAuthAdapter(AuthPort):
                         resp.raise_for_status()
                         data = await resp.json()
             except Exception as exc:
-                raise _401(f"Failed to fetch JWKS from {url}: {exc}") from exc
+                raise _503(
+                    "Authentication service is temporarily unavailable.",
+                    f"Failed to fetch JWKS from {url}: {exc}",
+                ) from exc
 
             keys = data.get("keys", [])
             self._jwks = {k["kid"]: k for k in keys if "kid" in k}
