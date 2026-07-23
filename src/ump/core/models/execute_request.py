@@ -1,21 +1,27 @@
-"""OGC API Processes Execute request models (simplified).
+"""OGC API Processes Execute request models.
 
 Derived from execute.yaml and related schema fragments.
-We intentionally simplify some nested schema details while preserving
-structural intent:
-- inputs: map<string, InlineOrRef | [InlineOrRef,...]>
-- outputs: map<string, OutputSpec>
-- response: 'raw' | 'document' (default 'raw')
-- subscriber: optional callback URIs (if conformance class implemented)
 
-InlineOrRef covers:
- - direct scalar/object value (value/data)
- - qualified value with format metadata
- - link reference (href)
+Role of this module
+-------------------
+``ExecuteRequest.from_raw()`` is a **structural validator only**.  It rejects
+payloads that are obviously malformed (missing ``value``/``href`` on an input,
+an ``href`` that is not a URL, etc.) before the request reaches any remote
+server.  It does **not** validate inputs against a specific process description
+— that is the job of an optional ``ValidateInputsStep`` (planned, see
+Feature X in the refactoring guide).
 
-This model normalizes inputs so downstream code can treat each entry as:
-    { "id": key, "values": [ InlineOrRef, ... ] }
-Without losing ability to reference remote resources.
+UMP does **not** transform the execute request payload.  After passing
+structural validation the original raw dict is forwarded to the remote server
+unchanged.  ``as_provider_payload()`` intentionally does not exist; any future
+rewriting (``transmission-mode-policy``, ``response-mode-policy``) belongs in
+explicit pipeline steps introduced by Feature VIII.
+
+Models
+------
+- ``InlineOrRef``       — one input value: either inline data or an OGC link
+- ``OutputSpec``        — per-output format + transmissionMode request
+- ``ExecuteRequest``    — top-level request body with structural validation
 """
 
 from __future__ import annotations
@@ -47,11 +53,22 @@ class InlineOrRef(BaseModel):
     """Represents either inline data or a reference link.
 
     We collapse multiple OGC schema oneOf choices into a single flexible model.
+
+    OGC distinguishes two patterns:
+    - ``qualifiedInputValue``: ``{ value, mediaType, encoding, schema }``
+    - ``link``:               ``{ href, type, rel, title, hreflang }``
+
+    Known named fields (``value``, ``href``, ``format``) are declared
+    explicitly for validation.  Any additional OGC link fields (e.g. ``type``,
+    ``rel``, ``hreflang``) are preserved transparently via ``extra = "allow"``
+    so the forwarded payload is identical to what the client sent.
     """
+
+    model_config = {"extra": "allow"}
 
     value: Any | None = Field(None, description="Inline value (scalar/object/array)")
     href: Optional[HttpUrl] = Field(None, description="External reference URL")
-    format: Optional[str] = Field(None, description="Media type or format identifier")
+    format: Optional[str] = Field(None, description="Format identifier")
 
     @computed_field
     @property
@@ -85,11 +102,6 @@ class SubscriberCallbacks(BaseModel):
     failedUri: Optional[HttpUrl] = None
 
 
-class NormalizedInput(BaseModel):
-    id: str
-    values: List[InlineOrRef]
-
-
 class ExecuteRequest(BaseModel):
     inputs: Dict[str, Union[InlineOrRef, List[InlineOrRef]]] = Field(
         default_factory=dict,
@@ -101,7 +113,11 @@ class ExecuteRequest(BaseModel):
 
     @field_validator("inputs")
     def validate_inputs(cls, v):
-        # Basic structural validation: ensure each value is InlineOrRef or list thereof.
+        """Structural pre-validation: each input must be an InlineOrRef or a
+        non-empty list thereof.  This check is process-agnostic — it catches
+        obviously malformed payloads before they reach a remote server.  It
+        does NOT validate against a process description schema.
+        """
         for key, val in v.items():
             if isinstance(val, list):
                 if not val:
@@ -116,44 +132,6 @@ class ExecuteRequest(BaseModel):
                     f"Input '{key}' must be InlineOrRef or list[InlineOrRef]"
                 )
         return v
-
-    def normalized_inputs(self) -> List[NormalizedInput]:
-        result: List[NormalizedInput] = []
-        for key, val in self.inputs.items():
-            if isinstance(val, list):
-                result.append(NormalizedInput(id=key, values=val))
-            else:
-                result.append(NormalizedInput(id=key, values=[val]))
-        return result
-
-    def as_provider_payload(self) -> Dict[str, Any]:
-        """Convert to provider-friendly payload structure.
-
-        For simplicity we keep the original mapping but flatten lists where single entry.
-        """
-        inputs_payload: Dict[str, Any] = {}
-        for key, val in self.inputs.items():
-            if isinstance(val, list):
-                # provider may expect array or first value; we retain list of either value/href dicts
-                inputs_payload[key] = [
-                    item.value if item.is_inline else {"href": str(item.href)}
-                    for item in val
-                ]
-            else:
-                inputs_payload[key] = (
-                    val.value if val.is_inline else {"href": str(val.href)}
-                )
-        payload: Dict[str, Any] = {"inputs": inputs_payload}
-        if self.outputs:
-            payload["outputs"] = {
-                k: {k2: v2 for k2, v2 in spec.model_dump(exclude_none=True).items()}
-                for k, spec in self.outputs.items()
-            }
-        payload["response"] = self.response.value
-        if self.subscriber:
-            payload["subscriber"] = self.subscriber.model_dump(exclude_none=True)
-        
-        return payload
 
     # -------- Factory / normalization --------
     @classmethod
@@ -184,7 +162,8 @@ class ExecuteRequest(BaseModel):
         if isinstance(value, InlineOrRef):
             return value
         if isinstance(value, dict) and ("value" in value or "href" in value):
-            return InlineOrRef(value=value.get("value"), href=value.get("href"), format=value.get("format"))
+            # Forward the full dict so extra OGC fields (type, rel, …) are preserved.
+            return InlineOrRef(**value)
         if not isinstance(value, (list, tuple, dict)):
             return InlineOrRef(value=value, href=None, format=None)
         if isinstance(value, dict):
