@@ -24,7 +24,7 @@ from ump.core.models.execute_request import ExecuteRequest
 from ump.core.models.job import JobList, JobStatusInfo
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList
-from ump.core.settings import app_settings
+from ump.core.settings import app_settings, logger
 
 
 # module global helpers
@@ -490,11 +490,21 @@ def create_app(
     # Exception handler for OGC Process exceptions
     @app.exception_handler(OGCProcessException)
     async def ogc_exception_handler(request: Request, exc: OGCProcessException):
-        # Always surface the requestId so clients can correlate errors to log entries.
-        # The X-Request-ID header is already set on every response by the middleware;
-        # we also embed it in the body so it is visible in the JSON payload.
         cid = correlation_id_var.get()
         problem = exc.response.model_copy().with_request_id(cid)
+        status = problem.status
+        # Log every error response with the request ID so it can be found
+        # when a user reports the ID from their error response body.
+        log_msg = (
+            f"[http:error] status={status} title={problem.title!r} "
+            f"path={request.url.path!r} request_id={cid}"
+        )
+        if status >= 500:
+            logger.error(log_msg)
+        elif status == 401 or status == 403:
+            logger.warning(log_msg)
+        else:
+            logger.debug(log_msg)
         return render_problem(problem, include_request_id=True)
 
     @app.exception_handler(Exception)
