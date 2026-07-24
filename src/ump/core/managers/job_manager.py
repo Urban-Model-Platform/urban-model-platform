@@ -953,10 +953,13 @@ class JobManager:
             logger.debug(
                 f"[job:poll] optimistic lock conflict, re-reading job_id={job.id}"
             )
-            job = await self._repo.get(job.id)
-            if not job:
+            refreshed_job = await self._repo.get(job.id)
+            if not refreshed_job:
                 return False
+
+            job = refreshed_job
             job.apply_status_info(status_info)
+
             await self._repo.update(job)
 
         # Only fire the observer event on a real status transition.
