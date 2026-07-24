@@ -1,6 +1,7 @@
 # ump/core/interfaces/http_client.py
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
+
 
 class HttpClientPort(ABC):
     @abstractmethod
@@ -14,21 +15,48 @@ class HttpClientPort(ABC):
         pass
 
     @abstractmethod
-    async def get(self, url: str, timeout: float | None = None, headers: Dict[str, str] | None = None) -> Dict[str, Any]:
+    async def get(
+        self,
+        url: str,
+        timeout: float | None = None,
+        headers: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
         """Make a GET request and return JSON response.
 
         The timeout is optional; adapters may use an internal default ClientTimeout
         when timeout is None.
         """
         pass
-    
+
+    @abstractmethod
+    async def get_content(
+        self,
+        url: str,
+        timeout: float | None = None,
+        headers: Dict[str, str] | None = None,
+    ) -> Tuple[bytes, str]:
+        """Fetch URL, returning (body_bytes, content_type).
+
+        Never attempts JSON parsing. The remote server's Content-Type header
+        is returned verbatim as the second element and must be forwarded to
+        the client.  Use this for the results proxy so non-JSON outputs
+        (FlatGeobuf, GeoTIFF, multipart/related, …) are handled correctly.
+        """
+        pass
+
     @abstractmethod
     async def close(self) -> None:
         """Close the HTTP client session"""
         pass
 
     @abstractmethod
-    async def post(self, url: str, json: Dict[str, Any] | None, timeout: float | None = None, headers: Dict[str, str] | None = None) -> Dict[str, Any]:
+    async def post(
+        self,
+        url: str,
+        json: Dict[str, Any] | None,
+        timeout: float | None = None,
+        headers: Dict[str, str] | None = None,
+    ) -> Dict[str, Any]:
         """Make a POST request. Returns a dict with keys: 'status' (int),
         'headers' (dict) and 'body' (parsed JSON or raw text).
 

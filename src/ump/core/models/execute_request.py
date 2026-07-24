@@ -143,10 +143,16 @@ class ExecuteRequest(BaseModel):
         - inputs dict with keys 'value' or 'href' -> InlineOrRef(**fields)
         - inputs dict without those keys -> InlineOrRef(value=dict)
         - list values -> list[InlineOrRef] with same coercion
+
+        The original ``raw`` dict is never mutated so it can safely be
+        forwarded to a remote server after this call returns.
         """
         if not isinstance(raw, dict):
             raw = {}
-        inputs = raw.get("inputs", {})
+        # Work on a shallow copy so we can replace raw["inputs"] without
+        # mutating the caller's dict (which is forwarded verbatim later).
+        working = dict(raw)
+        inputs = working.get("inputs", {})
         if isinstance(inputs, dict):
             coerced: Dict[str, Any] = {}
             for k, v in inputs.items():
@@ -154,8 +160,8 @@ class ExecuteRequest(BaseModel):
                     coerced[k] = [cls._coerce_inline(item) for item in v]
                 else:
                     coerced[k] = cls._coerce_inline(v)
-            raw["inputs"] = coerced
-        return cls(**raw)
+            working["inputs"] = coerced
+        return cls(**working)
 
     @staticmethod
     def _coerce_inline(value: Any) -> InlineOrRef:

@@ -974,8 +974,15 @@ class JobManager:
         """Fetch remote results for a terminal successful job.
 
         We never persist results locally; every invocation proxies the provider.
-        Returns provider JSON (dict). Raises OGCProcessException for upstream
-        OGC errors; returns 404 style dict if job not found or not successful.
+        Returns a dict with either:
+          - ``{"status": 200, "content_type": str, "body_bytes": bytes}``
+            for any successful result (JSON or binary — caller decides how to
+            serialize based on ``content_type``)
+          - ``{"status": 404, "body": {"detail": ...}}`` for not-found / not-ready
+          - ``{"status": 500, "body": {"detail": ...}}`` for unexpected errors
+
+        The remote's Content-Type header is returned verbatim and must be
+        forwarded to the client; UMP never parses the result body.
         """
         job = await self._repo.get(job_id)
         if not job or not job.status_info:
@@ -996,12 +1003,15 @@ class JobManager:
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
         )
         try:
-            resp = await self._http.get(results_url, headers=auth_headers or None)
-            # Normalize into dict response
-            body = resp if isinstance(resp, dict) else {"raw": resp}
-            return {"status": 200, "body": body}
+            body_bytes, content_type = await self._http.get_content(
+                results_url, headers=auth_headers or None
+            )
+            return {
+                "status": 200,
+                "content_type": content_type,
+                "body_bytes": body_bytes,
+            }
         except OGCProcessException as exc:
-            # Bubble upstream OGC error (already structured) to adapter layer
             raise exc
         except Exception as exc:
             logger.error(f"[job:results] unexpected error job_id={job.id} err={exc}")
