@@ -15,15 +15,15 @@ provided session factory.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
-from sqlalchemy import Column, DateTime, Index, text
+from sqlalchemy import Column, DateTime, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlmodel import Field, SQLModel, select
+from sqlmodel import Field, SQLModel, col, select
 
+from ump.core.exceptions import OptimisticLockError
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.models.job import Job, JobStatusInfo, StatusCode
 from ump.core.models.link import Link
@@ -122,7 +122,7 @@ class JobRecord(SQLModel, table=True):
             status_info=status_info,
             inputs=self.inputs,
             inputs_url=self.inputs_url,
-            inputs_storage=self.inputs_storage,
+            inputs_storage=self.inputs_storage,  # type: ignore[arg-type]
             inputs_size=self.inputs_size,
             inputs_checksum=self.inputs_checksum,
             links=links,
@@ -191,19 +191,39 @@ class SQLModelJobRepository(JobRepositoryPort):
             return record.to_domain() if record else None
 
     async def update(self, job: Job) -> Job:
+        """Persist job changes using optimistic locking on the version column.
+
+        Raises ``OptimisticLockError`` if another instance already incremented
+        the version — callers should re-read the job and retry.
+        """
         job.touch()
+        updated = JobRecord.from_domain(job)
+        values = {
+            field: getattr(updated, field)
+            for field in JobRecord.model_fields
+            if field != "version"
+        }
+        values["version"] = job.version + 1
+
         async with self._session_factory() as session:
-            existing = await session.get(JobRecord, job.id)
-            if existing is None:
-                raise KeyError(job.id)
-            updated = JobRecord.from_domain(job)
-            # Merge fields onto the tracked instance
-            for field in JobRecord.model_fields:
-                setattr(existing, field, getattr(updated, field))
-            session.add(existing)
+            result = await session.execute(
+                sa_update(JobRecord)
+                .where(
+                    col(JobRecord.id) == job.id,
+                    col(JobRecord.version) == job.version,
+                )
+                .values(**values)
+                .returning(JobRecord)
+            )
+            row = result.fetchone()
+            if row is None:
+                raise OptimisticLockError(
+                    f"Job {job.id} was concurrently modified (version mismatch)"
+                )
             await session.commit()
-            await session.refresh(existing)
-            return existing.to_domain()
+            # Re-fetch the updated record cleanly
+            refreshed = await session.get(JobRecord, job.id)
+            return refreshed.to_domain() if refreshed else job
 
     async def list(
         self,
@@ -223,14 +243,19 @@ class SQLModelJobRepository(JobRepositoryPort):
             if status is not None:
                 stmt = stmt.where(JobRecord.status == status)
             if public_only:
-                stmt = stmt.where(JobRecord.user_id.is_(None))
+                stmt = stmt.where(col(JobRecord.user_id).is_(None))
             elif user_id is not None:
                 from sqlalchemy import or_
                 if include_public:
-                    stmt = stmt.where(or_(JobRecord.user_id == user_id, JobRecord.user_id.is_(None)))
+                    stmt = stmt.where(
+                        or_(
+                            col(JobRecord.user_id) == user_id,
+                            col(JobRecord.user_id).is_(None),
+                        )
+                    )
                 else:
-                    stmt = stmt.where(JobRecord.user_id == user_id)
-            stmt = stmt.order_by(JobRecord.created.desc())
+                    stmt = stmt.where(col(JobRecord.user_id) == user_id)
+            stmt = stmt.order_by(col(JobRecord.created).desc())
             result = await session.execute(stmt)
             return [row.to_domain() for row in result.scalars().all()]
 
@@ -270,7 +295,7 @@ class SQLModelJobRepository(JobRepositoryPort):
             result = await session.execute(
                 select(JobStatusHistoryRecord)
                 .where(JobStatusHistoryRecord.job_id == job_id)
-                .order_by(JobStatusHistoryRecord.seq.desc())
+                .order_by(col(JobStatusHistoryRecord.seq).desc())
             )
             last = result.scalars().first()
             next_seq = (last.seq + 1) if last else 0
