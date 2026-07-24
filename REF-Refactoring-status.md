@@ -98,6 +98,9 @@ _Last updated: 2026-07-04_
 | DB migration: `user_id` column on `jobs` table | ✅ | `migrations/versions/0002_add_user_id_to_jobs.py` |
 | `UMP_PUBLIC_PROCESSES` gate on process routes | ✅ | `src/ump/adapters/web/fastapi.py` |
 | Request ID in all error responses (body + header) | ✅ | `src/ump/adapters/web/fastapi.py` |
+| `AuthorizationService` (access control moved to core) | ✅ | `src/ump/core/services/authorization.py` |
+| Startup wiring assertions (fail-fast on misconfigured factories) | ✅ | `src/ump/adapters/web/fastapi.py` lifespan |
+| `HttpClientPort.get_content()` + results proxy (binary-safe) | ✅ | `src/ump/core/interfaces/http_client.py`, `src/ump/adapters/aiohttp_client_adapter.py` |
 
 ### ✅ Process management
 
@@ -262,11 +265,13 @@ The goal of Feature III is to enable UMP to act as an OGC API Processes executio
 |---|---|
 | Job model, ports, in-memory repo | ✅ |
 | JobManager: forwarding, status derivation, polling, retry, timeout | ✅ |
-| ExecuteRequest normalization | ✅ |
+| ExecuteRequest structural validation (raw body forwarded unchanged) | ✅ |
 | /jobs, /jobs/{id}, /jobs/{id}/results routes | ✅ |
 | POST /processes/{id}/execution route | ✅ |
 | SQLModel JobRepository + Alembic migration | ✅ |
 | Observer pattern (history, polling scheduler, results verification) | ✅ |
+| Poll fan-out bug fixed (notify only on real status transitions) | ✅ |
+| Results proxy: content-type-aware, binary-safe (`get_content`) | ✅ |
 | /jobs/{id}/inputs endpoint | 🔲 |
 | Status history reads (DB writes exist; no read endpoint yet) | 🔲 |
 | Expanded test coverage | ⚠️ retry-exhaustion path missing |
@@ -279,7 +284,7 @@ The goal of Feature III is to enable UMP to act as an OGC API Processes executio
 
 - `Job` (`src/ump/core/models/job.py`): `id` (local UUID), `process_id`, `provider`, `remote_job_id`, `remote_status_url`, timestamps, `status`, `status_info` snapshot, inline `inputs`, `inputs_url`, `links`, `diagnostic`, `version`. Helper methods: `apply_status_info()`, `touch()`, `is_in_terminal_state()`. ID separation rationale documented in code (local UUID / remote id / public route id are kept distinct).
 - `JobStatusInfo` / `StatusCode`: mirrors OGC `statusInfo.yaml` schema.
-- `ExecuteRequest` (`src/ump/core/models/execute_request.py`): `from_raw()` factory normalizes inline/ref inputs, outputs, `response` mode, `transmissionMode`, and subscriber callbacks. `as_provider_payload()` converts to the wire format sent to the remote.
+- `ExecuteRequest` (`src/ump/core/models/execute_request.py`): `from_raw()` performs structural validation only (href is a URL, each input has `value` or `href`). It does **not** mutate its argument; the original raw body is forwarded to the remote server unchanged. Dead code removed: `as_provider_payload()`, `normalized_inputs()`, `NormalizedInput`.
 
 **Ports**
 
@@ -313,7 +318,7 @@ Error handling: transport errors, upstream 4xx/5xx, missing statusInfo, and TTW 
 - `POST /processes/{id}/execution` → `JobManager.run_execution_pipeline`
 - `GET /jobs` → list all jobs (from repo)
 - `GET /jobs/{id}` → current `statusInfo` snapshot
-- `GET /jobs/{id}/results` → remote results proxy (404 if not successful)
+- `GET /jobs/{id}/results` → remote results proxy; forwards the remote's `Content-Type` verbatim via `get_content()`; handles JSON, binary, and multipart responses correctly.
 
 **Link normalization**: always inject local `self` link with stable UUID; add `results` link on success; filter out any remote self/results links that contain foreign job identifiers.
 
@@ -384,18 +389,10 @@ ump-migrate downgrade -1     # any alembic subcommand
 
 #### 🔲 Remaining work
 
-What is still pending for Feature III:
-1. `/jobs/{id}/inputs` or presigned URL strategy to expose stored inputs (ensuring they remain segregated from `statusInfo`).
-2. Result storage abstraction: introduce `ResultStoragePort` (placeholder injected) and adapters (e.g., GeoServer, ldproxy) for optional persistence after success (Feature V).
-3. Test coverage: finalize unit tests for JobManager helpers (including timeout & immediate results paths), remote polling, ExecuteRequest normalization, ProcessManager handler pipeline, `/jobs/{id}/results`, and future /jobs endpoints.
-4. Optional minimal DDD scaffolding (commands/events/aggregate) – deferred unless complexity grows; current CRUD + snapshot history sufficient.
-5. Enhanced status history (append-only table) and event log optional.
-6. Authorization layer (JWT) to restrict job visibility (ties into Feature IV).
-
-7. **Status history endpoint** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
-8. **Test coverage gap** — retry-exhaustion path (forward retries exhausted → `failed` diagnostic) is not yet exercised. All other planned paths are covered: polling timeout ✅, immediate results ✅, link normalization ✅, results endpoint ✅, polling stop conditions ✅, auth/JWT ✅, job visibility ✅.
-9. **Execute request payload forwarding** — `ExecuteRequest.from_raw()` now acts as a structural validator only; the original raw body is forwarded to the remote server unchanged (no lossy re-serialization). ✅ Done.
-10. **Process-description-aware input validation (Feature X)** — `ExecuteRequest` validates structure only (is `value` or `href` present? is `href` a URL?). It does not validate whether input names or value types match the process description. A future `ValidateInputsStep` should optionally (via `UMP_VALIDATE_EXEC_REQUESTS=true`) validate each input against its `ProcessInput.scheme: Schema` from the cached process description before forwarding. The `ProcessInput` and `Schema` models already exist in `src/ump/core/models/process.py` and provide the full JSON Schema structure needed. This step must be optional because: (a) the process description may not be cached yet; (b) some schemas use `oneOf`/`anyOf` which require a JSON Schema validator; (c) operators may want lax mode for non-spec-compliant servers.
+1. `/jobs/{id}/inputs` — inputs are stored but never exposed via a dedicated route.
+2. **Status history endpoint** — `job_status_history` table receives writes via `StatusHistoryObserver`, but no endpoint exposes the history. Add `GET /jobs/{id}/history` or include history in the job detail response.
+3. **Test coverage gap** — retry-exhaustion path (forward retries exhausted → `failed` diagnostic) is not yet exercised. All other planned paths are covered: polling timeout ✅, immediate results ✅, link normalization ✅, results endpoint ✅, polling stop conditions ✅, auth/JWT ✅, job visibility ✅.
+4. **Process-description-aware input validation (Feature X)** — `ExecuteRequest` validates structure only. A future `ValidateInputsStep` (opt-in via `UMP_VALIDATE_EXEC_REQUESTS=true`) should validate each input against its `ProcessInput.scheme: Schema` from the cached process description. Deferred because: (a) process description may not be cached yet; (b) `oneOf`/`anyOf` requires a JSON Schema evaluator; (c) operators may need lax mode for non-spec-compliant servers.
 
 #### Design notes: job history / CQRS decision
 
@@ -1135,6 +1132,61 @@ modelserver:
 
 ### Output format awareness in UMP
 
+#### OGC API Processes results response spec
+
+The HTTP response shape for `GET /jobs/{id}/results` is fully determined by three fields from the original execute request: `response` (`"raw"` or `"document"`), per-output `transmissionMode` (`"value"` or `"reference"`), and the number of outputs requested.
+
+**Full OGC table** (from OGC API - Processes, Part 1):
+
+| Negotiated execute mode | `response` | `transmissionMode` | # outputs | HTTP code | `Content-Type` | Body |
+|---|---|---|---|---|---|---|
+| sync (server may create job anyway) | any | any | any | — | — | [job results re-fetchable as per async] |
+| async | `raw` | `value` | 1 | 200 | as per output definition | raw output bytes |
+| async | `raw` | `value` | >1 | 200 | `multipart/related` | one part per output |
+| async | `raw` | `reference` | 1 | 204 | — | empty + `Link` headers |
+| async | `raw` | mixed | >1 | 200 | `multipart/related` | one part per output |
+| async | `document` | `value` | any | 200 | `application/json` | results document |
+| async | `document` | `reference` | 1 | 200 | `application/json` | results document with links |
+
+**Critical clarification — `response: "raw"` does NOT mean bytes:**
+
+`"raw"` means the output is returned **without the OGC document envelope** — but the
+content itself is whatever the output's `format.mediaType` declares.  A GeoJSON output
+with `response: "raw"` returns JSON text.  A FlatGeobuf output returns binary bytes.
+What the remote actually sends is determined by the per-output `format.mediaType`, not by
+`response`.
+
+`"document"` always returns a JSON wrapper — even binary outputs appear as base64-encoded
+strings inside it.
+
+**Consequence for UMP proxy (no local result storage):**
+
+If UMP does not store results itself, it only needs to forward what the remote sends with
+the `Content-Type` the remote declared.  No pre-prediction of content type is needed.
+The correct proxy strategy is always:
+
+```
+body_bytes, content_type = await http.get_content(results_url)
+return Response(content=body_bytes, media_type=content_type)
+```
+
+The remote's `Content-Type` response header carries the correct MIME type — UMP trusts it
+and forwards it verbatim.  `response_mode` and per-output `format.mediaType` only matter
+when UMP **stores or transforms** results (Feature VIII).
+
+**`response: "raw"` with multiple outputs returns `multipart/related`** — each part is one output. UMP does not currently parse multipart responses; this case is deferred (see deferred items below).
+
+#### Results document format (OGC reference)
+
+A `response: "document"` result body is a JSON object with one key per output. Each value is one of:
+
+- Scalar (inline): `"stringOutput": "Value2"` or `"doubleOutput": "3.14159"`
+- Qualified value with optional `mediaType`: `{"value": "<gml:...>", "mediaType": "application/gml+xml"}`
+- Inline base64 binary: `{"value": "VBORw0...", "encoding": "base64", "mediaType": "image/tiff"}`
+- Reference link: `{"href": "https://...", "type": "application/geo+json"}`
+
+UMP as a proxy does not need to parse this structure today — it proxies the JSON as-is. Only `response-mode-policy: force-document` (Feature VIII) requires UMP to unwrap specific values from the document envelope.
+
 #### The problem
 
 An OGC API Processes execute request body can declare, per output, which media type the client wants and how results should be transmitted:
@@ -1144,48 +1196,51 @@ An OGC API Processes execute request body can declare, per output, which media t
   "outputs": {
     "voronoi_diagram": {
       "format": {
-        "mediaType": "application/geo+json",
+        "mediaType": "application/flatgeobuf",
         "schema": "https://geojson.org/schema/FeatureCollection.json"
       },
-      "transmissionMode": "reference"
+      "transmissionMode": "value"
     },
     "classification_breaks": {
       "transmissionMode": "value"
     }
-  }
+  },
+  "response": "raw"
 }
 ```
 
-The OGC standard also mandates specific HTTP response shapes depending on the combination of execute mode, `response`, transmission mode, and number of outputs (summarised below):
+UMP, as a proxy, must be aware of the OGC table above in two places:
 
-| response | transmission mode | # outputs | HTTP code | Content-Type | Body |
-|---|---|---|---|---|---|
-| `raw` | `value` | 1 | 200 | as per output definition | raw output bytes |
-| `raw` | `value` | >1 | 200 | `multipart/related` | one part per output |
-| `raw` | `reference` | 1 | 204 | — | empty + `Link` headers |
-| `raw` | mixed | >1 | 200 | `multipart/related` | one part per output |
-| `document` | `value` | any | 200 | `application/json` | results document |
-| `document` | `reference` | 1 | — | — | — |
+1. **Forwarding the execute request**: UMP forwards `outputs`, `response`, and all other fields to the remote server unchanged (as of the current implementation). No format resolution is needed at forward time — the remote handles OGC rules natively.
 
-UMP, as a proxy, must be aware of these rules in two places:
-
-1. **Forwarding the execute request**: UMP forwards the `outputs` dict (including per-output `format` and `transmissionMode`) to the remote server unchanged (or adjusted by `transmission-mode-policy`). No additional format resolution is needed at forward time because the remote server handles the OGC rules natively.
-
-2. **Proxying the results** (`GET /jobs/{id}/results`): When UMP fetches results from the remote and returns them to the client, it must know:
-   - Whether the expected response body is binary (e.g., FlatGeobuf, GeoTIFF) or JSON-native (GeoJSON, plain JSON), to decide whether to parse or stream it.
-   - What `Content-Type` to advertise to the client.
-   - When `response-mode-policy: force-document` causes UMP to request `document` from the remote but the client originally requested `raw` with a single output, UMP must unwrap the document envelope and return only the raw output value.
+2. **Proxying the results** (`GET /jobs/{id}/results`): Since UMP does not store results,
+   it only needs to forward what the remote sends with the `Content-Type` the remote
+   declared.  No content-type prediction is required.  `response_mode` and
+   `format.mediaType` are only needed when UMP **stores or transforms** results (Feature VIII).
 
 #### What UMP needs to track per job
 
-When a job is created (`POST /processes/{id}/execution`), UMP should capture the **resolved per-output format** alongside the job record, so it is available when proxying results later:
+**For the basic proxy (no result storage — current state):**
+Nothing beyond what is already stored. The remote's `Content-Type` response header is
+the authoritative source; UMP forwards it verbatim via `get_content()`.
+
+**For Feature VIII (result storage / policy enforcement):**
+UMP must additionally capture the original execute request's `response` field and the raw
+`outputs` map so it can apply `response-mode-policy` and `transmission-mode-policy`:
 
 ```
-job.output_formats: dict[output_id, ResolvedOutputFormat]
+job.response_mode:  str                        — "raw" | "document" from execute body
+job.outputs_spec:   Optional[Dict[str, Any]]   — verbatim execute body "outputs" map
+```
+
+And the fully resolved per-output format (for base64-decode decisions):
+
+```
+job.output_formats: dict[output_id, ResolvedOutputFormat]   ← Feature VIII only
   output_id:         str        — e.g. "voronoi_diagram"
   media_type:        str        — canonical IANA type, e.g. "application/geo+json"
   transmission_mode: str        — "value" | "reference"
-  is_binary:         bool       — True for FlatGeobuf, GeoTIFF, PNG etc.; False for JSON-native types
+  is_binary:         bool       — True for FlatGeobuf, GeoTIFF, PNG etc.
 ```
 
 `is_binary` is the critical flag: it tells UMP whether a remote `document` response will contain a base64-encoded string value (binary) or a JSON object/array (JSON-native), which controls how UMP can safely unwrap or pass through the result.
@@ -1223,12 +1278,108 @@ When serving `GET /jobs/{id}/results`, UMP fetches the result from the remote se
 | `serialize_result` / `BaseProcessResult` | **Not** applicable to UMP. UMP is a proxy; it never instantiates or calls process logic. Result serialization is handled by streaming the remote response body. |
 | `_build_document_response` | Partially applicable: the unwrapping direction (`document → raw`) is the inverse of what fastprocesses does (`result → document`). UMP needs the inverse: extract `value` from a document envelope and return raw bytes. |
 
-#### Files to add / modify
+#### Three concrete gaps that are NOT yet addressed
 
-- `src/ump/core/utils/output_format_resolver.py` — pure `resolve_output_formats(process: Process, requested_outputs: dict) -> dict[str, ResolvedOutputFormat]` function.
-- `src/ump/core/models/job.py` — add `output_formats: dict[str, ResolvedOutputFormat]` field (serializable to JSON for DB storage).
-- `src/ump/core/managers/job_manager.py` — call `resolve_output_formats` at job creation time and store on the job record.
-- `src/ump/adapters/web/fastapi.py` — update `GET /jobs/{id}/results` route to read `job.output_formats` and apply the correct proxy/unwrap logic.
+##### Gap 1 — `response_mode` and `outputs_spec` not stored on the job ← **deferred to Feature VIII**
+
+For the basic proxy path (no result storage), these are not needed — the remote's
+`Content-Type` response header tells UMP everything required.
+
+They become necessary when UMP applies `response-mode-policy` or stores results
+(Feature VIII): only then does UMP need to know the original `response` and per-output
+`format.mediaType` to decide whether to unwrap a document envelope or base64-decode a value.
+
+##### Gap 2 — `HttpClientPort.get()` hard-fails on non-JSON content (current bug)
+
+`AioHttpClientAdapter._fetch_json` calls `resp.json()` unconditionally. For any output
+whose content is not JSON (FlatGeobuf, GeoTIFF, multipart, etc.), `resp.json()` raises
+`ContentTypeError`, which UMP converts to a 502. This **currently breaks** the results
+proxy for all non-JSON outputs.
+
+The fix is simpler than initially designed. Since UMP is a pure proxy (no result storage),
+it does not need to predict the content type in advance. Just always fetch raw bytes and
+forward the remote's `Content-Type`:
+
+**Fix:** Add `get_content(url) -> tuple[bytes, str]` to the port:
+
+```python
+# src/ump/core/interfaces/http_client.py
+@abstractmethod
+async def get_content(
+    self,
+    url: str,
+    timeout: float | None = None,
+    headers: Dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Fetch URL, returning (body_bytes, content_type).
+
+    Never attempts JSON parsing. Always use this for the results proxy.
+    The remote's Content-Type header is the authoritative source.
+    """
+```
+
+`AioHttpClientAdapter.get_content` implementation:
+
+```python
+async def get_content(self, url, timeout=None, headers=None) -> tuple[bytes, str]:
+    async with self._session.get(url, timeout=..., headers=headers or {}) as resp:
+        resp.raise_for_status()
+        return await resp.read(), resp.content_type or "application/octet-stream"
+```
+
+`JobManager.get_results()` always uses `get_content()`:
+
+```python
+body_bytes, ct = await self._http.get_content(results_url, headers=auth_headers)
+return {"status": 200, "content_type": ct, "body_bytes": body_bytes}
+```
+
+The `GET /jobs/{id}/results` route in `fastapi.py`:
+
+```python
+if "body_bytes" in resp:
+    return Response(
+        content=resp["body_bytes"],
+        media_type=resp.get("content_type", "application/octet-stream"),
+    )
+return JSONResponse(status_code=resp.get("status", 200), content=resp.get("body", {}))
+```
+
+No dispatch on `response_mode` or `is_binary` — the remote tells UMP what it sent.
+
+**Deferred:** `response: "raw"` + multiple outputs → `multipart/related`. Bytes are
+forwarded opaquely with `Content-Type: multipart/related`. Structured per-part handling
+is deferred to Feature VIII.
+
+##### Gap 3 — Binary media-type detection (scope reduced)
+
+With the OGC spec clarified, `is_binary_media_type()` is no longer needed for the basic
+proxy path: the `response_mode` field (`"raw"` vs `"document"`) alone determines whether
+UMP receives bytes or JSON from the remote.  `is_binary` remains useful only for Feature
+VIII (`response-mode-policy: force-document`), where UMP receives a JSON document but must
+base64-decode a binary value before returning it to a client that requested `response: "raw"`.
+
+For now, `src/ump/core/utils/media_types.py` is **deferred** to Feature VIII.  The proxy
+path only needs `job.response_mode` and a count of value outputs.
+
+---
+
+#### ✅ Implemented (basic proxy)
+
+| File | Change |
+|---|---|
+| `src/ump/core/interfaces/http_client.py` | ✅ `get_content(url, …) -> tuple[bytes, str]` |
+| `src/ump/adapters/aiohttp_client_adapter.py` | ✅ `get_content` — `resp.read()` + `resp.content_type`, no JSON parsing |
+| tests: fake `HttpClientPort` impls | ✅ `get_content` stub in all 4 fakes |
+| `src/ump/core/managers/job_manager.py` | ✅ `get_results` uses `get_content`; returns `body_bytes` + `content_type` |
+| `src/ump/adapters/web/fastapi.py` | ✅ results route returns `Response(content=bytes, media_type=ct)` |
+
+#### 🔲 Deferred to Feature VIII (result storage / policy)
+
+- `job.response_mode` + `job.outputs_spec` fields + DB migration
+- `job.output_formats` (`ResolvedOutputFormat`) + `src/ump/core/utils/output_format_resolver.py`
+- `is_binary_media_type()` helper (for base64-decode in force-document path)
+- Structured `multipart/related` parsing
 
 ### Large input data: implementation strategies
 
