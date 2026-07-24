@@ -8,6 +8,14 @@ class OGCProcessException(Exception):
         self.response = response
 
 
+class OptimisticLockError(Exception):
+    """Raised when a DB update fails because another instance modified the row.
+
+    Callers should re-read the row from the DB and retry the operation.
+    """
+    pass
+
+
 # Domain-specific job execution exceptions
 
 class JobExecutionError(Exception):
