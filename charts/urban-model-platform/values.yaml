@@ -5,7 +5,7 @@ fullnameOverride: ""
 image:
   repository: lgvanalytics.azurecr.io/urban-model-platform
   pullPolicy: IfNotPresent
-  tag: "2.0.0"
+  tag: "3.0.0alpha"
   pullSecrets:
     - name: secret
 
@@ -51,32 +51,46 @@ resources:
 
 service:
   type: ClusterIP
-  port: 5000 # port under which the svc answers
-  targetPort: 5000 # port the container itself uses
+  port: 8000 # port under which the svc answers
+  targetPort: 8000 # port the container itself uses
 
 config:
   logLevel: "DEBUG"
   providersFilePath: "./providers.yaml"
   providersFileMountPath: /app
-  apiServerUrl: "http://localhost:5000"
-  apiServerUrlPrefix: "/api"
+  apiServerUrl: "http://localhost:8000"
+  apiServerUrlPrefix: "/"
   apiServerWorkers: "4"
+  apiServerPort: "8000"
   remoteJobStatusRequestInterval: "5"
-  serverWorkerTimeout: "30" # Timeout for server workers, should be higher than all request to remote servers, to avoid server 500 errors
-  geoserverConnectionTimeout: "60"
+  remoteJobTtw: ""
   jobDeleteInterval: "240"
+  jobStore: "memory"
+  rewriteRemoteLinks: "true"
+  verifyRemoteResults: "true"
+  perProcessFetch: "false"
+  supportedApiVersions: "1.0"
+  readinessPath: "/"
+  siteTitle: "Urban Model Platform"
+  siteDescription: "An OGC API Processes gateway for urban models."
+  siteContact: "maintainers@example.org"
+
+auth:
+  enabled: "false"
+  publicProcesses: "false"
+  jwtRolesClaims: "realm_access.roles"
+  jwksCacheTtlSeconds: "3600"
+  jwksUrl: ""
+  jwtIssuer: ""
+  jwtAudience: ""
+  existingSecret:
+    name: ""
 
 postgresConnection:
+  enabled: false
+  databaseUrl: ""
   existingSecret:
     name: postgres-credentials
-
-keycloakConnection:
-  existingSecret: 
-    name: ""
-
-geoserverConnection:
-  existingSecret: 
-    name: ""
 
 # If configMap for providers is already existing and should not be overwritten, set this to true. Default: false
 providers:
