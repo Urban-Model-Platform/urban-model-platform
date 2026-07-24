@@ -74,6 +74,35 @@ def validate_process_id(
     return None
 
 
+async def _recover_orphaned_polls(
+    job_repo: JobRepositoryPort, job_manager: "JobManager"
+) -> None:
+    """Re-schedule poll loops for jobs that survived a previous instance crash.
+
+    Called once during lifespan startup, after all adapters are wired.
+    Safe to run on every startup: ``_schedule_poll`` deduplicates within this
+    instance, and the distributed advisory lock (``PgAdvisoryPollLock``)
+    deduplicates across instances.
+    """
+    from ump.core.models.job import StatusCode
+    terminal = {
+        str(StatusCode.successful),
+        str(StatusCode.failed),
+        str(StatusCode.dismissed),
+    }
+    try:
+        all_jobs = await job_repo.list()
+        recovered = 0
+        for job in all_jobs:
+            if job.status not in terminal and job.remote_status_url:
+                job_manager._schedule_poll(job.id)
+                recovered += 1
+        if recovered:
+            logger.info(f"[startup] recovered {recovered} orphaned poll loop(s)")
+    except Exception as exc:
+        logger.warning(f"[startup] poll recovery failed: {exc}")
+
+
 # Note: this a driver adapter, so it depends on the core interface (ProcessesPort)
 # but the core does not depend on this adapter
 # it does not need to implement a port/interface itself
@@ -120,6 +149,10 @@ def create_app(
             app.state.job_repo = job_repo
             app.state.auth_port = auth_port
             app.state.authz = authorization_service
+
+            # Re-schedule poll loops for any non-terminal jobs that were left
+            # running by a previously crashed or restarted instance.
+            await _recover_orphaned_polls(job_repo, job_manager)
 
             try:
                 yield
