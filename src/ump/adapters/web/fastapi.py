@@ -103,8 +103,18 @@ def create_app(
     async def lifespan(app: FastAPI):
         async with http_client as client:
             process_port = process_manager_factory(client)
+            if process_port is None:
+                raise RuntimeError(
+                    "process_manager_factory returned None — composition root error"
+                )
             # JobManager already attached inside job_manager_factory (composition root)
             job_manager = job_manager_factory(client, process_port)
+            if job_manager is None:
+                raise RuntimeError(
+                    "job_manager_factory returned None — composition root error"
+                )
+            if job_repo is None:
+                raise RuntimeError("job_repo is None — composition root error")
             app.state.process_port = process_port
             app.state.job_manager = job_manager
             app.state.job_repo = job_repo
@@ -283,17 +293,8 @@ def create_app(
                     request=request,
                 )
             )
-        jm = app.state.job_manager
-        if jm is None:
-            problem = build_problem(
-                status=404,
-                title="Results Not Supported",
-                detail="Results endpoint not available",
-                request=request,
-            )
-            return render_problem(problem)
         try:
-            resp = await jm.get_results(job_id)
+            resp = await app.state.job_manager.get_results(job_id)
         except OGCProcessException:
             raise  # let the app-level OGC handler format it
         except Exception as exc:
@@ -304,8 +305,22 @@ def create_app(
                 request=request,
             )
             return render_problem(problem)
-        return JSONResponse(
-            status_code=resp.get("status", 200), content=resp.get("body", {})
+
+        status = resp.get("status", 200)
+
+        # Error responses from get_results use the "body" key (plain dict)
+        if status != 200:
+            return JSONResponse(status_code=status, content=resp.get("body", {}))
+
+        # Successful results: forward the remote's Content-Type verbatim.
+        # body_bytes is always present for status 200; the content type tells
+        # the client whether they received JSON, FlatGeobuf, multipart, etc.
+        from fastapi.responses import Response as RawResponse
+
+        return RawResponse(
+            content=resp.get("body_bytes", b""),
+            media_type=resp.get("content_type", "application/octet-stream"),
+            status_code=200,
         )
 
     @api_router.post("/processes/{process_id}/execution")
@@ -325,7 +340,9 @@ def create_app(
             return render_problem(problem)
 
         try:
-            ExecuteRequest.from_raw(raw)  # structural validation — raises 400 if malformed
+            ExecuteRequest.from_raw(
+                raw
+            )  # structural validation — raises 400 if malformed
         except ValidationError as ve:
             detail_messages = []
             for err in ve.errors():
