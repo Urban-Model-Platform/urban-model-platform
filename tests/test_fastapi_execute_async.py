@@ -97,6 +97,11 @@ class FakeHttpClient(HttpClientPort):
     ) -> Dict[str, Any]:
         raise RuntimeError("unexpected GET in this test")
 
+    async def get_content(
+        self, url: str, timeout: float | None = None, headers: dict | None = None
+    ) -> tuple[bytes, str]:
+        raise RuntimeError("unexpected get_content in this test")
+
     async def post(
         self,
         url: str,
@@ -136,6 +141,11 @@ class MultiFakeHttpClient(HttpClientPort):
         if url in self._get:
             return cast(Dict[str, Any], self._get[url])
         raise RuntimeError(f"no GET response for {url}")
+
+    async def get_content(
+        self, url: str, timeout: float | None = None, headers: dict | None = None
+    ) -> tuple[bytes, str]:
+        return b"", "application/json"
 
     async def post(
         self,

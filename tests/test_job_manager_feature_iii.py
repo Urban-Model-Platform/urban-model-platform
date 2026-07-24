@@ -137,6 +137,19 @@ class TestHttpClientAdapter(HttpClientPort):
             return resp
         return {"jobID": "remote-running", "status": "running", "type": "process"}
 
+    async def get_content(self, url: str, timeout=None, headers=None):
+        # Shares the get_calls index with get() so get_responses applies to both
+        idx = len(self.get_calls)
+        self.get_calls.append(url)
+        if idx < len(self._get_responses):
+            resp = self._get_responses[idx]
+            if isinstance(resp, Exception):
+                raise resp
+            # Serialize the dict response to bytes as the real adapter would
+            import json as _json
+            return _json.dumps(resp).encode(), "application/json"
+        return b"{}", "application/json"
+
 
 class TestRetryAdapter(TenacityRetryAdapter):
     async def execute(
@@ -353,7 +366,8 @@ async def test_results_endpoint_proxy_success_and_not_available():
     # Call results endpoint
     results_resp = await mgr_s.get_results(job_id_s)
     assert results_resp["status"] == 200
-    assert results_resp["body"].get("ok") is True
+    # get_results now returns body_bytes + content_type (remote Content-Type forwarded)
+    assert b"ok" in results_resp.get("body_bytes", b"")
     assert any("/results" in u for u in http_s.get_calls)
 
     # Non-successful job scenario

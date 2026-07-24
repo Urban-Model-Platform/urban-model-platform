@@ -78,6 +78,11 @@ class FakeHttpClient(HttpClientPort):
                 return cast(Dict[str, Any], v)
         raise RuntimeError(f"no response registered for {url}")
 
+    async def get_content(
+        self, url: str, timeout: float | None = None, headers: dict | None = None
+    ) -> tuple[bytes, str]:
+        return b"", "application/json"
+
     async def close(self) -> None:
         return None
 
