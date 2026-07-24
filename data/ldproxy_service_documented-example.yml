@@ -1,0 +1,217 @@
+---
+# -----------------------------------------------------------------------------
+# DOCUMENTED SERVICE EXAMPLE
+# -----------------------------------------------------------------------------
+# Suggested target path in an ldproxy store layout:
+#   store/entities/services/flood_levels.yml
+#
+# This file defines the PUBLIC OGC API service.
+# It does not define how the source data is read; that is done by the feature
+# provider entity in flood_levels_provider_documented.yml.
+# -----------------------------------------------------------------------------
+
+# Unique service id.
+# This becomes the first URL path segment of the API, for example:
+#   /flood_levels/
+id: flood_levels
+
+# Human-readable service label shown in the landing page and other metadata.
+label: flood_levels
+
+# Enables or disables the whole service.
+# Example: set to false to keep the config in the store without publishing it.
+enabled: true
+
+# Declares that this entity is an OGC API service definition.
+# For feature APIs this is typically OGC_API.
+serviceType: OGC_API
+
+# Optional service-level validation mode.
+# Common values are NONE, LAX, STRICT depending on ldproxy version and setup.
+# Example below keeps startup permissive while you iterate on config.
+apiValidation: NONE
+
+# API-level building blocks.
+# These define which capabilities are published for the service as a whole.
+api:
+  # ---------------------------------------------------------------------------
+  # TILE_MATRIX_SETS
+  # Required prerequisite if you want to publish OGC API Tiles.
+  # It exposes tile matrix set definitions such as WebMercatorQuad.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: TILE_MATRIX_SETS
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # CSV
+  # Adds CSV as an alternate download format for collection items.
+  # No extra settings are required for the simple case.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: CSV
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # FLATGEOBUF
+  # Adds FlatGeobuf as a compact binary vector output format.
+  # Useful for desktop GIS and efficient downloads.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: FLATGEOBUF
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # TILES
+  # Publishes vector tiles via OGC API Tiles.
+  # IMPORTANT: this requires a separate TILE provider entity.
+  # Example tile provider id/file from previous work:
+  #   store/entities/providers/flood_levels-tiles.yml
+  # tileProviderTileset must match a tileset key inside that tile provider.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: TILES
+    enabled: true
+    tileProviderTileset: flood_levels_sri7
+
+  # ---------------------------------------------------------------------------
+  # SCHEMA
+  # Publishes /collections/{collectionId}/schema.
+  # Very useful for clients that want a deterministic property catalog.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: SCHEMA
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # PROJECTIONS
+  # Enables the properties projection feature, so clients can request only a
+  # subset of properties, for example:
+  #   ?properties=id,level_cm
+  # ---------------------------------------------------------------------------
+  - buildingBlock: PROJECTIONS
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # FILTER
+  # Enables CQL2 filtering, for example:
+  #   ?filter=level_cm > 100
+  #   ?filter=level_cm IS NOT NULL AND level_cm > 100
+  # ---------------------------------------------------------------------------
+  - buildingBlock: FILTER
+    enabled: true
+
+  # ---------------------------------------------------------------------------
+  # QUERYABLES
+  # Publishes /queryables metadata describing which properties may be used in
+  # filters.
+  # included: ['*'] means every property in the collection schema is queryable.
+  # ---------------------------------------------------------------------------
+  - buildingBlock: QUERYABLES
+    enabled: true
+    included:
+      - '*'
+
+  # ---------------------------------------------------------------------------
+  # CRS
+  # Enables alternate response coordinate reference systems.
+  # additionalCrs is a list of supported CRS definitions.
+  # forceAxisOrder examples:
+  #   NONE     -> use CRS-native axis order handling of ldproxy
+  #   LON_LAT  -> always treat as longitude, latitude
+  #   LAT_LON  -> always treat as latitude, longitude
+  # ---------------------------------------------------------------------------
+  - buildingBlock: CRS
+    additionalCrs:
+      - code: 25832
+        forceAxisOrder: NONE
+      - code: 4326
+        forceAxisOrder: NONE
+      - code: 3857
+        forceAxisOrder: NONE
+
+# -----------------------------------------------------------------------------
+# Collections
+# Each entry defines one public collection in the service.
+# The map key and the id usually match and define the collection URL path.
+# Example collection URL:
+#   /flood_levels/collections/flood_levels_sri7/
+# -----------------------------------------------------------------------------
+collections:
+  flood_levels_sri7:
+    # Public collection id.
+    # This is the segment used in the URL under /collections/.
+    id: flood_levels_sri7
+
+    # Human-readable collection label.
+    label: flood_levels_sri7
+
+    # Enables/disables only this collection.
+    enabled: true
+
+    # Collection-specific building block configuration.
+    api:
+      # -----------------------------------------------------------------------
+      # FEATURES_CORE
+      # Core feature collection behavior.
+      # featureProvider must match the feature provider entity id.
+      # featureType must match the type key under the provider's types: map.
+      # itemType is usually 'feature' for spatial feature data.
+      # -----------------------------------------------------------------------
+      - buildingBlock: FEATURES_CORE
+        enabled: true
+        featureProvider: flood_levels
+        featureType: flood_levels
+        itemType: feature
+        queryables:
+          # Properties usable for spatial search semantics.
+          spatial:
+            - geometry
+          # Properties usable for generic text search parameter q.
+          q:
+            - id
+            - level_cm
+
+      # -----------------------------------------------------------------------
+      # CSV transformations
+      # flatten: '.' flattens nested objects/arrays for tabular exports.
+      # Example: address.city becomes address.city in the flat result.
+      # The wildcard '*' applies the rule to all properties.
+      # -----------------------------------------------------------------------
+      - buildingBlock: CSV
+        transformations:
+          '*':
+            - flatten: .
+
+      # -----------------------------------------------------------------------
+      # FLATGEOBUF transformations
+      # Uses the same flattening pattern for a deterministic flat attribute set.
+      # -----------------------------------------------------------------------
+      - buildingBlock: FLATGEOBUF
+        transformations:
+          '*':
+            - flatten: .
+
+      # -----------------------------------------------------------------------
+      # TILES transformations
+      # Uses flattening for tile attributes as well.
+      # If you do not use tiles, you can remove this whole block.
+      # -----------------------------------------------------------------------
+      - buildingBlock: TILES
+        transformations:
+          '*':
+            - flatten: .
+
+      # -----------------------------------------------------------------------
+      # SORTING
+      # Enables sortby for the listed properties.
+      # Example request:
+      #   ?sortby=id
+      # -----------------------------------------------------------------------
+      - buildingBlock: SORTING
+        enabled: true
+        sortables:
+          - id
+          - level_cm
+
+      # -----------------------------------------------------------------------
+      # FILTER at collection level.
+      # Keep this enabled if the collection should accept filter queries.
+      # -----------------------------------------------------------------------
+      - buildingBlock: FILTER
+        enabled: true
