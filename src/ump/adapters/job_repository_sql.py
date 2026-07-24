@@ -42,7 +42,7 @@ class JobRecord(SQLModel, table=True):
     Pydantic definitions evolve.
     """
 
-    __tablename__ = "jobs"
+    __tablename__: str = "jobs"
 
     id: str = Field(primary_key=True)
     process_id: Optional[str] = Field(default=None, index=True)
@@ -134,7 +134,7 @@ class JobRecord(SQLModel, table=True):
 class JobStatusHistoryRecord(SQLModel, table=True):
     """Append-only audit log of every status transition for a job."""
 
-    __tablename__ = "job_status_history"
+    __tablename__: str = "job_status_history"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     job_id: str = Field(foreign_key="jobs.id", nullable=False, index=True)
