@@ -31,6 +31,71 @@ serviceType: OGC_API
 # Example below keeps startup permissive while you iterate on config.
 apiValidation: NONE
 
+# -----------------------------------------------------------------------------
+# Access control with OIDC + policy decision point (PDP)
+# -----------------------------------------------------------------------------
+# Authentication/token validation is configured globally in the application
+# config (OIDC/JWT provider). This section controls authorization for this API.
+#
+# Per-collection restrictions are implemented by enabling policies and using the
+# collection attribute that ldproxy sends to the PDP:
+#   RESOURCE "ldproxy:collection:id"
+# -----------------------------------------------------------------------------
+accessControl:
+  # Enable authorization checks for this API.
+  enabled: true
+
+  # Permission groups available to this API.
+  # - public: permissions everyone has (even without login)
+  # - authenticated: example custom group expected in token permissions/roles
+  groups:
+    # Allow API discovery pages without login.
+    public:
+    - discover
+
+    # Logged-in users with this group can read collections and data, but policy
+    # below may still deny specific collections.
+    authenticated:
+    - collections:read
+    - data:read
+
+  # Optional audience restriction.
+  # If set, token aud must contain at least one of these values.
+  audience:
+  - urban-model-platform
+
+  # Optional scope publication/validation in OpenAPI.
+  # MAIN publishes/uses scopes like data:read, collections:read, ...
+  # CUSTOM includes custom groups from "groups" (except public).
+  scopes:
+  - MAIN
+  - CUSTOM
+
+  policies:
+    # Enable external policy decision checks (PDP) for this API.
+    enabled: true
+
+    # Optional extra attributes forwarded to PDP.
+    # ldproxy already forwards:
+    # - RESOURCE ldproxy:api:id
+    # - RESOURCE ldproxy:collection:id (when request targets a collection)
+    # - ACTION   ldproxy:request:host, method, mediaType
+    attributes:
+      # Example: include requested limit parameter in policy input, if present.
+      requested_limit:
+        parameter: limit
+
+      # Example constant marker available in policy input.
+      deployment:
+        constant: production
+
+    # Optional obligations returned by PDP and applied by ldproxy.
+    # Example: if PDP returns {"force_limit": "100"}, ldproxy will set
+    # query parameter limit=100 for the request.
+    obligations:
+      force_limit:
+        parameter: limit
+
 # API-level building blocks.
 # These define which capabilities are published for the service as a whole.
 api:
