@@ -20,6 +20,7 @@ from ump.adapters.colon_process_id_validator import ColonProcessId
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.adapters.jwt_auth_adapter import JwtAuthAdapter
 from ump.adapters.logging_adapter import LoggingAdapter
+from ump.adapters.poll_lock_noop import NoOpPollLock
 from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
 from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
 from ump.adapters.retry_tenacity import TenacityRetryAdapter
@@ -55,12 +56,16 @@ jwt_auth = JwtAuthAdapter(app_settings)
 
 if app_settings.UMP_JOB_STORE == "postgres":
     from ump.adapters.job_repository_sql import SQLModelJobRepository
+    from ump.adapters.poll_lock_pg import PgAdvisoryPollLock
 
     if not app_settings.UMP_DATABASE_URL:
         raise RuntimeError("UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres")
-    job_repo: JobRepositoryPort = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
+    _sql_repo = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
+    job_repo: JobRepositoryPort = _sql_repo
+    poll_lock = PgAdvisoryPollLock(_sql_repo._session_factory)
 else:
     job_repo = InMemoryJobRepository("scratch/ump_jobs")
+    poll_lock = NoOpPollLock()
 
 configure_logging(app_settings.UMP_LOG_LEVEL)
 set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
@@ -94,6 +99,7 @@ def _job_manager_factory(client, process_manager):
         config=job_config,
         retry_port=retry_adapter,
         remote_auth=remote_auth,
+        poll_lock=poll_lock,
         observers=[],
     )
     jm._observers = [
