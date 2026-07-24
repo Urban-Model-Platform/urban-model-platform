@@ -22,10 +22,11 @@ from urllib.parse import urljoin
 from pydantic import BaseModel
 
 from ump.core.config import JobManagerConfig
-from ump.core.exceptions import OGCProcessException
+from ump.core.exceptions import OGCProcessException, OptimisticLockError
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.observers import JobStateObserver
+from ump.core.interfaces.poll_lock import PollLockPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.status_derivation import StatusDerivationContext
@@ -185,6 +186,7 @@ class JobManager:
         remote_auth: Optional[
             Any
         ] = None,  # RemoteAuthPort; kept generic to avoid tight coupling
+        poll_lock: Optional[PollLockPort] = None,  # distributed poll-loop ownership
         observers: Optional[
             list[JobStateObserver]
         ] = None,  # Observer pattern for state transitions
@@ -203,6 +205,7 @@ class JobManager:
         self._retry = retry_port
         self._result_storage = result_storage_port
         self._remote_auth = remote_auth
+        self._poll_lock = poll_lock
         self._observers = observers or []
 
         # Initialize status derivation orchestrator
@@ -808,32 +811,42 @@ class JobManager:
     async def _poll_loop(self, job_id: str) -> None:
         """Continuously poll remote status until terminal or shutdown.
 
-        Main polling orchestrator that:
-        1. Checks termination conditions (shutdown, terminal state, timeout)
-        2. Fetches remote status
-        3. Processes status update
-        4. Sleeps until next poll
+        Acquires a distributed advisory lock (if configured) before entering
+        the loop so that only one UMP instance polls each job at a time.
+        The lock is released in the finally block, which covers both normal
+        exit and exceptions (including asyncio.CancelledError on shutdown).
         """
-        while not self._shutdown:
-            # Check if we should continue polling
-            should_stop, reason = await self._should_stop_polling(job_id)
-            if should_stop:
-                logger.debug(f"[job:poll] stopping: {reason} job_id={job_id}")
+        if self._poll_lock:
+            acquired = await self._poll_lock.try_acquire(job_id)
+            if not acquired:
+                logger.debug(
+                    f"[job:poll] lock held by another instance, skipping job_id={job_id}"
+                )
                 return
+        try:
+            while not self._shutdown:
+                # Check if we should continue polling
+                should_stop, reason = await self._should_stop_polling(job_id)
+                if should_stop:
+                    logger.debug(f"[job:poll] stopping: {reason} job_id={job_id}")
+                    return
 
-            # Get fresh job state
-            job = await self._repo.get(job_id)
-            if not job:  # Job disappeared (should not happen, but defensive)
-                logger.debug(f"[job:poll] job disappeared job_id={job_id}")
-                return
+                # Get fresh job state
+                job = await self._repo.get(job_id)
+                if not job:  # Job disappeared (should not happen, but defensive)
+                    logger.debug(f"[job:poll] job disappeared job_id={job_id}")
+                    return
 
-            # Attempt to fetch and process remote status
-            terminal_reached = await self._poll_and_update_status(job)
-            if terminal_reached:
-                return
+                # Attempt to fetch and process remote status
+                terminal_reached = await self._poll_and_update_status(job)
+                if terminal_reached:
+                    return
 
-            # Sleep before next poll
-            await asyncio.sleep(self.config.poll_interval)
+                # Sleep before next poll
+                await asyncio.sleep(self.config.poll_interval)
+        finally:
+            if self._poll_lock:
+                await self._poll_lock.release(job_id)
 
     async def _should_stop_polling(self, job_id: str) -> tuple[bool, str]:
         """Check if polling should stop for a job.
@@ -929,9 +942,22 @@ class JobManager:
             JobStatusInfo(**job.status_info.model_dump()) if job.status_info else None
         )
 
-        # Apply and persist
+        # Apply and persist — retry once on optimistic lock conflict.
+        # Conflicts only occur when two instances poll the same job simultaneously
+        # (race during rolling deploy); the advisory lock (Feature IX) prevents
+        # this in steady state, but we still guard here for defence-in-depth.
         job.apply_status_info(status_info)
-        await self._repo.update(job)
+        try:
+            await self._repo.update(job)
+        except OptimisticLockError:
+            logger.debug(
+                f"[job:poll] optimistic lock conflict, re-reading job_id={job.id}"
+            )
+            job = await self._repo.get(job.id)
+            if not job:
+                return False
+            job.apply_status_info(status_info)
+            await self._repo.update(job)
 
         # Only fire the observer event on a real status transition.
         # Polling frequently returns the same status (e.g. accepted→accepted while
