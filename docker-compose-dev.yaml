@@ -18,7 +18,7 @@ services:
     image: ${CONTAINER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
     restart: "unless-stopped"
     ports:
-      - ${WEBAPP_PORT_EXTERNAL}:5000
+      - ${WEBAPP_PORT_EXTERNAL}:8000
     environment:
       UMP_LOG_LEVEL: debug
       UMP_PROVIDERS_FILE: providers.yaml
