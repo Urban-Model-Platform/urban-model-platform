@@ -45,6 +45,12 @@ ARG USER_GID=2000
 ARG SOURCE_COMMIT
 ARG IMAGE_TAG=3.0.0alpha1
 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=100
+
 LABEL maintainer="Urban Data Analytics" \
     name="analytics/urban-model-platform" \
     source_commit=$SOURCE_COMMIT \
