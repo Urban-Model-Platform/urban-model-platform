@@ -1,6 +1,6 @@
 ARG $MAMBA_USER=mambauser
 
-FROM python:3.11-bookworm AS base
+FROM python:3.14-bookworm AS base
 
 ENV CACHE_DIR=/app/cache
 
@@ -36,13 +36,13 @@ RUN touch README.md \
     && /app/.venv/bin/python -m pip install dist/*.whl 
     #--no-deps
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 ARG USER_UID=1000
 ARG USERNAME=pythonuser
 ARG USER_GID=2000
 ARG SOURCE_COMMIT
-ARG IMAGE_TAG=2.0.0
+ARG IMAGE_TAG=3.0.0alpha1
 
 LABEL maintainer="Urban Data Analytics" \
     name="analytics/urban-model-platform" \
@@ -70,4 +70,4 @@ COPY --from=base /app/migrations migrations
 
 EXPOSE 5000
 
-ENTRYPOINT [ "/home/pythonuser/entrypoint.sh" ]
+ENTRYPOINT [ "/home/$USERNAME/entrypoint.sh" ]
