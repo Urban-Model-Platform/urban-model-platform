@@ -19,6 +19,7 @@ ENV POETRY_NO_INTERACTION=1 \
     POETRY_CACHE_DIR=/app/poetry_cache
 
 COPY pyproject.toml ./
+COPY alembic.ini ./
 #poetry.lock
 RUN poetry lock && poetry install --without=dev --no-root
 
@@ -55,7 +56,7 @@ RUN groupadd --gid $USER_GID $USERNAME && \
     chown -R $USERNAME:$USERNAME /home/$USERNAME /usr/local/lib /usr/local/bin
 
 USER $USERNAME
-WORKDIR /home/$USERNAME
+WORKDIR /app
 
 ENV VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
@@ -67,7 +68,8 @@ COPY --from=base \
 
 COPY scripts/entrypoint.sh entrypoint.sh
 COPY --from=base /app/migrations migrations
+COPY --from=base /app/alembic.ini alembic.ini
 
 EXPOSE 5000
 
-ENTRYPOINT [ "/home/$USERNAME/entrypoint.sh" ]
+ENTRYPOINT [ "/app/entrypoint.sh" ]
