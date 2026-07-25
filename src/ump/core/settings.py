@@ -29,7 +29,7 @@ class UmpSettings(BaseSettings):
     }
     UMP_LOG_LEVEL: str = "INFO"
     UMP_PROVIDERS_FILE: FilePath = Path("providers.yaml")
-    UMP_API_SERVER_URL: str = "http://localhost:3000/"
+    UMP_API_SERVER_URL: str = "http://localhost:8000/"
     UMP_API_SERVER_HOST: str = "0.0.0.0"
     UMP_API_SERVER_PORT: int = 8000
     UMP_API_SERVER_WORKERS: int = 1
