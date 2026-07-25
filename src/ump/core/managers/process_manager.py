@@ -250,6 +250,8 @@ class ProcessManager(ProcessesPort):
         """Return (remote_id, canonical_id) pairs for all non-excluded processes."""
         provider = self.provider_config_service.get_provider(provider_name)
         result: List[tuple[str, str]] = []
+        if provider is None:
+            return result
         for proc_cfg in provider.processes:
             if getattr(proc_cfg, "exclude", False):
                 continue
@@ -268,6 +270,18 @@ class ProcessManager(ProcessesPort):
 
     async def _fetch_process(self, provider_name: str, raw_id: str) -> Process:
         provider = self.provider_config_service.get_provider(provider_name)
+        if provider is None:
+            # Guard: the caller is responsible for validating the provider name
+            # before reaching here, but we protect against accidental None access.
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank",
+                    title="Not Found",
+                    status=404,
+                    detail=f"Provider '{provider_name}' is not configured",
+                    instance=None,
+                )
+            )
         url = str(provider.url).rstrip("/") + f"/processes/{raw_id}"
         auth_headers = (
             self._remote_auth.resolve(provider.authentication).headers
@@ -397,7 +411,23 @@ class ProcessManager(ProcessesPort):
         try:
             provider_name, _ = self.process_id_validator.extract(process_id)
         except ValueError:
+            # No provider prefix — search across all configured providers.
             provider_name, _ = self._resolve_provider_for_bare_id(process_id)
+        else:
+            # Prefixed ID: verify the extracted provider name is actually configured
+            # before we go any further.  Without this check a prefix like "test:"
+            # would silently fall through to _fetch_process, which would crash on
+            # provider.url when get_provider() returns None.
+            if self.provider_config_service.get_provider(provider_name) is None:
+                raise OGCProcessException(
+                    OGCExceptionResponse(
+                        type="about:blank",
+                        title="Not Found",
+                        status=404,
+                        detail=f"Provider '{provider_name}' is not configured",
+                        instance=None,
+                    )
+                )
 
         # Use the verbatim configured remote ID, not the bare stripped ID
         remote_id = self._find_remote_id(provider_name, process_id)
