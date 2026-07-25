@@ -20,8 +20,9 @@ services:
     ports:
       - ${WEBAPP_PORT_EXTERNAL}:8000
     environment:
-      UMP_LOG_LEVEL: debug
-      UMP_PROVIDERS_FILE: providers.yaml
+      PYTHONUNBUFFERED: 1
+      UMP_LOG_LEVEL: DEBUG
+      UMP_PROVIDERS_FILE: /app/providers.yaml
       UMP_API_SERVER_URL: "http://localhost:8000/"
       UMP_API_SERVER_URL_PREFIX: "/"
       UMP_API_SERVER_HOST: "0.0.0.0"
@@ -43,7 +44,7 @@ services:
       UMP_VERIFY_REMOTE_RESULTS: true
       UMP_PER_PROCESS_FETCH: false
       #
-      UMP_AUTH_ENABLED: true
+      UMP_AUTH_ENABLED: false
       UMP_JWKS_URL: http://keycloak:8080/auth/realms/UrbanModelPlatform/protocol/openid-connect/certs
       UMP_JWT_ISSUER: http://keycloak:8080/auth/realms/UrbanModelPlatform
       UMP_JWT_AUDIENCE: account
