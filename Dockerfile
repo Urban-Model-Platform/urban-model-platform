@@ -10,7 +10,7 @@ COPY environment.yaml ./
 RUN --mount=type=cache,target=$CACHE_DIR apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/* \
-    && poetry_version=$(grep 'poetry=' environment.yaml | awk -F '=' '{print $2}') \
+    && poetry_version=2.4.1 \
     && pip install poetry==$poetry_version
 
 ENV POETRY_NO_INTERACTION=1 \
