@@ -20,7 +20,7 @@ services:
     ports:
       - ${WEBAPP_PORT_EXTERNAL}:5000
     environment:
-      UMP_LOG_LEVEL: DEBUG
+      UMP_LOG_LEVEL: debug
       UMP_PROVIDERS_FILE: providers.yaml
       UMP_API_SERVER_URL: "http://localhost:8000/"
       UMP_API_SERVER_URL_PREFIX: "/"
