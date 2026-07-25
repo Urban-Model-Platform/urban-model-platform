@@ -108,6 +108,21 @@ class UmpSettings(BaseSettings):
     # Per-process anonymous access is still controlled by providers.yaml anonymous-access.
     UMP_PUBLIC_PROCESSES: bool = False
 
+    # ── CORS ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of origins that browsers are allowed to call UMP
+    # from.  An empty list (the default) means no CORS headers are emitted —
+    # only same-origin browser calls work.  Use ["*"] to allow any origin
+    # (appropriate only when every endpoint is protected by token auth and you
+    # accept that any website can issue requests on behalf of a logged-in user).
+    #
+    # Production recommendation: list only the known frontend origin(s).
+    #   UMP_CORS_ORIGINS=["https://app.example.com"]
+    #
+    # Note: credentials (cookies / Authorization headers) are intentionally
+    # excluded from CORS grants here — UMP uses Bearer tokens passed explicitly
+    # by the client, so allow_credentials stays False regardless of this list.
+    UMP_CORS_ORIGINS: list[str] = []
+
     def print_settings(self, logger: LoggingPort):
         """Prints the settings for debugging purposes"""
         logger.info("UMP Settings:")
