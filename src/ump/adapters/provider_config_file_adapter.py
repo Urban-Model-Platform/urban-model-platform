@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 from threading import Timer
@@ -14,7 +15,8 @@ from ump.core.models.providers_config import (
     ProviderConfig,
     ProvidersConfig,
 )
-from ump.core.settings import logger
+
+logger = logging.getLogger(__name__)
 
 
 class _ConfigFileHandler(FileSystemEventHandler):
@@ -92,7 +94,7 @@ class ProviderConfigFileAdapter(ProvidersPort):
                 raise update_error
 
     def load_providers(self):
-        logger.info("(Re)Loading providers from %s", self._config_path)
+        logger.info(f"(Re)Loading providers from {self._config_path}")
 
         try:
             with open(self._config_path, encoding="UTF-8") as file:
@@ -100,8 +102,21 @@ class ProviderConfigFileAdapter(ProvidersPort):
                 if content:
                     validated = ProvidersConfig(**content)
                     self._atomic_update(validated)
-
-                    logger.info("Providers (re)loaded successfully")
+                    count = len(validated.providers)
+                    names = [p.name for p in validated.providers]
+                    logger.info(
+                        "Providers (re)loaded: %d provider(s): %s",
+                        count,
+                        names,
+                    )
+                else:
+                    # yaml.safe_load returns None for an empty file.
+                    # This is a valid but likely unintended state — warn loudly
+                    # so operators notice that no providers are available.
+                    logger.warning(
+                        "Providers file is empty (%s) — no providers configured, process routes will 404",
+                        self._config_path,
+                    )
         except FileNotFoundError:
             logger.error("Providers file not found: %s", self._config_path)
         except yaml.YAMLError as parse_error:
