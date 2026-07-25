@@ -20,35 +20,36 @@ services:
     ports:
       - ${WEBAPP_PORT_EXTERNAL}:5000
     environment:
-      UMP_API_SERVER_URL: localhost:${WEBAPP_PORT_EXTERNAL}
-      UMP_API_SERVER_WORKERS: 1
-      UMP_SERVER_TIMEOUT: 30 # seconds
       UMP_LOG_LEVEL: DEBUG
-      UMP_PROVIDERS_FILE: /home/pythonuser/providers.yaml
-      UMP_KEYCLOAK_USER: admin
-      UMP_KEYCLOAK_PASSWORD: admin
-      UMP_KEYCLOAK_URL: http://keycloak:8080/auth
-      UMP_KEYCLOAK_CLIENT_ID: ump-client
-      UMP_KEYCLOAK_REALM: UrbanModelPlatform
+      UMP_PROVIDERS_FILE: providers.yaml
+      UMP_API_SERVER_URL: "http://localhost:8000/"
+      UMP_API_SERVER_URL_PREFIX: "/"
+      UMP_API_SERVER_HOST: "0.0.0.0"
+      UMP_API_SERVER_PORT: 8000
+      UMP_API_SERVER_WORKERS: 1
+      UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: 5
+      UMP_REMOTE_JOB_TTW: 900
+      UMP_JOB_STORE: "postgres"
+      UMP_JOB_DELETE_INTERVAL: 240
+      #
+      UMP_DATABASE_URL: postgresql+asyncpg://ump:ump@ump-db:5432/ump
       UMP_DATABASE_NAME: ump
+      UMP_DATABASE_HOST: ump-db
+      UMP_DATABASE_PORT: 5432
       UMP_DATABASE_USER: ump
       UMP_DATABASE_PASSWORD: ump
-      UMP_DATABASE_HOST: api-db
-      UMP_DATABASE_PORT: 5432
-      UMP_GEOSERVER_WORKSPACE_NAME: ${UMP_GEOSERVER_WORKSPACE_NAME} # !using the same as for the local app
-      UMP_GEOSERVER_USER: admin
-      UMP_GEOSERVER_PASSWORD: geoserver
-      UMP_GEOSERVER_URL: http://geoserver:8080/geoserver
-      #---
-      # using dedicated database for geoserver results
-      UMP_GEOSERVER_DB_PORT: 5432
-      UMP_GEOSERVER_DB_NAME: geoserver_results
-      UMP_GEOSERVER_DB_USER: geoserver
-      UMP_GEOSERVER_DB_PASSWORD: geoserver
-      UMP_GEOSERVER_DB_HOST: geoserver-db
-      #---
-      UMP_GEOSERVER_CONNECTION_TIMEOUT: 60 # seconds
-      UMP_JOB_DELETE_INTERVAL: 240 # minutes
+      #
+      UMP_REWRITE_REMOTE_LINKS: true
+      UMP_VERIFY_REMOTE_RESULTS: true
+      UMP_PER_PROCESS_FETCH: false
+      #
+      UMP_AUTH_ENABLED: true
+      UMP_JWKS_URL: http://keycloak:8080/auth/realms/UrbanModelPlatform/protocol/openid-connect/certs
+      UMP_JWT_ISSUER: http://keycloak:8080/auth/realms/UrbanModelPlatform
+      UMP_JWT_AUDIENCE: account
+      UMP_JWT_ROLES_CLAIMS: realm_access.roles,resource_access.ump-client.roles
+      UMP_JWKS_CACHE_TTL_SECONDS: 3600
+      UMP_PUBLIC_PROCESSES: true
     volumes:
       - ./providers.yaml:/home/pythonuser/providers.yaml
     networks:
