@@ -40,6 +40,19 @@ from ump.core.services.authorization import AuthorizationService
 from ump.core.settings import app_settings, set_logger
 
 # ---------------------------------------------------------------------------
+# Logging must be configured first — before any adapter is instantiated.
+#
+# Every adapter that logs at startup (e.g. ProviderConfigFileAdapter calling
+# load_providers() in __init__) goes through the DelegatingLogger from
+# settings.py, which starts as NoOpLogger.  Calling configure_logging() and
+# set_logger() here wires the delegate to a real LoggingAdapter backed by
+# Python's logging module, so startup logs are visible from the very first
+# line of adapter code.
+# ---------------------------------------------------------------------------
+configure_logging(app_settings.UMP_LOG_LEVEL)
+set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
+
+# ---------------------------------------------------------------------------
 # Infrastructure adapters (one set per worker process)
 # ---------------------------------------------------------------------------
 
@@ -66,9 +79,6 @@ if app_settings.UMP_JOB_STORE == "postgres":
 else:
     job_repo = InMemoryJobRepository("scratch/ump_jobs")
     poll_lock = NoOpPollLock()
-
-configure_logging(app_settings.UMP_LOG_LEVEL)
-set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
 
 # ---------------------------------------------------------------------------
 # App factory (called once per worker)
