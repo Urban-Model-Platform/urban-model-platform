@@ -70,6 +70,6 @@ COPY scripts/entrypoint.sh entrypoint.sh
 COPY --from=base /app/migrations migrations
 COPY --from=base /app/alembic.ini alembic.ini
 
-EXPOSE 5000
+EXPOSE 8000
 
 ENTRYPOINT [ "/app/entrypoint.sh" ]
