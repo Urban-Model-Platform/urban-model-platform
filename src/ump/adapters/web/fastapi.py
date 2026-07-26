@@ -6,6 +6,7 @@ from typing import Callable
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -85,6 +86,7 @@ async def _recover_orphaned_polls(
     deduplicates across instances.
     """
     from ump.core.models.job import StatusCode
+
     terminal = {
         str(StatusCode.successful),
         str(StatusCode.failed),
@@ -161,6 +163,24 @@ def create_app(
                     await job_manager.shutdown()
 
     app = FastAPI(lifespan=lifespan)
+
+    # ── CORS middleware ───────────────────────────────────────────────────────
+    # Only added when origins are explicitly configured.  CORSMiddleware must be
+    # registered via add_middleware (not as a decorator) so it wraps the entire
+    # application and handles OPTIONS preflight requests before any route or
+    # auth logic runs.
+    #
+    # allow_credentials is intentionally False: UMP uses Bearer tokens that the
+    # client supplies explicitly — cookies are not in play, so a wildcard origin
+    # cannot be used to silently re-send session credentials.
+    if app_settings.UMP_CORS_ORIGINS:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=app_settings.UMP_CORS_ORIGINS,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
+        )
 
     # Correlation ID middleware: assigns per-request id (header override) and exposes it to logging
     @app.middleware("http")

@@ -1,13 +1,15 @@
 # ump/adapters/aiohttp_client_adapter.py
 import asyncio
 import json
+import logging
 from typing import Any, Dict, Optional
 
 import aiohttp
 
 from ump.core.exceptions import OGCExceptionResponse, OGCProcessException
 from ump.core.interfaces.http_client import HttpClientPort
-from ump.core.settings import logger
+
+logger = logging.getLogger(__name__)
 
 
 class AioHttpClientAdapter(HttpClientPort):

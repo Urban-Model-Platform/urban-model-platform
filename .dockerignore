@@ -11,3 +11,4 @@
 !src
 !scripts
 !migrations
+!alembic.ini
