@@ -58,6 +58,8 @@ spec:
                 name: {{ include "ump.fullname" . }}-oidc-connection
             {{- end }}
           env:
+            - name: UMP_CORS_ORIGINS
+              value: {{ .Values.allowedOrigins.hosts | toJson | quote }}
             {{- if .Values.postgresConnection.enabled }}
             # postgres connection
             - name: UMP_JOB_STORE
