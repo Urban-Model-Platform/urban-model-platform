@@ -57,7 +57,7 @@ set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
 # ---------------------------------------------------------------------------
 
 _config_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../providers.yaml")
+    app_settings.UMP_PROVIDERS_FILE
 )
 providers_port = ProviderConfigFileAdapter(_config_path)
 providers_port.start_file_watcher()
