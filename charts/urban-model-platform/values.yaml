@@ -89,6 +89,12 @@ auth:
 postgresConnection:
   enabled: false
   databaseUrl: ""
+  # existing secret must use canonical cnpg secret keys:
+  # dbname
+  # user
+  # password
+  # host
+  # port
   existingSecret:
     name: postgres-credentials
 
