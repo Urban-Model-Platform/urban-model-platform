@@ -13,3 +13,8 @@ replace = 'version = "{new_version}"'
 filename = ".env"
 search = 'IMAGE_TAG={current_version}'
 replace = 'IMAGE_TAG={new_version}'
+
+[[bumpversion.files]]
+filename = "Dockerfile"
+search = 'IMAGE_TAG="{current_version}"'
+replace = 'IMAGE_TAG="{new_version}"'
