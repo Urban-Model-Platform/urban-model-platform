@@ -68,7 +68,7 @@ def construct_database_url() -> str:
         )
     return (
         f"postgresql+asyncpg://{app_settings.UMP_DATABASE_USER}:{app_settings.UMP_DATABASE_PASSWORD}"
-        f"@{app_settings.UMP_DATABASE_HOST}/{app_settings.UMP_DATABASE_NAME}"
+        f"@{app_settings.UMP_DATABASE_HOST}:{app_settings.UMP_DATABASE_PORT}/{app_settings.UMP_DATABASE_NAME}"
     )
 
 def _process_manager_factory(client):
