@@ -52,38 +52,24 @@ from ump.core.settings import app_settings, set_logger
 configure_logging(app_settings.UMP_LOG_LEVEL)
 set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
 
-# ---------------------------------------------------------------------------
-# Infrastructure adapters (one set per worker process)
-# ---------------------------------------------------------------------------
-
-_config_path = os.path.abspath(
-    app_settings.UMP_PROVIDERS_FILE
-)
-providers_port = ProviderConfigFileAdapter(_config_path)
-providers_port.start_file_watcher()
-
-http_client = AioHttpClientAdapter()
-process_id_validator = ColonProcessId()
-remote_auth = RemoteAuthAdapter()
-jwt_auth = JwtAuthAdapter(app_settings)
-
-if app_settings.UMP_JOB_STORE == "postgres":
-    from ump.adapters.job_repository_sql import SQLModelJobRepository
-    from ump.adapters.poll_lock_pg import PgAdvisoryPollLock
-
-    if not app_settings.UMP_DATABASE_URL:
-        raise RuntimeError("UMP_DATABASE_URL must be set when UMP_JOB_STORE=postgres")
-    _sql_repo = SQLModelJobRepository(app_settings.UMP_DATABASE_URL)
-    job_repo: JobRepositoryPort = _sql_repo
-    poll_lock = PgAdvisoryPollLock(_sql_repo._session_factory)
-else:
-    job_repo = InMemoryJobRepository("scratch/ump_jobs")
-    poll_lock = NoOpPollLock()
 
 # ---------------------------------------------------------------------------
-# App factory (called once per worker)
+# Factories for core managers (one set per worker process)
 # ---------------------------------------------------------------------------
+def construct_database_url() -> str:
+    if app_settings.UMP_DATABASE_URL:
+        return app_settings.UMP_DATABASE_URL
+    
+    if not (app_settings.UMP_DATABASE_HOST and app_settings.UMP_DATABASE_NAME):
 
+        raise RuntimeError(
+            "UMP_DATABASE_HOST and UMP_DATABASE_NAME "
+            "must be set if UMP_DATABASE_URL is not provided."
+        )
+    return (
+        f"postgresql+asyncpg://{app_settings.UMP_DATABASE_USER}:{app_settings.UMP_DATABASE_PASSWORD}"
+        f"@{app_settings.UMP_DATABASE_HOST}/{app_settings.UMP_DATABASE_NAME}"
+    )
 
 def _process_manager_factory(client):
     return ProcessManager(
@@ -119,6 +105,38 @@ def _job_manager_factory(client, process_manager):
     ]
     process_manager.attach_job_manager(jm)
     return jm
+
+# ---------------------------------------------------------------------------
+# Infrastructure adapters (one set per worker process)
+# ---------------------------------------------------------------------------
+
+_config_path = os.path.abspath(
+    app_settings.UMP_PROVIDERS_FILE
+)
+providers_port = ProviderConfigFileAdapter(_config_path)
+providers_port.start_file_watcher()
+
+http_client = AioHttpClientAdapter()
+process_id_validator = ColonProcessId()
+remote_auth = RemoteAuthAdapter()
+jwt_auth = JwtAuthAdapter(app_settings)
+
+if app_settings.UMP_JOB_STORE == "postgres":
+    from ump.adapters.job_repository_sql import SQLModelJobRepository
+    from ump.adapters.poll_lock_pg import PgAdvisoryPollLock
+
+    database_url = construct_database_url()
+
+    _sql_repo = SQLModelJobRepository(database_url)
+    job_repo: JobRepositoryPort = _sql_repo
+    poll_lock = PgAdvisoryPollLock(_sql_repo._session_factory)
+else:
+    job_repo = InMemoryJobRepository("scratch/ump_jobs")
+    poll_lock = NoOpPollLock()
+
+# ---------------------------------------------------------------------------
+# App factory (called once per worker)
+# ---------------------------------------------------------------------------
 
 
 app = create_app(
