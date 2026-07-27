@@ -109,6 +109,13 @@ class ProviderConfigFileAdapter(ProvidersPort):
                         count,
                         names,
                     )
+                    # Log soft policy warnings for each configured process so
+                    # operators catch unusual combinations early without having
+                    # to wait for a job to expose the problem at runtime.
+                    for provider in validated.providers:
+                        for proc in provider.processes:
+                            for warning in proc.policy_warnings():
+                                logger.warning("[config] %s", warning)
                 else:
                     # yaml.safe_load returns None for an empty file.
                     # This is a valid but likely unintended state — warn loudly
