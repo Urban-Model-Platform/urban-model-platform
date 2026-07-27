@@ -940,7 +940,7 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 | ~~V-0a~~ | ~~Persist `job.response_mode` + `job.outputs_spec` (+ Alembic migration)~~ | ✅ done |
 | ~~V-0b~~ | ~~`ProcessConfig.transmission_mode_policy` + startup validation rules~~ | ✅ done |
 | ~~V-1~~ | ~~`ResultStoragePort` + dataclasses + exceptions (core)~~ | ✅ done |
-| V-2 | `ResultStorageCoordinator` (core, decide-fetch-store-linkinject) | V-0a/b, V-1 |
+| ~~V-2~~ | ~~`ResultStorageCoordinator` (core, decide-fetch-store-linkinject)~~ | ✅ done |
 | V-3 | `atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir | V-1 |
 | V-4 | `ldproxy_entities` (provider YAML + one collection block from a FeatureCollection) | V-3 |
 | V-5a | `EntityConfigBackendPort` + `FilesystemEntityConfigBackend` (write entity YAMLs to disk) | V-4 |
