@@ -27,6 +27,7 @@ from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.observers import JobStateObserver
 from ump.core.interfaces.poll_lock import PollLockPort
+from ump.core.interfaces.result_storage import ResultStoragePort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.status_derivation import StatusDerivationContext
@@ -182,7 +183,7 @@ class JobManager:
         retry_port: Optional[
             Any
         ] = None,  # RetryPort protocol; kept generic to avoid tight coupling
-        result_storage_port: Optional[Any] = None,  # ResultStoragePort protocol
+        result_storage_port: Optional[ResultStoragePort] = None,
         remote_auth: Optional[
             Any
         ] = None,  # RemoteAuthPort; kept generic to avoid tight coupling
