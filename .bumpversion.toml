@@ -1,15 +1,35 @@
-[bumpversion]
-current_version = "3.0.0a1"
+[tool.bumpversion]
+current_version = "3.0.0-alpha5"
 commit = true
 tag = true
 tag_name = "v{new_version}"
 
-[[bumpversion.files]]
+parse = """(?x)
+    (?P<major>0|[1-9]\\d*)\\.
+    (?P<minor>0|[1-9]\\d*)\\.
+    (?P<patch>0|[1-9]\\d*)
+    (?:
+        -                             # dash separator for pre-release section
+        (?P<pre_l>[a-zA-Z-]+)         # pre-release label
+        (?P<pre_n>0|[1-9]\\d*)        # pre-release version number
+    )?                                # pre-release section is optional
+"""
+serialize = [
+    "{major}.{minor}.{patch}-{pre_l}{pre_n}",
+    "{major}.{minor}.{patch}",
+]
+
+[[tool.bumpversion.files]]
 filename = "pyproject.toml"
 search = 'version = "{current_version}"'
 replace = 'version = "{new_version}"'
 
-[[bumpversion.files]]
+[[tool.bumpversion.files]]
 filename = ".env"
+search = 'IMAGE_TAG={current_version}'
+replace = 'IMAGE_TAG={new_version}'
+
+[[tool.bumpversion.files]]
+filename = "Dockerfile"
 search = 'IMAGE_TAG={current_version}'
 replace = 'IMAGE_TAG={new_version}'

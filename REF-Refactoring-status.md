@@ -130,7 +130,7 @@ _Last updated: 2026-07-04_
 | Status derivation strategies (orchestrator + strategy pattern) | ✅ | `src/ump/core/managers/status_derivation_orchestrator.py` |
 | `GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/results` routes | ✅ | `src/ump/adapters/web/fastapi.py` |
 | `POST /processes/{id}/execution` route | ✅ | `src/ump/adapters/web/fastapi.py` |
-| `JobExecutionPipeline` — all 9 steps implemented, active via `create_and_forward_ii` | ✅ | `src/ump/core/managers/steps/execution_steps.py` |
+| `JobExecutionPipeline` — all 9 steps implemented, active via `run_execution_pipeline` | ✅ | `src/ump/core/managers/steps/execution_steps.py` |
 
 ### ✅ Developer tooling
 
@@ -298,7 +298,7 @@ The goal of Feature III is to enable UMP to act as an OGC API Processes executio
 
 **JobManager** (`src/ump/core/managers/job_manager.py`)
 
-Orchestrates the full async execution lifecycle via `create_and_forward`:
+Orchestrates the full async execution lifecycle via `run_execution_pipeline`:
 1. Resolve provider from `process_id` (with prefix extraction).
 2. Create local job immediately with `accepted` statusInfo snapshot; persist.
 3. Forward execute request to remote provider with retry/backoff (`TenacityRetryAdapter`).
@@ -898,7 +898,10 @@ examples as each entity file is generated.
 
 **Goal**: replace the monolithic `create_and_forward` method (~200 lines) with a composable `JobExecutionPipeline` of discrete, independently testable `PipelineStep` objects. Each step receives and mutates a shared `JobExecutionContext`; any step can abort by setting `context.should_halt = True`.
 
-**Status**: pipeline is implemented and active. `ProcessManager.execute_process` calls `create_and_forward_ii` (pipeline entrypoint). The old `create_and_forward` remains as dead code and can be deleted in a cleanup pass.
+**Status**: pipeline is implemented and active. 
+1. `ProcessManager.execute_process` calls `create_and_forward_ii` (pipeline entrypoint). The old `create_and_forward` remains as dead code and can be deleted in a cleanup pass. 
+2. renamed `create_and_forward_ii` to create_and_forward and delete old `create_and_forward` dead code
+3. renamed `create_and_forward` to `run_execution_pipeline`
 
 **`ShapeClientResponseStep` currently implements the async row only** (201 + accepted statusInfo). The full OGC sync response table is deferred until sync execution is added (see deferred items below).
 

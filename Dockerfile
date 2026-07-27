@@ -1,6 +1,6 @@
 ARG $MAMBA_USER=mambauser
 
-FROM python:3.11-bookworm AS base
+FROM python:3.14-bookworm AS base
 
 ENV CACHE_DIR=/app/cache
 
@@ -10,7 +10,7 @@ COPY environment.yaml ./
 RUN --mount=type=cache,target=$CACHE_DIR apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/* \
-    && poetry_version=$(grep 'poetry=' environment.yaml | awk -F '=' '{print $2}') \
+    && poetry_version=2.4.1 \
     && pip install poetry==$poetry_version
 
 ENV POETRY_NO_INTERACTION=1 \
@@ -19,6 +19,7 @@ ENV POETRY_NO_INTERACTION=1 \
     POETRY_CACHE_DIR=/app/poetry_cache
 
 COPY pyproject.toml ./
+COPY alembic.ini ./
 #poetry.lock
 RUN poetry lock && poetry install --without=dev --no-root
 
@@ -36,13 +37,19 @@ RUN touch README.md \
     && /app/.venv/bin/python -m pip install dist/*.whl 
     #--no-deps
 
-FROM python:3.11-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 ARG USER_UID=1000
 ARG USERNAME=pythonuser
 ARG USER_GID=2000
 ARG SOURCE_COMMIT
-ARG IMAGE_TAG=2.0.0
+ARG IMAGE_TAG=3.0.0-alpha5
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=100
 
 LABEL maintainer="Urban Data Analytics" \
     name="analytics/urban-model-platform" \
@@ -55,7 +62,7 @@ RUN groupadd --gid $USER_GID $USERNAME && \
     chown -R $USERNAME:$USERNAME /home/$USERNAME /usr/local/lib /usr/local/bin
 
 USER $USERNAME
-WORKDIR /home/$USERNAME
+WORKDIR /app
 
 ENV VIRTUAL_ENV=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
@@ -67,7 +74,8 @@ COPY --from=base \
 
 COPY scripts/entrypoint.sh entrypoint.sh
 COPY --from=base /app/migrations migrations
+COPY --from=base /app/alembic.ini alembic.ini
 
-EXPOSE 5000
+EXPOSE 8000
 
-ENTRYPOINT [ "/home/pythonuser/entrypoint.sh" ]
+ENTRYPOINT [ "/app/entrypoint.sh" ]

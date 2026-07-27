@@ -38,7 +38,7 @@ exclude = [
 
 [tool.poetry]
 name = "ump"
-version = "3.0.0a1"
+version = "3.0.0-alpha5"
 description = "server federation api, OGC Api Processes-based to connect model servers and centralize access to them"
 authors = [
     "Rico Herzog <rico.herzog@hcu-hamburg.de>",
@@ -76,6 +76,7 @@ alembic = "^1.14"
 asyncpg = "^0.30"
 greenlet = "^3.5.3"
 python-jose = {version = "^3.3.0", extras = ["cryptography"]}
+rich = "^15.0.0"
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests
