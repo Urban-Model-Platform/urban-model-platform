@@ -123,6 +123,35 @@ class UmpSettings(BaseSettings):
     # by the client, so allow_credentials stays False regardless of this list.
     UMP_CORS_ORIGINS: list[str] = []
 
+    # ── Feature V: Result storage (ldproxy) ───────────────────────────────────────
+    # Public base URL of the ldproxy ump-results service, e.g.
+    # https://geodata.example.com/ump-results
+    # Required when any process uses result-storage: ldproxy.
+    UMP_RESULTSTORE_LDPROXY_BASE_URL: str | None = None
+
+    # Path to the ldproxy store root on the shared filesystem (Azure File Share
+    # in production, a local directory in development).  GeoPackage files and,
+    # when the filesystem backend is used, entity YAML files are written here.
+    # Required when any process uses result-storage: ldproxy.
+    UMP_RESULTSTORE_LDPROXY_ROOTPATH: str | None = None
+
+    # EPSG code for the default native CRS used in generated ldproxy provider
+    # entities.  OGC GeoJSON is WGS84 by RFC 7946, so 4326 is the right default.
+    UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: int = 4326
+
+    # Where entity YAML files (ldproxy provider + service configs) are written.
+    # 'filesystem': write directly to UMP_RESULTSTORE_LDPROXY_ROOTPATH (dev/Docker).
+    # 'k8s': create/patch Kubernetes ConfigMaps via the k8s API (production).
+    UMP_RESULTSTORE_CONFIG_BACKEND: str = "filesystem"
+
+    # Kubernetes settings — only required when UMP_RESULTSTORE_CONFIG_BACKEND=k8s.
+    # Namespace where ldproxy ConfigMaps are managed.
+    UMP_RESULTSTORE_K8S_NAMESPACE: str | None = None
+    # Name of the ConfigMap holding the shared ump-results service entity.
+    UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP: str = "ump-ldproxy-service"
+    # Prefix for per-job provider ConfigMap names (suffix is the job UUID).
+    UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX: str = "ump-ldproxy-provider-"
+
     def print_settings(self, logger: LoggingPort):
         """Prints the settings for debugging purposes"""
         logger.info("UMP Settings:")
