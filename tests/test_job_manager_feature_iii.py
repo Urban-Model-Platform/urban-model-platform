@@ -231,7 +231,7 @@ def make_manager(
 
 @pytest.mark.asyncio
 async def test_immediate_results_synthesis_success():
-    """Unit: JobManager.create_and_forward
+    """Unit: JobManager.run_execution_pipeline
     Purpose: When provider returns an immediate results body (contains 'outputs')
     but no statusInfo snapshot, the manager synthesizes a terminal successful
     statusInfo, injects self/results links, and does NOT start polling.
@@ -356,7 +356,7 @@ async def test_results_endpoint_proxy_success_and_not_available():
         "headers": {},
         "body": {"jobID": "remote-R", "status": "successful", "type": "process"},
     }
-    # Provide two successful GET responses: one for verification during create_and_forward
+    # Provide two successful GET responses: one for verification during run_execution_pipeline
     # and one for the explicit results fetch call below.
     mgr_s, repo_s, http_s = make_manager(
         post_response_success, get_responses=[{"ok": True}, {"ok": True}]
