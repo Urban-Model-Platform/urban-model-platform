@@ -21,6 +21,7 @@ from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.adapters.jwt_auth_adapter import JwtAuthAdapter
 from ump.adapters.logging_adapter import LoggingAdapter
 from ump.adapters.poll_lock_noop import NoOpPollLock
+from ump.adapters.process_description_proxy import PolicyBasedProcessDescriptionProxy
 from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
 from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
 from ump.adapters.retry_tenacity import TenacityRetryAdapter
@@ -38,6 +39,40 @@ from ump.core.managers.observers import (
 from ump.core.managers.process_manager import ProcessManager
 from ump.core.services.authorization import AuthorizationService
 from ump.core.settings import app_settings, set_logger
+
+
+def _validate_resultstore_settings() -> None:
+    """Fail fast if any configured process needs the ldproxy result store but
+    the required environment variables are missing.
+
+    This check runs at startup, after providers have been loaded, so the error
+    message names the offending process rather than showing a generic config
+    complaint later at job-completion time.
+    """
+    ldproxy_required = any(
+        proc.result_storage == "ldproxy"
+        for provider in providers_port.get_providers()
+        for proc in provider.processes
+    )
+    if not ldproxy_required:
+        return  # nothing to validate
+
+    missing: list[str] = []
+    if not app_settings.UMP_RESULTSTORE_LDPROXY_BASE_URL:
+        missing.append("UMP_RESULTSTORE_LDPROXY_BASE_URL")
+    if not app_settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH:
+        missing.append("UMP_RESULTSTORE_LDPROXY_ROOTPATH")
+    if app_settings.UMP_RESULTSTORE_CONFIG_BACKEND == "k8s":
+        if not app_settings.UMP_RESULTSTORE_K8S_NAMESPACE:
+            missing.append("UMP_RESULTSTORE_K8S_NAMESPACE")
+
+    if missing:
+        raise RuntimeError(
+            "One or more processes use result-storage: ldproxy but the following "
+            f"required settings are not configured: {', '.join(missing)}.  "
+            "Set these environment variables before starting UMP."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Logging must be configured first — before any adapter is instantiated.
@@ -59,24 +94,25 @@ set_logger(LoggingAdapter("ump", app_settings.UMP_LOG_LEVEL))
 def construct_database_url() -> str:
     if app_settings.UMP_DATABASE_URL:
         return app_settings.UMP_DATABASE_URL
-    
-    if not (app_settings.UMP_DATABASE_HOST and app_settings.UMP_DATABASE_NAME):
 
+    if not (app_settings.UMP_DATABASE_HOST and app_settings.UMP_DATABASE_NAME):
         raise RuntimeError(
             "UMP_DATABASE_HOST and UMP_DATABASE_NAME "
             "must be set if UMP_DATABASE_URL is not provided."
         )
 
     user: str = app_settings.UMP_DATABASE_USER
-    password: str = app_settings.UMP_DATABASE_PASSWORD.get_secret_value() if app_settings.UMP_DATABASE_PASSWORD else ""
+    password: str = (
+        app_settings.UMP_DATABASE_PASSWORD.get_secret_value()
+        if app_settings.UMP_DATABASE_PASSWORD
+        else ""
+    )
     host: str = app_settings.UMP_DATABASE_HOST
     port: int = app_settings.UMP_DATABASE_PORT
     name: str = app_settings.UMP_DATABASE_NAME
 
-    return (
-        f"postgresql+asyncpg://{user}:{password}"
-        f"@{host}:{port}/{name}"
-    )
+    return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{name}"
+
 
 def _process_manager_factory(client):
     return ProcessManager(
@@ -84,6 +120,7 @@ def _process_manager_factory(client):
         client,
         process_id_validator=process_id_validator,
         remote_auth=remote_auth,
+        process_description_proxy=PolicyBasedProcessDescriptionProxy(),
     )
 
 
@@ -113,15 +150,18 @@ def _job_manager_factory(client, process_manager):
     process_manager.attach_job_manager(jm)
     return jm
 
+
 # ---------------------------------------------------------------------------
 # Infrastructure adapters (one set per worker process)
 # ---------------------------------------------------------------------------
 
-_config_path = os.path.abspath(
-    app_settings.UMP_PROVIDERS_FILE
-)
+_config_path = os.path.abspath(app_settings.UMP_PROVIDERS_FILE)
 providers_port = ProviderConfigFileAdapter(_config_path)
 providers_port.start_file_watcher()
+
+# Fail fast if result-store settings are incomplete — better to crash at startup
+# with a clear error than to fail silently at job-completion time.
+_validate_resultstore_settings()
 
 http_client = AioHttpClientAdapter()
 process_id_validator = ColonProcessId()

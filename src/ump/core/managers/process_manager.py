@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, cast
 
 from ump.core.exceptions import OGCProcessException
 from ump.core.interfaces.http_client import HttpClientPort
+from ump.core.interfaces.process_description_proxy import ProcessDescriptionProxyPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.processes import ProcessesPort
 from ump.core.interfaces.providers import ProvidersPort
@@ -28,11 +29,15 @@ class ProcessManager(ProcessesPort):
         process_id_validator: ProcessIdValidatorPort,
         remote_auth: RemoteAuthPort | None = None,
         cache_expiry_seconds: int = 300,
+        process_description_proxy: ProcessDescriptionProxyPort | None = None,
     ) -> None:
         self.provider_config_service = provider_config_service
         self.http_client = http_client
         self.process_id_validator = process_id_validator
         self._remote_auth = remote_auth
+        # The proxy rewrites the process description before it is cached and
+        # served to clients.  None means pass-through (no rewriting).
+        self._process_description_proxy = process_description_proxy
         self._process_cache = ProcessListCache[ProcessSummary](
             expiry_seconds=cache_expiry_seconds
         )
@@ -294,6 +299,18 @@ class ProcessManager(ProcessesPort):
             for handler in self._process_handlers:
                 proc = handler(provider_name, proc)
             model = Process(**proc)
+
+            # Apply the process description proxy: rewrites the model to reflect
+            # what UMP commits to deliver (e.g. adjusted outputTransmission).
+            # We look up the ProcessConfig by the *remote* raw_id, not the canonical
+            # id, because the canonical id includes the provider prefix.
+            if self._process_description_proxy is not None:
+                proc_config = self.provider_config_service.get_process_config(
+                    provider_name, raw_id
+                )
+                if proc_config is not None:
+                    model = self._process_description_proxy.apply(model, proc_config)
+
             self._cache_process(model)
             return model
         except OGCProcessException:
