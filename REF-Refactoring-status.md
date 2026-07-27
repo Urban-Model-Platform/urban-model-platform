@@ -626,6 +626,9 @@ JWKS fetching uses `aiohttp` (already a dependency) with a simple in-memory asyn
 > explaining *why*, not just *what*. Prefer small, single-purpose, well-named
 > functions over clever density. This is written down from the start, not
 > retro-fitted.
+> Try to be concise when describing obvious things and concepts and manage verbosity.
+> Reduce using defensive null-checks and type guards that don`match actual invariants.
+> Write minimal, idiomatic code.
 
 **Principle (core vs adapter split):**
 - **UMP core decides WHAT and WHEN** to store — driven by the process's
@@ -936,7 +939,7 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 |---|---|---|
 | ~~V-0a~~ | ~~Persist `job.response_mode` + `job.outputs_spec` (+ Alembic migration)~~ | ✅ done |
 | ~~V-0b~~ | ~~`ProcessConfig.transmission_mode_policy` + startup validation rules~~ | ✅ done |
-| V-1 | `ResultStoragePort` + dataclasses + exceptions (core) | — |
+| ~~V-1~~ | ~~`ResultStoragePort` + dataclasses + exceptions (core)~~ | ✅ done |
 | V-2 | `ResultStorageCoordinator` (core, decide-fetch-store-linkinject) | V-0a/b, V-1 |
 | V-3 | `atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir | V-1 |
 | V-4 | `ldproxy_entities` (provider YAML + one collection block from a FeatureCollection) | V-3 |
