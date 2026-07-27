@@ -18,7 +18,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional, Sequence
 
-from sqlalchemy import Column, DateTime, update as sa_update
+from sqlalchemy import Column, DateTime
+from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlmodel import Field, SQLModel, col, select
@@ -67,6 +68,14 @@ class JobRecord(SQLModel, table=True):
     diagnostic: Optional[str] = Field(default=None)
     version: int = Field(default=0, nullable=False)
 
+    # ---- Execute-request context (needed by Feature VIII result storage) ----
+    # Stored as plain TEXT and JSONB so they survive without a schema migration
+    # when the underlying Pydantic models evolve.
+    response_mode: Optional[str] = Field(default=None)
+    outputs_spec: Optional[dict] = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
+
     # JSONB columns — declared with sa_column to get native PostgreSQL JSONB
     # (SQLModel defaults dict → TEXT without explicit sa_column)
     status_info: Optional[dict] = Field(
@@ -104,6 +113,8 @@ class JobRecord(SQLModel, table=True):
             else None,
             diagnostic=job.diagnostic,
             version=job.version,
+            response_mode=job.response_mode,
+            outputs_spec=job.outputs_spec,
         )
 
     def to_domain(self) -> Job:
@@ -128,6 +139,8 @@ class JobRecord(SQLModel, table=True):
             links=links,
             diagnostic=self.diagnostic,
             version=self.version,
+            response_mode=self.response_mode,
+            outputs_spec=self.outputs_spec,
         )
 
 
@@ -246,6 +259,7 @@ class SQLModelJobRepository(JobRepositoryPort):
                 stmt = stmt.where(col(JobRecord.user_id).is_(None))
             elif user_id is not None:
                 from sqlalchemy import or_
+
                 if include_public:
                     stmt = stmt.where(
                         or_(

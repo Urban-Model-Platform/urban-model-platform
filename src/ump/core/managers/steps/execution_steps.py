@@ -305,6 +305,11 @@ class CreateLocalJobStep(PipelineStep):
             status=str(StatusCode.accepted),
             inputs=inline,
             inputs_storage=storage,
+            # Capture the client's response preference and per-output specs so
+            # Feature VIII (result storage / policy enforcement) can read them
+            # at job-completion time without re-parsing the original request.
+            response_mode=context.response_mode or "raw",
+            outputs_spec=context.output_specs or None,
         )
         logger.debug(
             f"[step:create] job_id={context.job.id} inline_inputs={'yes' if inline else 'no'}"

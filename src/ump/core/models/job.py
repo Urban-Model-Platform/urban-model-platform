@@ -1,8 +1,11 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import List, Literal, Optional
+
+from pydantic import BaseModel, Field
+
 from ump.core.models.link import Link
+
 
 class StatusCode(StrEnum):
     accepted = "accepted"  # Details je nach statusCode.yaml
@@ -10,6 +13,7 @@ class StatusCode(StrEnum):
     running = "running"
     successful = "successful"
     dismissed = "dismissed"
+
 
 class JobStatusInfo(BaseModel):
     jobID: str
@@ -23,6 +27,7 @@ class JobStatusInfo(BaseModel):
     updated: Optional[datetime] = None
     progress: Optional[int] = Field(None, ge=0, le=100)
     links: Optional[List[Link]] = None
+
 
 class JobList(BaseModel):
     jobs: List[JobStatusInfo]
@@ -43,11 +48,17 @@ class Job(BaseModel):
     """
 
     id: str  # local UUID
-    user_id: Optional[str] = None  # authenticated user who started the job; None = anonymous / public
+    user_id: Optional[str] = (
+        None  # authenticated user who started the job; None = anonymous / public
+    )
     process_id: Optional[str] = None
     provider: Optional[str] = None  # provider name or identifier
-    remote_job_id: Optional[str] = None  # upstream job id if provider manages jobs (can differ from local UUID)
-    remote_status_url: Optional[str] = None  # absolute URL to poll for remote statusInfo
+    remote_job_id: Optional[str] = (
+        None  # upstream job id if provider manages jobs (can differ from local UUID)
+    )
+    remote_status_url: Optional[str] = (
+        None  # absolute URL to poll for remote statusInfo
+    )
     # ID separation rationale:
     # - We generate a local UUID (`id`) for stability, uniqueness across multiple providers, and to allow
     #   retries or multi-step orchestration without exposing upstream internals.
@@ -57,7 +68,9 @@ class Job(BaseModel):
     #   for persistence keys. This enables potential future features like re-binding a local job to a new
     #   remote attempt while keeping the external identifier stable.
 
-    status: Optional[str] = None  # normalized status string (e.g., accepted, running, successful, failed)
+    status: Optional[str] = (
+        None  # normalized status string (e.g., accepted, running, successful, failed)
+    )
     status_info: Optional[JobStatusInfo] = None
 
     # Input handling (never embedded in statusInfo)
@@ -72,7 +85,9 @@ class Job(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc),
         description="Local creation timestamp (UTC)",
     )
-    updated: Optional[datetime] = Field(default=None, description="Local last update timestamp (UTC)")
+    updated: Optional[datetime] = Field(
+        default=None, description="Local last update timestamp (UTC)"
+    )
 
     # Links (results, status, etc.)
     links: List[Link] = Field(default_factory=list)
@@ -80,6 +95,14 @@ class Job(BaseModel):
     # Internal/diagnostic fields
     diagnostic: Optional[str] = None  # capture provider error text or failure reason
     version: int = 0  # optimistic concurrency / event sequencing
+
+    # ---- Fields captured from the original execute request ----
+    # These are needed by Feature VIII (result storage / policy enforcement) to
+    # decide whether to store a result and how to unwrap it.  They are persisted
+    # so the information is available at job-completion time even if the job was
+    # created by a different UMP instance or a previous process run.
+    response_mode: Optional[str] = None  # "raw" | "document" — client's response field
+    outputs_spec: Optional[dict] = None  # verbatim execute-body "outputs" map
 
     def touch(self) -> None:
         """Update the `updated` timestamp (manager should call after mutations)."""
@@ -103,5 +126,8 @@ class Job(BaseModel):
     def is_in_terminal_state(self) -> bool:  # pragma: no cover - simple logic
         if not self.status_info or not self.status_info.status:
             return False
-        return self.status_info.status in {StatusCode.successful, StatusCode.failed, StatusCode.dismissed}
-
+        return self.status_info.status in {
+            StatusCode.successful,
+            StatusCode.failed,
+            StatusCode.dismissed,
+        }
