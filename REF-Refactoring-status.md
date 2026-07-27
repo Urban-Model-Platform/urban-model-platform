@@ -934,8 +934,8 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 
 | # | Step | Depends on |
 |---|---|---|
-| V-0a | Persist `job.response_mode` + `job.outputs_spec` (+ Alembic migration) | — |
-| V-0b | `ProcessConfig.transmission_mode_policy` + startup validation rules | — |
+| ~~V-0a~~ | ~~Persist `job.response_mode` + `job.outputs_spec` (+ Alembic migration)~~ | ✅ done |
+| ~~V-0b~~ | ~~`ProcessConfig.transmission_mode_policy` + startup validation rules~~ | ✅ done |
 | V-1 | `ResultStoragePort` + dataclasses + exceptions (core) | — |
 | V-2 | `ResultStorageCoordinator` (core, decide-fetch-store-linkinject) | V-0a/b, V-1 |
 | V-3 | `atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir | V-1 |
@@ -1228,7 +1228,29 @@ The UMP acts as a broker for the entire execution lifecycle according to OGC API
 - central auth management
 - process exclusion
 - deterministic caching
-- normalizing: UMP can add or deprive model servers of skills, e.g. add `transmissionMode: reference` capability
+- normalizing: UMP can add or remove capabilities from model servers — e.g. add
+  `transmissionMode: reference` to the advertised process description, then
+  fulfill it by constructing its own canonical execute request to the remote
+
+**Two-layer proxy model (architectural clarification)**
+
+UMP operates on two distinct levels simultaneously:
+
+1. **Process description** — UMP is the *authoritative source* for the process
+   descriptions it serves to clients.  It may rewrite the upstream process
+   description to add or remove advertised capabilities.  Clients trust UMP's
+   version; they never see the remote's raw description.
+
+2. **Remote request construction** — When executing a job, UMP reads the
+   client's *intent* (e.g. `transmissionMode: reference`) but does **not**
+   forward the client's execute body to the remote unchanged once policies are
+   active.  Instead, UMP constructs its own canonical request to the remote: one
+   the remote can actually service (e.g. `transmissionMode: value`,
+   `response: document`) that allows UMP to subsequently fulfil the client's
+   original intent.  The client's **inputs** are forwarded unchanged; the
+   execution-mode fields (`transmissionMode`, `response`) in the request UMP
+   sends to the remote are determined by UMP's policy configuration, not copied
+   from the client's body.
 
 This proposal addresses `result-storage`, `transmission-mode-policy`, and `response-mode-policy`
 
@@ -1257,61 +1279,48 @@ capabilities of the model server.
 
 ##### `emulate-ref`
 
-The UMP adds the `transmissionMode: reference` capability to the process, even if the
-model server does not natively support it.
-
-**Behavior:**
-- The UMP authoritatively adds `transmissionMode: reference` to the externally visible
-  process description.
-- If the client requests `ref`: The UMP internally sends `value` to the model server,
-  receives the data (ideally as a stream), writes it to the configured
-  result store, and returns a link to the client.
-- If the client requests `value`: The UMP passes the data directly-the
-  result store is not used.
+UMP adds `transmissionMode: reference` capability that the remote may not support
+natively.
+- **Process description**: UMP adds `transmissionMode: reference` to the
+  advertised `outputTransmission` if it is not already present.  Clients see
+  `reference` as a valid option regardless of remote capability.
+- **Remote request** (when client requests `reference`): UMP constructs a
+  canonical request with `transmissionMode: value` (and, if configured,
+  `response: document`) — the remote receives a value request it can service.
+  UMP stores the returned value in the result store, then returns a reference
+  link to the client, fulfilling the client's original intent.
+- **Remote request** (when client requests `value`): UMP forwards value-mode
+  request to the remote.  The result store is not activated.
 
 **Prerequisite:** A result store (`result-storage`) must be configured.
-If the configuration is missing, `emulate-ref` results in a configuration error.
-
-**Suitable for:**
-- Model servers that only support `value`, but whose results are to be
-  persisted in the UMP store if the client requests it
+If missing, UMP rejects the config at startup.
 
 ---
 
 ##### `emulate-ref-only`
 
-Like `emulate-ref`, but `value` is completely blocked as the transmission mode for the client.
-The UMP authoritatively removes `value` from the process description.
-All results are routed through the result store without exception.
+Like `emulate-ref`, but `value` is completely removed from the advertised
+capabilities and from client options.
+- **Process description**: `outputTransmission` is set to `["reference"]` only.
+  Clients cannot request `value`.
+- **Remote request**: UMP always constructs a canonical request with
+  `transmissionMode: value` to the remote, stores the result, and returns a
+  reference link.  A client that attempts to send `transmissionMode: value` is
+  rejected by UMP before the request is forwarded.
 
-**Behavior:**
-- The UMP advertises only `transmissionMode: ref`.
-- Every Execution Request is internally forwarded to the model server with `value`,
-  the result is written to the store, and a link is returned.
-- A client request with `value` is rejected by the UMP with an error
-  (the store is not optional).
-
-**Prerequisite:** A Result Store (`result-storage`) must be configured.
-
-**Suitable for:**
-- Scenarios in which all results are to be stored centrally in the UMP Store
-  (e.g., for auditing, caching, or access reasons)
-- Model servers whose native storage is temporarily unavailable or inaccessible to clients
+**Prerequisite:** A result store (`result-storage`) must be configured.
 
 ---
 
 ##### `value-only`
 
-The UMP completely blocks `transmissionMode: ref`- even if the model server natively
-supports it. The process description is cleaned up accordingly.
-
-A client request with `ref` is rejected by the UMP with an error.
-The result store is not used.
-
-**Suitable for:**
-- Scenarios in which uniform `value` semantics must be enforced
-- Model servers whose native `ref` links are not accessible to all clients and
-  where no UMP store is to be operated
+UMP removes `reference` from the advertised capabilities and enforces value-only delivery.
+- **Process description**: `outputTransmission` is set to `["value"]` only.
+  Clients cannot request `reference`.
+- **Remote request**: UMP constructs a canonical request with
+  `transmissionMode: value`.  A client that attempts to send
+  `transmissionMode: reference` is rejected by UMP.  The result store is not
+  used.
 
 
 #### Configuration: `result-storage`
