@@ -698,11 +698,14 @@ The coordinator is injected into `JobManager` (replacing the current untyped
 #### Adapter: `LdproxyResultStorage`
 
 ```
-src/ump/adapters/result_storage/ldproxy_adapter.py     — LdproxyResultStorage(ResultStoragePort)
-src/ump/adapters/result_storage/gpkg_writer.py         — GeoJSON FeatureCollection -> GeoPackage table
-src/ump/adapters/result_storage/ldproxy_entities.py    — build provider YAML + build one collection block
-src/ump/adapters/result_storage/service_registry.py    — read-modify-write the shared service file (locked)
-src/ump/adapters/result_storage/atomic_fs.py           — atomic write (temp file + os.replace)
+src/ump/adapters/result_storage/ldproxy_adapter.py         — LdproxyResultStorage(ResultStoragePort)
+src/ump/adapters/result_storage/gpkg_writer.py             — GeoJSON FeatureCollection -> GeoPackage table
+src/ump/adapters/result_storage/ldproxy_entities.py        — build provider YAML + one collection block
+src/ump/adapters/result_storage/service_registry.py        — read-modify-write the shared service entity (locked)
+src/ump/adapters/result_storage/atomic_fs.py               — atomic write (temp file + os.replace)
+src/ump/adapters/result_storage/entity_config_backend.py   — EntityConfigBackendPort ABC + factory
+src/ump/adapters/result_storage/entity_config_fs.py        — FilesystemEntityConfigBackend (dev / Docker)
+src/ump/adapters/result_storage/entity_config_k8s.py       — K8sConfigMapEntityConfigBackend (Kubernetes)
 ```
 
 **Topology (CONFIRMED): one ldproxy instance, one service, many providers, many
@@ -811,14 +814,71 @@ unless the result declares otherwise. Documented assumption.
    now. Note: rewriting the shared `ump-results.yml` triggers a reload of the
    whole service; ldproxy handles this hot-reload gracefully — accepted for v1.
    Restarting the pod per job is explicitly rejected.
-8. **ConfigMaps vs File share** — per-job entity YAML and gpkg files are dynamic
-   and unbounded → they belong on the **shared Azure File share**, not
-   ConfigMaps. ConfigMaps are reserved for *static* global ldproxy config (auth
-   provider, store mode). Documented to avoid the "configmap per job" trap.
-9. **Cleanup** — `delete(job_id)` removes the gpkg + provider file and
-   deregisters the collection from `ump-results.yml` (under the registry lock),
-   then relies on auto-reload. Wire into anonymous-job/expiry cleanup (mirrors
-   the old `geoserver.delete_job_results` behavior in `old_src/ump/geoserver/`).
+8. **ConfigMaps vs File share — revised understanding** — the previous note
+   said "ConfigMaps only for static global config". That is now revised:
+   - **GeoPackage files** are binary and can be multi-MB → always on the
+     **Azure File share**, never in a ConfigMap.
+   - **ldproxy entity YAMLs** (provider + service) are small text files →
+     environment-dependent:
+     - *Local / Docker*: written to the filesystem path under
+       `UMP_RESULTSTORE_LDPROXY_ROOTPATH` (fast, no API dependency).
+     - *Kubernetes*: created/patched as **Kubernetes ConfigMaps** via the
+       k8s API (see concern 10). The ConfigMaps are mounted as files into
+       the ldproxy pod via a projected volume; ldproxy sees them as ordinary
+       files and auto-reloads.
+   The backend is selected at startup via `UMP_RESULTSTORE_CONFIG_BACKEND`.
+9. **Cleanup** — `delete(job_id)` removes the gpkg from the file share,
+   deletes the provider entity (file or ConfigMap), and deregisters the
+   collection from the service entity (file patch or ConfigMap patch),
+   then relies on auto-reload. Wire into anonymous-job/expiry cleanup.
+10. **Kubernetes ConfigMap backend — design and hazards** — when
+    `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`, entity writes go through
+    `K8sConfigMapEntityConfigBackend`, which uses the official
+    `kubernetes` Python client (in-cluster `ServiceAccount` credentials).
+
+    *Per-job provider entity*: each job gets its own ConfigMap named
+    `ump-ldproxy-provider-{job_uuid}` with a single data key
+    `{job_uuid}.yml`. Create-or-replace is idempotent and has no
+    concurrency conflict (one writer, one key).
+
+    *Shared service entity* (`ump-results.yml`): stored in one ConfigMap
+    named `ump-ldproxy-service`. Adding/removing a collection requires a
+    read-modify-write of this ConfigMap. The k8s API enforces optimistic
+    concurrency via `resourceVersion`: patch with the version read; if
+    another UMP pod patched it first the API returns 409 Conflict → retry
+    the read-modify-write loop (typically 1-2 retries under normal load).
+    This replaces the file-based advisory lock needed for the filesystem
+    backend — the k8s API server is the single serialisation point.
+    Bootstrap (create if absent) on UMP startup.
+
+    *RBAC*: the UMP `ServiceAccount` needs `get`, `create`, `patch`,
+    `delete` on `configmaps` in the ldproxy namespace. Document as a
+    required Helm values addition.
+
+    *Volume mount — how ldproxy sees the ConfigMaps as files:* two viable
+    approaches, both avoid a sidecar:
+
+    - **Directory volume mount** (preferred): mount the ConfigMap as a plain
+      `volume` / `volumeMount` in the ldproxy pod without `subPath` (i.e.
+      mount the entire ConfigMap as a directory). The kubelet sync loop
+      (default every 60 s, tunable via `--sync-frequency`) automatically
+      propagates updates to mounted files and also picks up new keys added
+      to an existing ConfigMap. A new provider ConfigMap created by UMP is
+      therefore picked up without any pod restart.
+
+    - **Pre-deployed static projected volume with pre-filled YAML literal**:
+      deploy a skeleton ConfigMap for the service entity and one per
+      pre-allocated provider slot via ArgoCD. Mount via projected volume.
+      UMP only ever *patches* (updates) these pre-existing ConfigMaps — it
+      never creates new ones. Kubelet propagates updates as above. Trade-off:
+      requires pre-provisioning slots before jobs arrive, and caps
+      simultaneous stored results to the number of pre-allocated slots. Only
+      viable if the result set is bounded and known in advance.
+
+    Recommended: **directory volume mount**. The kubelet propagation delay
+    (up to ~60 s) between ConfigMap write and ldproxy seeing the file is
+    acceptable given that result storage is a background post-completion step.
+    Document as a Kubernetes deployment prerequisite.
 
 #### Security (result access)
 
@@ -843,8 +903,16 @@ Settings (`src/ump/core/settings.py`):
 - `UMP_RESULTSTORE_LDPROXY_BASE_URL` — public base for ref links, ending in
   `/ump-results` (reverse-proxied ldproxy).
 - `UMP_RESULTSTORE_LDPROXY_ROOTPATH` — mounted store root (Azure File share /
-  local dir).
+  local dir). Required for both backends (gpkg always lives here).
 - `UMP_RESULTSTORE_LDPROXY_NATIVE_CRS` — default `4326`.
+- `UMP_RESULTSTORE_CONFIG_BACKEND` — `"filesystem"` (default) | `"k8s"`.
+  Selects where entity YAML files are written.
+- `UMP_RESULTSTORE_K8S_NAMESPACE` — Kubernetes namespace that holds the ldproxy
+  ConfigMaps. Required when backend is `k8s`.
+- `UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP` — name of the shared service
+  ConfigMap, default `"ump-ldproxy-service"`.
+- `UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX` — name prefix for per-job provider
+  ConfigMaps, default `"ump-ldproxy-provider-"`.
 
 Startup validation (Feature VIII rules, enforced at config load):
 - `emulate-ref` / `emulate-ref-only` without a configured store → **error**.
@@ -858,6 +926,10 @@ well-maintained). Adds a non-trivial native dependency to the UMP image;
 flagged as a deliberate decision. Alternative (raw `fiona`) noted but not
 preferred.
 
+Kubernetes entity config backend needs the **`kubernetes`** Python client
+(`kubernetes` on PyPI). Added as an optional/conditional dependency; only
+required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
+
 #### Implementation steps (sequenced, defensive)
 
 | # | Step | Depends on |
@@ -868,17 +940,20 @@ preferred.
 | V-2 | `ResultStorageCoordinator` (core, decide-fetch-store-linkinject) | V-0a/b, V-1 |
 | V-3 | `atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir | V-1 |
 | V-4 | `ldproxy_entities` (provider YAML + one collection block from a FeatureCollection) | V-3 |
-| V-5 | `service_registry` (locked read-modify-write of shared `ump-results.yml`, bootstrap-if-missing) | V-4 |
-| V-6 | `LdproxyResultStorage` adapter wiring 3-5 together, atomic ordering | V-3, V-4, V-5 |
+| V-5a | `EntityConfigBackendPort` + `FilesystemEntityConfigBackend` (write entity YAMLs to disk) | V-4 |
+| V-5b | `K8sConfigMapEntityConfigBackend` (write entity YAMLs as ConfigMaps, retry on 409) | V-4 |
+| V-5c | `service_registry` (locked read-modify-write of shared service entity, works over both backends) | V-5a |
+| V-6 | `LdproxyResultStorage` adapter wiring 3-5 together, atomic ordering | V-3, V-4, V-5c |
 | V-7 | `ResultStorageObserver` (eager trigger on `on_job_completed`) | V-2 |
 | V-8 | Compose in `asgi.py`; inject port + coordinator + observer + registry lock | V-2, V-6, V-7 |
 | V-9 | `delete()` + cleanup wiring (anonymous/expiry, deregister collection) | V-6 |
 | V-10 | Ref links in statusInfo `links` + `GET /results` returns 302/link | V-2 |
 
-Steps V-3, V-4 and V-5 are pure/file-only and fully unit-testable against a
-temp directory with no ldproxy running — that is where most of the defensive
-test coverage goes (schema derivation, atomic ordering, concurrent registry
-edits under the lock, malformed/empty/mixed-geometry FeatureCollections).
+Steps V-3, V-4 and V-5a/c are pure/file-only and fully unit-testable against a
+temp directory with no ldproxy or Kubernetes running — that is where most of
+the defensive test coverage goes (schema derivation, atomic ordering, concurrent
+registry edits under the lock, malformed/empty/mixed-geometry FeatureCollections,
+409-retry loop). V-5b is tested against a mocked `kubernetes` client.
 
 #### Decisions (confirmed by user 2026-07-24)
 
@@ -1161,6 +1236,7 @@ This proposal addresses `result-storage`, `transmission-mode-policy`, and `respo
 
 For each process, the `providers.yaml` file explicitly configures how the UMP handles the
 `transmissionMode` parameter of the OGC standard. The parameter can take four possible values:
+
 ---
 
 ##### `pass-through`
