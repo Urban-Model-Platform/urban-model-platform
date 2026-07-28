@@ -82,7 +82,6 @@ async def test_e2e_forward_statusinfo_with_real_adapter():
 
     test_config = JobManagerConfig(
         poll_interval=0.01,
-        poll_timeout=1,
         rewrite_remote_links=True,
         inline_inputs_size_limit=64 * 1024,
         verify_remote_results=False,

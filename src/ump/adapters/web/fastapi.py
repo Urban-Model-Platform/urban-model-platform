@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from ump.core.exceptions import OGCProcessException
 from ump.core.interfaces.auth import AuthContext, AuthPort
@@ -162,7 +163,7 @@ def create_app(
                 if hasattr(job_manager, "shutdown"):
                     await job_manager.shutdown()
 
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(lifespan=lifespan, redirect_slashes=False)
 
     # ── CORS middleware ───────────────────────────────────────────────────────
     # Only added when origins are explicitly configured.  CORSMiddleware must be
@@ -181,6 +182,11 @@ def create_app(
             allow_methods=["*"],
             allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
         )
+
+    app.add_middleware(
+        ProxyHeadersMiddleware, # type: ignore[arg-type]
+        trusted_hosts="*",
+    )
 
     # Correlation ID middleware: assigns per-request id (header override) and exposes it to logging
     @app.middleware("http")

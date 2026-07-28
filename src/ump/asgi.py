@@ -66,9 +66,16 @@ def construct_database_url() -> str:
             "UMP_DATABASE_HOST and UMP_DATABASE_NAME "
             "must be set if UMP_DATABASE_URL is not provided."
         )
+
+    user: str = app_settings.UMP_DATABASE_USER
+    password: str = app_settings.UMP_DATABASE_PASSWORD.get_secret_value() if app_settings.UMP_DATABASE_PASSWORD else ""
+    host: str = app_settings.UMP_DATABASE_HOST
+    port: int = app_settings.UMP_DATABASE_PORT
+    name: str = app_settings.UMP_DATABASE_NAME
+
     return (
-        f"postgresql+asyncpg://{app_settings.UMP_DATABASE_USER}:{app_settings.UMP_DATABASE_PASSWORD}"
-        f"@{app_settings.UMP_DATABASE_HOST}/{app_settings.UMP_DATABASE_NAME}"
+        f"postgresql+asyncpg://{user}:{password}"
+        f"@{host}:{port}/{name}"
     )
 
 def _process_manager_factory(client):

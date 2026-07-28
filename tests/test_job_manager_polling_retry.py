@@ -24,7 +24,6 @@ def test_config():
     """Create test configuration."""
     return JobManagerConfig(
         poll_interval=0.01,
-        poll_timeout=1.0,
         rewrite_remote_links=True,
         inline_inputs_size_limit=64 * 1024,
         forward_max_retries=3,
