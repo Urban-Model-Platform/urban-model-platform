@@ -62,6 +62,25 @@ class ProcessConfig(BaseModel):
             "graph-properties."
         ),
     )
+    ttw_job_done: float | None = Field(
+        default=None,
+        alias="ttw-job-done",
+        description=(
+            "Time to wait (in seconds) until remote job is finished. "
+            "If not set, falls back to provider-level ttw_job_done. "
+            "Allows per-process fine-tuning for processes with different "
+            "computational footprints on the same provider."
+        ),
+    )
+    poll_interval: float | None = Field(
+        default=None,
+        alias="poll-interval",
+        description=(
+            "Interval in seconds between remote status polling requests. "
+            "If not set, falls back to JobManagerConfig default. "
+            "Allows per-process tuning for different computational characteristics."
+        ),
+    )
     anonymous_access: bool = Field(
         default=False,
         alias="anonymous-access",
@@ -116,9 +135,14 @@ class ProviderConfig(BaseModel):
             "It should be a valid HTTP or HTTPS URL with path to the landing page."
         )
     )
-    ttw_job_done: int = Field(
-        default=300,
-        description=("Time to wait until job is finished, in seconds."),
+    ttw_job_done: float = Field(
+        default=1500.0,
+        alias="ttw-job-done",
+        description=(
+            "Time to wait (in seconds) until remote job is finished. "
+            "Serves as the provider-wide default when ProcessConfig.ttw_job_done "
+            "is not set. Allows per-provider customization of timeout behavior."
+        ),
     )
     authentication: AuthConfig = Field(
         default_factory=NoAuthConfig,
