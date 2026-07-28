@@ -1,0 +1,297 @@
+"""GeoPackage writer for the ldproxy result storage adapter.
+
+Responsibility: take raw bytes in a supported geo-feature format and write
+them to a GeoPackage file on disk.  Also derive the layer schema (geometry
+type + property types) that the ldproxy provider YAML builder (V-4) needs.
+
+Supported input formats
+-----------------------
+application/geo+json    GeoJSON FeatureCollection — geopandas reads natively.
+application/flatgeobuf  FlatGeobuf FeatureCollection — pyogrio reads natively.
+
+Any other media_type raises ``UnsupportedResultError``.
+
+Why GeoPackage?
+---------------
+ldproxy supports GeoPackage as a native GPKG provider backend.  Every stored
+result gets its own ``.gpkg`` file and its own ldproxy provider entity.
+Using one file per job keeps the store simple to clean up and avoids
+table-name collisions inside a shared database.
+
+Why this module is separate from the ldproxy adapter
+----------------------------------------------------
+The conversion from raw bytes → GeoPackage is a pure, independently testable
+operation.  It has no knowledge of ldproxy entity files, ConfigMaps, or the
+ldproxy URL.  Tests can run it over a temp directory with no ldproxy installed.
+"""
+
+from __future__ import annotations
+
+import io
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+import geopandas as gpd
+import pandas as pd
+
+from ump.core.interfaces.result_storage import UnsupportedResultError
+from ump.adapters.result_storage.atomic_fs import atomic_write_path
+
+logger = logging.getLogger(__name__)
+
+# Media types this writer can convert to GeoPackage.
+# The key is the normalised IANA type; the value is the driver name passed to
+# geopandas/pyogrio when reading.
+SUPPORTED_MEDIA_TYPES: dict[str, str] = {
+    "application/geo+json": "GeoJSON",
+    "application/flatgeobuf": "FlatGeobuf",
+}
+
+# Mapping from pandas dtype kinds to ldproxy property type strings.
+# Used by the schema derivation step so V-4 (ldproxy_entities) can emit
+# correct YAML without re-reading the GeoPackage.
+_DTYPE_TO_LDPROXY: dict[str, str] = {
+    "i": "INTEGER",   # signed integer (int8 … int64)
+    "u": "INTEGER",   # unsigned integer
+    "f": "FLOAT",     # float32, float64
+    "b": "BOOLEAN",   # bool
+    "M": "DATETIME",  # datetime64
+    "O": "STRING",    # object (string, mixed — treat as STRING)
+    "S": "STRING",    # bytes string (rare)
+    "U": "STRING",    # unicode string
+}
+
+# Mapping from Shapely geometry type names to ldproxy geometryType strings.
+_GEOM_TYPE_TO_LDPROXY: dict[str, str] = {
+    "Point": "POINT",
+    "MultiPoint": "MULTI_POINT",
+    "LineString": "LINE_STRING",
+    "MultiLineString": "MULTI_LINE_STRING",
+    "Polygon": "POLYGON",
+    "MultiPolygon": "MULTI_POLYGON",
+    "GeometryCollection": "GEOMETRY",
+}
+
+
+@dataclass(frozen=True)
+class GpkgLayerSchema:
+    """Describes the schema of one layer inside a written GeoPackage.
+
+    Used by V-4 (ldproxy_entities) to generate the provider YAML without
+    having to re-open the GeoPackage.
+
+    Attributes:
+        geometry_type: ldproxy geometry type string, e.g. ``"MULTI_POLYGON"``.
+                       ``"GEOMETRY"`` is used for mixed or unknown types.
+        properties:    Mapping of property name → ldproxy type string.
+                       Does not include the ``id`` or ``geometry`` pseudo-properties
+                       (those are handled separately in the provider YAML builder).
+        feature_count: Number of features written.  Zero means the
+                       FeatureCollection was empty; the caller should raise or
+                       skip storage accordingly.
+        crs_epsg:      EPSG code of the CRS the GeoDataFrame was written in.
+    """
+
+    geometry_type: str
+    properties: dict[str, str]
+    feature_count: int
+    crs_epsg: int
+
+
+def write_to_gpkg(
+    body_bytes: bytes,
+    media_type: str,
+    layer_name: str,
+    output_path: Path,
+    target_crs_epsg: int = 4326,
+) -> GpkgLayerSchema:
+    """Convert *body_bytes* to a GeoPackage file and return the layer schema.
+
+    This is the main entry point for the adapter.  It does four things:
+
+    1. Validate that the media_type is supported.
+    2. Read the bytes into a GeoDataFrame via geopandas/pyogrio.
+    3. Reproject to *target_crs_epsg* if the source CRS differs.
+    4. Write the GeoDataFrame to *output_path* atomically (temp-file + rename).
+
+    Args:
+        body_bytes:      Raw feature data in a supported format.
+        media_type:      IANA media type of *body_bytes* (e.g. ``application/geo+json``).
+        layer_name:      Name of the layer inside the GeoPackage.  Also used as
+                         the ldproxy ``featureType`` identifier.
+        output_path:     Destination ``.gpkg`` file path.  The parent directory
+                         must already exist.  Written atomically.
+        target_crs_epsg: EPSG code to reproject to if necessary.
+                         Defaults to 4326 (WGS84) because OGC GeoJSON is WGS84
+                         by RFC 7946 and the ldproxy provider defaults to 4326.
+
+    Returns:
+        A ``GpkgLayerSchema`` describing the written layer.
+
+    Raises:
+        UnsupportedResultError: if *media_type* is not in the supported list,
+                                or if the FeatureCollection is empty.
+        ResultStorageError:     if the GeoDataFrame cannot be read or the file
+                                cannot be written (re-raised from underlying I/O).
+    """
+    normalised_type = _normalise_media_type(media_type)
+    driver = _require_supported_type(normalised_type)
+
+    gdf = _read_geodataframe(body_bytes, driver, layer_name)
+
+    if gdf.empty:
+        raise UnsupportedResultError(
+            f"Layer '{layer_name}': FeatureCollection contains no features. "
+            "An empty GeoPackage cannot be registered with ldproxy."
+        )
+
+    gdf = _ensure_crs(gdf, target_crs_epsg, layer_name)
+
+    schema = _derive_schema(gdf, target_crs_epsg)
+
+    _write_gpkg(gdf, layer_name, output_path)
+
+    logger.debug(
+        "[gpkg] wrote %d features to %s (layer=%s geometry=%s)",
+        schema.feature_count,
+        output_path.name,
+        layer_name,
+        schema.geometry_type,
+    )
+    return schema
+
+
+# ---------------------------------------------------------------------------
+# Internal steps — each does one thing and is independently testable
+# ---------------------------------------------------------------------------
+
+
+def _normalise_media_type(media_type: str) -> str:
+    """Strip parameters (e.g. ``; charset=utf-8``) and lower-case."""
+    return media_type.split(";")[0].strip().lower()
+
+
+def _require_supported_type(normalised_type: str) -> str:
+    """Return the driver name for *normalised_type*, or raise UnsupportedResultError."""
+    driver = SUPPORTED_MEDIA_TYPES.get(normalised_type)
+    if driver is None:
+        supported = ", ".join(sorted(SUPPORTED_MEDIA_TYPES))
+        raise UnsupportedResultError(
+            f"Media type '{normalised_type}' is not supported for GeoPackage "
+            f"conversion.  Supported types: {supported}."
+        )
+    return driver
+
+
+def _read_geodataframe(body_bytes: bytes, driver: str, layer_name: str) -> gpd.GeoDataFrame:
+    """Parse *body_bytes* into a GeoDataFrame using pyogrio as the I/O engine.
+
+    pyogrio auto-detects the format from the content's magic bytes, so we do
+    not pass the driver explicitly (pyogrio emits a warning if we do).
+    """
+    try:
+        gdf = gpd.read_file(io.BytesIO(body_bytes), engine="pyogrio")
+    except Exception as exc:
+        from ump.core.interfaces.result_storage import ResultStorageError
+        raise ResultStorageError(
+            f"Layer '{layer_name}': could not parse {driver} bytes: {exc}"
+        ) from exc
+    return gdf
+
+
+def _ensure_crs(
+    gdf: gpd.GeoDataFrame,
+    target_epsg: int,
+    layer_name: str,
+) -> gpd.GeoDataFrame:
+    """Reproject *gdf* to *target_epsg* if necessary.
+
+    OGC GeoJSON is always WGS84 by RFC 7946 so reprojection is a no-op for
+    the common case.  FlatGeobuf may carry an explicit CRS that differs.
+    If the GeoDataFrame has no CRS we assume WGS84 (the RFC 7946 default).
+    """
+    if gdf.crs is None:
+        logger.debug(
+            "[gpkg] layer '%s' has no CRS — assuming EPSG:%d (RFC 7946 default)",
+            layer_name,
+            target_epsg,
+        )
+        return gdf.set_crs(epsg=target_epsg)
+
+    if gdf.crs.to_epsg() == target_epsg:
+        return gdf  # already correct
+
+    logger.debug(
+        "[gpkg] layer '%s' reprojecting %s → EPSG:%d",
+        layer_name,
+        gdf.crs.to_string(),
+        target_epsg,
+    )
+    return gdf.to_crs(epsg=target_epsg)
+
+
+def _derive_schema(gdf: gpd.GeoDataFrame, crs_epsg: int) -> GpkgLayerSchema:
+    """Inspect *gdf* and return the schema needed for ldproxy provider YAML.
+
+    Geometry type: determined by the unique Shapely geometry type names present
+    in the geometry column.  Mixed types collapse to ``"GEOMETRY"``.
+
+    Property types: each non-geometry column is mapped to an ldproxy type string
+    via ``_DTYPE_TO_LDPROXY``.  Columns whose dtype kind is not in the map
+    default to ``"STRING"`` (safe / human-readable fallback).
+    """
+    geometry_type = _detect_geometry_type(gdf)
+    properties = _detect_property_types(gdf)
+    return GpkgLayerSchema(
+        geometry_type=geometry_type,
+        properties=properties,
+        feature_count=len(gdf),
+        crs_epsg=crs_epsg,
+    )
+
+
+def _detect_geometry_type(gdf: gpd.GeoDataFrame) -> str:
+    """Return the ldproxy geometry type string for the features in *gdf*."""
+    unique_types = set(
+        geom.geom_type
+        for geom in gdf.geometry
+        if geom is not None and not _is_null(geom)
+    )
+
+    if len(unique_types) == 1:
+        geom_type_name = next(iter(unique_types))
+        return _GEOM_TYPE_TO_LDPROXY.get(geom_type_name, "GEOMETRY")
+
+    # Zero non-null geometries or mixed types → generic GEOMETRY
+    return "GEOMETRY"
+
+
+def _detect_property_types(gdf: gpd.GeoDataFrame) -> dict[str, str]:
+    """Map non-geometry column names to ldproxy type strings."""
+    properties: dict[str, str] = {}
+    for col in gdf.columns:
+        if col == gdf.geometry.name:
+            continue  # handled separately in the provider YAML
+        dtype = gdf[col].dtype
+        ldproxy_type = _DTYPE_TO_LDPROXY.get(dtype.kind, "STRING")
+        properties[col] = ldproxy_type
+    return properties
+
+
+def _write_gpkg(gdf: gpd.GeoDataFrame, layer_name: str, output_path: Path) -> None:
+    """Write *gdf* to *output_path* as a GeoPackage layer, atomically."""
+    with atomic_write_path(output_path) as tmp:
+        gdf.to_file(str(tmp), driver="GPKG", layer=layer_name, engine="pyogrio")
+
+
+def _is_null(geom: object) -> bool:
+    """Return True if *geom* is a null/None/NaN geometry value."""
+    try:
+        import math
+        if isinstance(geom, float) and math.isnan(geom):
+            return True
+    except TypeError:
+        pass
+    return geom is None
