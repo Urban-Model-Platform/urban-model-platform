@@ -63,7 +63,6 @@ config:
   apiServerWorkers: "4"
   apiServerPort: "8000"
   remoteJobStatusRequestInterval: "5"
-  remoteJobTtw: ""
   jobDeleteInterval: "240"
   jobStore: "memory"
   rewriteRemoteLinks: "true"

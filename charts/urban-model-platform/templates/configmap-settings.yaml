@@ -11,7 +11,6 @@ data:
   UMP_API_SERVER_URL_PREFIX: {{ .Values.config.apiServerUrlPrefix | quote }}
   UMP_API_SERVER_PORT: {{ .Values.config.apiServerPort | quote }}
   UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: {{ .Values.config.remoteJobStatusRequestInterval | quote }}
-  UMP_REMOTE_JOB_TTW: {{ .Values.config.remoteJobTtw | quote }}
   UMP_JOB_DELETE_INTERVAL: {{ .Values.config.jobDeleteInterval | quote }}
   UMP_API_SERVER_WORKERS: {{ .Values.config.apiServerWorkers | quote }}
   UMP_JOB_STORE: {{ .Values.config.jobStore | quote }}
