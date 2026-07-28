@@ -46,9 +46,10 @@ from ump.core.models.job import StatusCode
 
 
 class TestProviderConfig:
-    def __init__(self, name: str, url: str):
+    def __init__(self, name: str, url: str, ttw_job_done: int = 300):
         self.name = name
         self.url = url
+        self.ttw_job_done = ttw_job_done
         self.processes = []  # minimal attribute surface used by JobManager
 
     # Marker indicating this is not a production adapter (test helper)
@@ -56,8 +57,14 @@ class TestProviderConfig:
 
 
 class TestProvidersAdapter(ProvidersPort):
-    def __init__(self, provider_name: str = "prov", url: str = "http://provider.test"):
-        self._provider = TestProviderConfig(provider_name, url)
+    def __init__(
+        self,
+        provider_name: str = "prov",
+        url: str = "http://provider.test",
+        ttw_job_done: int = 300,
+    ):
+        self._provider = TestProviderConfig(provider_name, url, ttw_job_done)
+        self._ttw_job_done = ttw_job_done
 
     # Marker indicating this is not a production adapter (test helper)
     test = False
@@ -72,10 +79,14 @@ class TestProvidersAdapter(ProvidersPort):
     def get_provider(self, provider_name: str):
         return self._provider
 
-    def get_process_config(
-        self, provider_name: str, process_id: str
-    ):  # pragma: no cover
-        return None
+    def get_process_config(self, provider_name: str, process_id: str):
+        # Return a minimal test process config with ttw_job_done inherited from provider
+        class TestProcessConfig:
+            def __init__(self, ttw_job_done=None):
+                self.ttw_job_done = ttw_job_done  # None means use provider default
+                self.poll_interval = None
+
+        return TestProcessConfig(ttw_job_done=None)  # pragma: no cover
 
     def list_providers(self):
         return [self._provider.name]
@@ -147,6 +158,7 @@ class TestHttpClientAdapter(HttpClientPort):
                 raise resp
             # Serialize the dict response to bytes as the real adapter would
             import json as _json
+
             return _json.dumps(resp).encode(), "application/json"
         return b"{}", "application/json"
 
@@ -177,7 +189,8 @@ def make_manager(
         post_response: POST response for http client
         get_responses: List of GET responses for http client
         retry_port: Optional retry adapter
-        config_overrides: Dict of config overrides (e.g., {'poll_interval': 0.01})
+        config_overrides: Dict of config overrides (e.g., {'poll_interval': 0.01, 'ttw_job_done': 0.05})
+            Note: 'ttw_job_done' is passed to providers, not JobManagerConfig
     """
     from ump.core.managers.observers import (
         PollingSchedulerObserver,
@@ -185,7 +198,12 @@ def make_manager(
         StatusHistoryObserver,
     )
 
-    providers_port = TestProvidersAdapter()
+    # Extract ttw_job_done from overrides if present (it's provider-level config, not manager config)
+    ttw_job_done = 300  # default
+    if config_overrides and "ttw_job_done" in config_overrides:
+        ttw_job_done = config_overrides.pop("ttw_job_done")
+
+    providers_port = TestProvidersAdapter(ttw_job_done=ttw_job_done)
     validator = TestProcessIdValidator()
     repo = InMemoryJobRepository()
     http_client = TestHttpClientAdapter(
@@ -195,7 +213,6 @@ def make_manager(
     # Create config with test-friendly defaults
     config_params = {
         "poll_interval": 0.01,  # Fast polling for tests
-        "poll_timeout": None,  # No timeout by default
         "rewrite_remote_links": True,
         "inline_inputs_size_limit": 64 * 1024,
     }
@@ -266,7 +283,7 @@ async def test_immediate_results_synthesis_success():
 @pytest.mark.asyncio
 async def test_poll_timeout_marks_job_failed():
     """Unit: JobManager polling loop (_poll_loop)
-    Purpose: Validate enforcement of global polling timeout `UMP_REMOTE_JOB_TTW`.
+    Purpose: Validate enforcement of process/provider timeout (ttw_job_done).
     Scenario: Initial remote snapshot is running; polling exceeds timeout. Job
     should transition to failed with explanatory message.
     Assertions:
@@ -283,7 +300,7 @@ async def test_poll_timeout_marks_job_failed():
             "type": "process",
         },
     }
-    mgr, repo, _ = make_manager(post_response, config_overrides={"poll_timeout": 0.05})
+    mgr, repo, _ = make_manager(post_response, config_overrides={"ttw_job_done": 0.05})
     resp = await mgr.run_execution_pipeline("prov:procB", {"inputs": {"y": 2}}, {})
     job_id = resp["headers"]["Location"].split("/")[-1]
     # wait past timeout
