@@ -77,6 +77,11 @@ asyncpg = "^0.30"
 greenlet = "^3.5.3"
 python-jose = {version = "^3.3.0", extras = ["cryptography"]}
 rich = "^15.0.0"
+# Feature V: result storage — GeoPackage writing for the ldproxy adapter.
+# geopandas reads GeoJSON and FlatGeobuf; pyogrio is the fast GDAL-backed I/O
+# engine that geopandas delegates to for GeoPackage writes.
+geopandas = "^1.0"
+pyogrio = "^0.13"
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests
