@@ -749,9 +749,9 @@ class JobManager:
             return None
 
         try:
-            provider_name, raw_process_id = await self._resolve_provider(job.process_id)
+            provider_name, _ = await self._resolve_provider(job.process_id)
             process_config = self._providers.get_process_config(
-                provider_name, raw_process_id
+                provider_name, job.process_id
             )
 
             # Check process-level override first
