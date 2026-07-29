@@ -52,7 +52,8 @@ class _ConfigFileHandler(FileSystemEventHandler):
 class ProviderConfigFileAdapter(ProvidersPort):
     def __init__(self, config_path: str):
         self._config_path = config_path
-        self._lock = threading.Lock()
+        # RLock prevents self-deadlock when methods call each other while locked.
+        self._lock = threading.RLock()
         self._providers: ProvidersConfig = ProvidersConfig(providers=[])
 
         self.load_providers()
@@ -141,10 +142,21 @@ class ProviderConfigFileAdapter(ProvidersPort):
         self, provider_name: str, process_id: str
     ) -> Optional[ProcessConfig]:
         with self._lock:
-            provider = self.get_provider(provider_name)
+            provider = None
+            for candidate in self._providers.providers:
+                if candidate.name == provider_name:
+                    provider = candidate
+                    break
+
             if provider:
                 for process in provider.processes:
-                    if process.id == process_id:
+                    configured_id = process.id
+                    canonical_id = (
+                        configured_id
+                        if configured_id.startswith(f"{provider_name}:")
+                        else f"{provider_name}:{configured_id}"
+                    )
+                    if process_id == canonical_id:
                         return process
             return None
 
@@ -154,14 +166,37 @@ class ProviderConfigFileAdapter(ProvidersPort):
 
     def get_processes(self, provider_name: str) -> List[str]:
         with self._lock:
-            provider = self.get_provider(provider_name)
+            provider = None
+            for candidate in self._providers.providers:
+                if candidate.name == provider_name:
+                    provider = candidate
+                    break
             if provider:
-                return [process.id for process in provider.processes]
+                return [
+                    process.id
+                    if process.id.startswith(f"{provider_name}:")
+                    else f"{provider_name}:{process.id}"
+                    for process in provider.processes
+                ]
             return []
 
     def check_process_availability(self, provider_name: str, process_id: str) -> bool:
         with self._lock:
-            process = self.get_process_config(provider_name, process_id)
-            if process:
-                return not process.exclude
+            provider = None
+            for candidate in self._providers.providers:
+                if candidate.name == provider_name:
+                    provider = candidate
+                    break
+            if not provider:
+                return False
+
+            for process in provider.processes:
+                configured_id = process.id
+                canonical_id = (
+                    configured_id
+                    if configured_id.startswith(f"{provider_name}:")
+                    else f"{provider_name}:{configured_id}"
+                )
+                if process_id == canonical_id:
+                    return not process.exclude
             return False

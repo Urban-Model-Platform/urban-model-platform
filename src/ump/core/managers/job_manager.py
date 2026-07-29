@@ -755,12 +755,12 @@ class JobManager:
             )
 
             # Check process-level override first
-            if process_config.ttw_job_done is not None:
+            if process_config and process_config.ttw_job_done is not None:
                 return process_config.ttw_job_done
 
             # Fall back to provider-level default
             provider_config = self._providers.get_provider(provider_name)
-            return provider_config.ttw_job_done
+            return provider_config.ttw_job_done if provider_config else None
         except Exception as exc:
             # If config resolution fails, log and return None (no timeout)
             logger.warning(
