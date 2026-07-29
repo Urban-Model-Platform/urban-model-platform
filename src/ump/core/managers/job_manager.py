@@ -749,18 +749,18 @@ class JobManager:
             return None
 
         try:
-            provider_name, _ = await self._resolve_provider(job.process_id)
+            provider_name, raw_process_id = await self._resolve_provider(job.process_id)
             process_config = self._providers.get_process_config(
-                provider_name, job.process_id
+                provider_name, raw_process_id
             )
 
             # Check process-level override first
-            if process_config.ttw_job_done is not None:
+            if process_config and process_config.ttw_job_done is not None:
                 return process_config.ttw_job_done
 
             # Fall back to provider-level default
             provider_config = self._providers.get_provider(provider_name)
-            return provider_config.ttw_job_done
+            return provider_config.ttw_job_done if provider_config else None
         except Exception as exc:
             # If config resolution fails, log and return None (no timeout)
             logger.warning(
