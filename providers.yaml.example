@@ -2,15 +2,43 @@
 #
 # Copy this file to providers.yaml and adjust for your environment.
 # Each entry under `providers` points to one OGC API Processes server.
-# Only processes listed here are exposed through UMP.
-# Available authentication types: NoAuth (default), BasicAuth, ApiKey, BearerToken.
-# Available result-storage values: remote (default), geoserver.
+# Only processes listed under a provider are exposed through UMP.
+#
+# ── Provider-level fields ────────────────────────────────────────────────────
+#   name            (required) Identifier used as the process-id prefix:
+#                              <name>:<process-id>
+#   url             (required) Landing-page URL of the OGC API Processes server.
+#   ttw-job-done    Seconds to wait for a remote job to finish before marking
+#                   it failed. Provider-wide default. (default: 1500)
+#   authentication  Credentials for outbound requests to this server.
+#                   Types: NoAuth (default), BasicAuth, ApiKey, BearerToken.
+#
+# ── Process-level fields ─────────────────────────────────────────────────────
+#   id              (required) Process id as advertised by the remote server.
+#   anonymous-access  Allow unauthenticated users to execute this process.
+#                     (default: false)
+#   exclude         Hide this process from UMP even though it is configured.
+#                   (default: false)
+#   result-storage  Where to store results: remote (proxy only) or ldproxy.
+#                   (default: remote)
+#   result-path     Dot-separated path to the feature collection inside the
+#                   result object, e.g. "result.features". Used with ldproxy.
+#   graph-properties  Coordinate paths for graph-based visualisation (ldproxy).
+#     root-path     Dot-separated path to the feature collection.
+#     x-path        Dot-separated path to the x-coordinate field.
+#     y-path        Dot-separated path to the y-coordinate field.
+#   ttw-job-done    Per-process override of the provider-level ttw-job-done.
+#   poll-interval   Seconds between remote status polls for this process.
+#                   Falls back to the global UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL.
+#   deterministic   Cache results keyed on inputs when true. (default: false)
+#   description     Optional human-readable description (not forwarded to clients).
+#   version         Optional version hint (not forwarded to clients).
 
 providers:
 
-  # Mock server (local development, no infrastructure required)
-  # Start locally:  PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001
-  # Docker Compose: docker compose -f docker-compose-dev.yaml up mock-ogc-server
+  # ── Mock server (local development, no infrastructure required) ─────────────
+  # Start:  PYTHONPATH=scripts .venv/bin/uvicorn scripts.mock_ogc_server:app --port 5001
+  # Docker: docker compose -f docker-compose-dev.yaml up mock-ogc-server
   - name: mock
     url: "http://localhost:5001"
     processes:
@@ -23,25 +51,37 @@ providers:
       - id: failing-job
         anonymous-access: true
 
-  # Real model server with HTTP Basic auth
+  # ── HTTP Basic auth ─────────────────────────────────────────────────────────
   - name: example
     url: "http://modelserver:5000"
+    ttw-job-done: 1500
     authentication:
       type: "BasicAuth"
       user: "user"
       password: "password"
     processes:
       - id: hello-world
-        result-storage: "remote"
         anonymous-access: true
       - id: squareroot
-        result-storage: "remote"
         anonymous-access: false
+        ttw-job-done: 300      # override provider default for this process
+        poll-interval: 5
+      - id: slow-analysis
+        anonymous-access: false
+        ttw-job-done: 7200
+        deterministic: true
       - id: hello-geo-world
-        result-storage: "geoserver"
         anonymous-access: true
+        result-storage: "ldproxy"
+        result-path: "result.features"
+        graph-properties:
+          root-path: "result.features"
+          x-path: "properties.x"
+          y-path: "properties.y"
+      - id: legacy-process
+        exclude: true          # configured but not exposed
 
-  # Real model server with API key header
+  # ── API key header ──────────────────────────────────────────────────────────
   - name: another-server
     url: "http://anotherserver:8080"
     authentication:
@@ -51,4 +91,21 @@ providers:
     processes:
       - id: some-process
         anonymous-access: false
-        exclude: false
+
+  # ── Static bearer token ─────────────────────────────────────────────────────
+  - name: token-server
+    url: "http://tokenserver:9000"
+    authentication:
+      type: "BearerToken"
+      token: "my-static-token"
+    processes:
+      - id: some-process
+        anonymous-access: false
+
+  # ── No authentication (public server) ──────────────────────────────────────
+  - name: public-server
+    url: "http://public-ogc-server:5000"
+    # authentication: omitted → defaults to NoAuth
+    processes:
+      - id: open-process
+        anonymous-access: true

@@ -424,10 +424,19 @@ flowchart LR
 
 | Setting | Default | Impact |
 |---------|---------|--------|
-| `poll_interval` | 5.0s | Frequency of status checks |
-| `poll_timeout` | None | Max time before timeout failure |
+| `poll_interval` | 5.0s | Frequency of status checks (global default, can be overridden per-process) |
+| `ProcessConfig.ttw_job_done` | None | Max time before timeout (per-process override, optional) |
+| `ProviderConfig.ttw_job_done` | 300s | Max time before timeout (provider-wide default) |
 | `forward_max_retries` | 3 | Retry attempts for transient errors |
 | `forward_retry_base_wait` | 1.0s | Initial wait between retries |
 | `forward_retry_max_wait` | 5.0s | Maximum wait between retries |
 | `rewrite_remote_links` | True | Replace remote URLs with local |
 | `inline_inputs_size_limit` | 64KB | Max size for inline input storage |
+
+### Timeout Resolution Hierarchy
+
+When a job exceeds the time-to-wait threshold, `JobManager` marks it as failed. The timeout is resolved in this order:
+
+1. **ProcessConfig.ttw_job_done** — If set on a specific process in `providers.yaml`, use this (most specific)
+2. **ProviderConfig.ttw_job_done** — Fall back to provider-level default (300s)
+3. **No timeout** — If neither is set, job can run indefinitely (not recommended for production)

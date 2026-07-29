@@ -1,1 +1,0 @@
-Here are stored generated analysis as HTML, PDF, LaTeX, etc.

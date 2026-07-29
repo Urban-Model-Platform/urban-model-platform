@@ -732,6 +732,43 @@ class JobManager:
                 )
             )
 
+    async def _resolve_ttw(self, job: Job) -> Optional[float]:
+        """Resolve time-to-wait (TTW) for job from config hierarchy.
+
+        Resolution order:
+        1. ProcessConfig.ttw_job_done (most specific, per-process override)
+        2. ProviderConfig.ttw_job_done (provider-wide default)
+        3. None (no timeout if neither is set)
+
+        Args:
+            job: Job instance with process_id set
+
+        Returns:
+            Timeout in seconds (float), or None if no timeout configured
+        """
+        if not job.process_id:
+            return None
+
+        try:
+            provider_name, _ = await self._resolve_provider(job.process_id)
+            process_config = self._providers.get_process_config(
+                provider_name, job.process_id
+            )
+
+            # Check process-level override first
+            if process_config and process_config.ttw_job_done is not None:
+                return process_config.ttw_job_done
+
+            # Fall back to provider-level default
+            provider_config = self._providers.get_provider(provider_name)
+            return provider_config.ttw_job_done if provider_config else None
+        except Exception as exc:
+            # If config resolution fails, log and return None (no timeout)
+            logger.warning(
+                f"[job:ttw] failed to resolve ttw for job_id={job.id} process_id={job.process_id} err={exc}"
+            )
+            return None
+
     def _extract_status_info(self, body: Any) -> Optional[JobStatusInfo]:
         if not isinstance(body, dict):
             return None
@@ -754,17 +791,24 @@ class JobManager:
     async def _check_and_handle_timeout(self, job: Job) -> bool:
         """Check if job has exceeded timeout and mark as failed if so.
 
+        Resolves the timeout from the process config hierarchy:
+        1. ProcessConfig.ttw_job_done (if set, process-specific override)
+        2. ProviderConfig.ttw_job_done (provider-wide default)
+        3. None (no timeout if neither is set)
+
         Returns True if timeout was reached and job was marked failed.
         """
-        if self.config.poll_timeout is None or job.created is None:
+        ttw = await self._resolve_ttw(job)
+
+        if ttw is None or job.created is None:
             return False
 
         elapsed = (datetime.now(timezone.utc) - job.created).total_seconds()
-        if elapsed <= self.config.poll_timeout:
+        if elapsed <= ttw:
             return False
 
         logger.warning(
-            f"[job:poll] timeout reached job_id={job.id} elapsed={elapsed}s > {self.config.poll_timeout}s; marking failed"
+            f"[job:poll] timeout reached job_id={job.id} elapsed={elapsed}s > {ttw}s; marking failed"
         )
 
         old_status = (
@@ -776,7 +820,7 @@ class JobManager:
             status=StatusCode.failed,
             type="process",
             processID=job.process_id,
-            message=f"Timed out after {self.config.poll_timeout}s waiting for remote completion",
+            message=f"Timed out after {ttw}s waiting for remote completion",
             created=job.created,
             updated=datetime.now(timezone.utc),
             finished=datetime.now(timezone.utc),
