@@ -334,7 +334,7 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 | ~~V-1~~ | ~~`ResultStoragePort` + dataclasses + exceptions (core)~~ | ✅ done |
 | ~~V-2~~ | ~~`ResultStorageCoordinator` (core, decide-fetch-store-linkinject)~~ | ✅ done |
 | ~~V-3~~ | ~~`atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir~~ | ✅ done |
-| V-4 | `ldproxy_entities` (provider YAML + one collection block from a FeatureCollection) | V-3 |
+| ~~V-4~~ | ~~`ldproxy_entities` (provider YAML + one collection block from a FeatureCollection)~~ | ✅ done |
 | V-5a | `EntityConfigBackendPort` + `FilesystemEntityConfigBackend` (write entity YAMLs to disk) | V-4 |
 | V-5b | `K8sConfigMapEntityConfigBackend` (write entity YAMLs as ConfigMaps, retry on 409) | V-4 |
 | V-5c | `service_registry` (locked read-modify-write of shared service entity, works over both backends) | V-5a |

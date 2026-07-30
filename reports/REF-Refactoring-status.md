@@ -1,4 +1,6 @@
-_Last_updated: 2026-07-23
+_Last_updated: 2026-07-30: 
+⚠️ Splitted into multiple files for better maintainability and readability
+⚠️ this file islegacy and left for refernce purposes only 
 
 # Notes for the assistant
 
