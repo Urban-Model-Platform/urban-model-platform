@@ -20,6 +20,7 @@ from typing import Optional
 
 from ump.core.exceptions import OGCProcessException
 from ump.core.interfaces.auth import AuthContext
+from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 
@@ -33,8 +34,11 @@ class AuthorizationService:
     instance across requests.
     """
 
-    def __init__(self, providers: ProvidersPort) -> None:
+    def __init__(
+        self, providers: ProvidersPort, validator: ProcessIdValidatorPort
+    ) -> None:
         self._providers = providers
+        self._validator = validator
 
     def check_process_access(self, auth: AuthContext, process_id: str) -> None:
         """Allow or deny execution of *process_id* for *auth*.
@@ -96,12 +100,20 @@ class AuthorizationService:
                 return proc_cfg.anonymous_access
         return False
 
-    @staticmethod
-    def _provider_of(process_id: str) -> Optional[str]:
-        return process_id.split(":", 1)[0] if ":" in process_id else None
+    def _provider_of(self, process_id: str) -> Optional[str]:
+        """Extract the provider name from a process ID, or None for bare IDs."""
+        try:
+            provider, _ = self._validator.extract(process_id)
+            return provider
+        except ValueError:
+            return None
 
-    @staticmethod
-    def _to_canonical_id(provider_name: str, configured_id: str) -> str:
-        if configured_id.startswith(f"{provider_name}:"):
-            return configured_id
-        return f"{provider_name}:{configured_id}"
+    def _to_canonical_id(self, provider_name: str, configured_id: str) -> str:
+        """Return canonical process ID, avoiding double-prefixing."""
+        try:
+            existing_provider, _ = self._validator.extract(configured_id)
+            if existing_provider == provider_name:
+                return configured_id
+        except ValueError:
+            pass
+        return self._validator.create(provider_name, configured_id)

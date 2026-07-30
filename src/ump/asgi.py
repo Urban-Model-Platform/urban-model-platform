@@ -16,7 +16,7 @@ gets its own adapter instances (file watchers, HTTP clients, DB connections).
 import os
 
 from ump.adapters.aiohttp_client_adapter import AioHttpClientAdapter
-from ump.adapters.colon_process_id_validator import ColonProcessId
+from ump.adapters.colon_process_id_validator import ProcessIdValidator
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.adapters.jwt_auth_adapter import JwtAuthAdapter
 from ump.adapters.logging_adapter import LoggingAdapter
@@ -164,7 +164,7 @@ providers_port.start_file_watcher()
 _validate_resultstore_settings()
 
 http_client = AioHttpClientAdapter()
-process_id_validator = ColonProcessId()
+process_id_validator = ProcessIdValidator(app_settings.UMP_PROCESS_ID_SEPARATOR)
 remote_auth = RemoteAuthAdapter()
 jwt_auth = JwtAuthAdapter(app_settings)
 
@@ -193,6 +193,6 @@ app = create_app(
     job_repo=job_repo,
     process_id_validator=process_id_validator,
     auth_port=jwt_auth,
-    authorization_service=AuthorizationService(providers_port),
+    authorization_service=AuthorizationService(providers_port, process_id_validator),
     site_info=StaticSiteInfoAdapter(),
 )

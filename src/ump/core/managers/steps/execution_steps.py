@@ -214,18 +214,15 @@ class ValidateAndResolveStep(PipelineStep):
         provider = self._providers.get_provider(provider_name)
         if provider:
             for proc_cfg in provider.processes:
-                configured_id = proc_cfg.id
-                # Derive what the canonical ID would be for this configured ID
-                expected_canonical = (
-                    configured_id
-                    if configured_id.startswith(f"{provider_name}:")
-                    else f"{provider_name}:{configured_id}"
+                # Build the canonical ID for this configured remote ID and compare.
+                expected = _to_canonical_via_validator(
+                    self._validator, provider_name, proc_cfg.id
                 )
-                if expected_canonical == canonical_id:
-                    return configured_id
-        # Fallback: strip provider prefix (non-UMP remote using bare IDs)
+                if expected == canonical_id:
+                    return proc_cfg.id
+        # Fallback: extract bare ID from canonical using the injected validator.
         try:
-            _, bare = canonical_id.split(":", 1)
+            _, bare = self._validator.extract(canonical_id)
             return bare
         except ValueError:
             return canonical_id
@@ -692,6 +689,25 @@ class InitiatePollingStep(PipelineStep):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _to_canonical_via_validator(
+    validator: ProcessIdValidatorPort,
+    provider_name: str,
+    configured_id: str,
+) -> str:
+    """Return the canonical process ID for *configured_id*, avoiding double-prefixing.
+
+    If *configured_id* already carries *provider_name* as its prefix it is
+    returned unchanged; otherwise the prefix is added via *validator.create()*.
+    """
+    try:
+        existing_provider, _ = validator.extract(configured_id)
+        if existing_provider == provider_name:
+            return configured_id
+    except ValueError:
+        pass
+    return validator.create(provider_name, configured_id)
 
 
 def _halt(context: JobExecutionContext, status: int, title: str, detail: str) -> None:

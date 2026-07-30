@@ -10,6 +10,7 @@ from typing import List, cast
 
 import pytest
 
+from ump.adapters.colon_process_id_validator import ProcessIdValidator
 from ump.core.exceptions import OGCProcessException
 from ump.core.interfaces.auth import AuthContext
 from ump.core.interfaces.providers import ProvidersPort
@@ -38,7 +39,7 @@ def _provider(name: str, processes: List[dict]) -> ProviderConfig:
 
 def _service(provider: ProviderConfig, raises: bool = False) -> AuthorizationService:
     fake = FakeProviders({provider.name: provider}, raises=raises)
-    return AuthorizationService(cast(ProvidersPort, fake))
+    return AuthorizationService(cast(ProvidersPort, fake), ProcessIdValidator())
 
 
 def _anon() -> AuthContext:

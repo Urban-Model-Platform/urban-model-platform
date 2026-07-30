@@ -222,14 +222,19 @@ class ProcessManager(ProcessesPort):
         return proc
 
     def _to_canonical_id(self, provider_name: str, configured_id: str) -> str:
-        """Compute the UMP-local canonical process ID.
+        """Return canonical process ID, avoiding double-prefixing.
 
-        If the configured ID already starts with ``{provider_name}:`` (e.g.
-        because the remote is another UMP instance), it is used as-is to avoid
-        double-prefixing.  Otherwise the provider prefix is prepended.
+        If *configured_id* already carries *provider_name* as its prefix (e.g.
+        because the remote is another UMP instance), it is returned unchanged.
+        Otherwise the provider prefix is prepended via the injected validator,
+        which uses the configured separator.
         """
-        if configured_id.startswith(f"{provider_name}:"):
-            return configured_id
+        try:
+            existing_provider, _ = self.process_id_validator.extract(configured_id)
+            if existing_provider == provider_name:
+                return configured_id
+        except ValueError:
+            pass
         return self.process_id_validator.create(provider_name, configured_id)
 
     def _find_remote_id(self, provider_name: str, canonical_id: str) -> str:
@@ -268,10 +273,14 @@ class ProcessManager(ProcessesPort):
     def _cache_process(self, model: Process) -> None:
         self._process_cache_by_id.set(model.pid, model)
         logger.debug(f"Cached process '{model.pid}' in per-process cache")
-        if ":" in model.pid:
-            bare = model.pid.split(":", 1)[1]
+        # Also cache under the bare ID (without provider prefix) so callers
+        # that omit the prefix can still get a cache hit.
+        try:
+            _, bare = self.process_id_validator.extract(model.pid)
             self._process_cache_by_id.set(bare, model)
             logger.debug(f"Also cached process under bare id '{bare}'")
+        except ValueError:
+            pass  # no prefix present — single-key cache entry is enough
 
     async def _fetch_process(self, provider_name: str, raw_id: str) -> Process:
         provider = self.provider_config_service.get_provider(provider_name)

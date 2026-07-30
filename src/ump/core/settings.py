@@ -108,6 +108,15 @@ class UmpSettings(BaseSettings):
     # Per-process anonymous access is still controlled by providers.yaml anonymous-access.
     UMP_PUBLIC_PROCESSES: bool = False
 
+    # ── Process ID format ─────────────────────────────────────────────────────
+    # Character used to separate provider prefix from process id in all external
+    # and internal representations, e.g. ``fair2adapt:pluvial-flood-risk``.
+    # Default ":" is allowed in URL path segments (RFC 3986 §3.3 pchar).
+    # Operators may choose a different character (e.g. "-") for cleaner URLs.
+    # Changing this on an existing deployment requires updating stored process_id
+    # values in the jobs table (a data migration).
+    UMP_PROCESS_ID_SEPARATOR: str = ":"
+
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Comma-separated list of origins that browsers are allowed to call UMP
     # from.  An empty list (the default) means no CORS headers are emitted —
