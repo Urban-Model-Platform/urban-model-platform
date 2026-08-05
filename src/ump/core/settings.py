@@ -72,6 +72,15 @@ class UmpSettings(BaseSettings):
     UMP_REWRITE_REMOTE_LINKS: bool = True
     # When true, JobManager verifies remote results immediately for terminal success responses
     UMP_VERIFY_REMOTE_RESULTS: bool = True
+    # Timeout (seconds) for a single attempt to fetch remote /results content. Result
+    # generation (e.g. large GeoPackage/FlatGeobuf assembly) can take longer than a
+    # typical status poll, so this is intentionally higher than the HTTP adapter default.
+    UMP_RESULTS_FETCH_TIMEOUT: float = 30.0
+    # Retry policy for transient errors (timeouts, connection errors, 502/503/504)
+    # encountered while proxying GET /jobs/{id}/results to the remote provider.
+    UMP_RESULTS_FETCH_MAX_RETRIES: int = 3
+    UMP_RESULTS_FETCH_RETRY_BASE_WAIT: float = 1.0
+    UMP_RESULTS_FETCH_RETRY_MAX_WAIT: float = 10.0
     # If true, fetch each configured process individually via /processes/{id} instead
     # of fetching the bulk /processes list and filtering. This is slower for large
     # catalogs but ensures we get full descriptions even if the list endpoint omits

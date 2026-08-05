@@ -448,6 +448,15 @@ class JobManager:
         # Other exceptions might be transient connection issues
         return True
 
+    def _wrap_if_transient(self, exc: OGCProcessException) -> OGCProcessException:
+        """Classify an OGC error, wrapping transient ones so the retry adapter retries them.
+
+        This is the only piece of retry-related logic that belongs in the core:
+        deciding *what* is worth retrying. The actual looping/backoff mechanics
+        are delegated entirely to the injected ``RetryPort`` implementation.
+        """
+        return TransientOGCError(exc.response) if self._is_transient_error(exc) else exc
+
     async def _handle_forward_error(self, job: Job, exc: Exception) -> None:
         """Handle exceptions during forward request, marking job as failed."""
         if isinstance(exc, OGCProcessException):
@@ -465,6 +474,24 @@ class JobManager:
                 f"[job:forward] unexpected exception job_id={job.id} error={exc}"
             )
 
+    async def _forward_once(
+        self, exec_url: str, payload: Dict[str, Any], headers: Dict[str, str], job: Job
+    ) -> Dict[str, Any]:
+        """Single-attempt forward POST; wraps transient OGC errors for the retry adapter."""
+        logger.debug(
+            f"[job:forward] POST exec_url={exec_url} job_id={job.id} "
+            f"headers={list(headers.keys())} payload_size={len(str(payload))}"
+        )
+        try:
+            resp = await self._http.post(exec_url, json=payload, headers=headers)
+        except OGCProcessException as exc:
+            raise self._wrap_if_transient(exc) from exc
+        logger.debug(
+            f"[job:forward] POST completed job_id={job.id} status={resp.get('status')} "
+            f"keys={list(resp.keys())}"
+        )
+        return resp
+
     async def _safe_forward(
         self, job: Job, exec_url: str, payload: Dict[str, Any], headers: Dict[str, str]
     ) -> Optional[Dict[str, Any]]:
@@ -475,38 +502,16 @@ class JobManager:
         fail immediately without retry by wrapping them in non-retryable exceptions.
         """
 
-        async def do_forward_with_error_classification():
-            """Actual forward operation that classifies errors for retry logic."""
-            try:
-                logger.debug(
-                    f"[job:forward] POST exec_url={exec_url} job_id={job.id} headers={list(headers.keys())} payload_size={len(str(payload))}"
-                )
-                resp = await self._http.post(exec_url, json=payload, headers=headers)
-                logger.debug(
-                    f"[job:forward] POST completed job_id={job.id} status={resp.get('status')} keys={list(resp.keys())}"
-                )
-                return resp
-            except OGCProcessException as exc:
-                # Check if this is a transient error worth retrying
-                if self._is_transient_error(exc):
-                    # Wrap in TransientOGCError so retry adapter retries it
-                    logger.debug(
-                        f"[job:forward] transient error, will retry: status={exc.response.status} job_id={job.id}"
-                    )
-                    raise TransientOGCError(exc.response) from exc
-                else:
-                    # Non-transient error (4xx), re-raise as-is to fail immediately
-                    logger.debug(
-                        f"[job:forward] non-transient error, will not retry: status={exc.response.status} job_id={job.id}"
-                    )
-                    raise
-
         try:
             # Use retry adapter if available, with config-based retry settings
             if self._retry:
                 logger.debug(f"[job:forward] using retry adapter job_id={job.id}")
                 resp = await self._retry.execute(
-                    do_forward_with_error_classification,
+                    self._forward_once,
+                    exec_url,
+                    payload,
+                    headers,
+                    job,
                     attempts=self.config.forward_max_retries,
                     wait_initial=self.config.forward_retry_base_wait,
                     wait_max=self.config.forward_retry_max_wait,
@@ -518,7 +523,7 @@ class JobManager:
                 logger.debug(
                     f"[job:forward] no retry adapter, single attempt job_id={job.id}"
                 )
-                return await do_forward_with_error_classification()
+                return await self._forward_once(exec_url, payload, headers, job)
 
         except TransientOGCError as exc:
             # Transient error retry exhausted - unwrap original exception
@@ -1077,14 +1082,32 @@ class JobManager:
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
         )
         try:
-            body_bytes, content_type = await self._http.get_content(
-                results_url, headers=auth_headers or None
-            )
+            if self._retry:
+                body_bytes, content_type = await self._retry.execute(
+                    self._fetch_results_once,
+                    results_url,
+                    auth_headers or None,
+                    job,
+                    attempts=self.config.results_fetch_max_retries,
+                    wait_initial=self.config.results_fetch_retry_base_wait,
+                    wait_max=self.config.results_fetch_retry_max_wait,
+                    exception_types=(TransientOGCError,),
+                )
+            else:
+                body_bytes, content_type = await self._fetch_results_once(
+                    results_url, auth_headers or None, job
+                )
             return {
                 "status": 200,
                 "content_type": content_type,
                 "body_bytes": body_bytes,
             }
+        except TransientOGCError as exc:
+            # Retries exhausted; surface as the underlying OGC error (e.g. 504)
+            logger.error(
+                f"[job:results] retries exhausted job_id={job.id} status={exc.response.status}"
+            )
+            raise OGCProcessException(exc.response) from exc
         except OGCProcessException as exc:
             raise exc
         except Exception as exc:
@@ -1093,6 +1116,19 @@ class JobManager:
                 "status": 500,
                 "body": {"detail": "Unexpected error fetching results"},
             }
+
+    async def _fetch_results_once(
+        self, results_url: str, headers: Optional[Dict[str, str]], job: Job
+    ) -> tuple[bytes, str]:
+        """Single-attempt results fetch; wraps transient OGC errors for the retry adapter."""
+        try:
+            return await self._http.get_content(
+                results_url,
+                timeout=self.config.results_fetch_timeout,
+                headers=headers,
+            )
+        except OGCProcessException as exc:
+            raise self._wrap_if_transient(exc) from exc
 
     # ---------------- Link Helpers -----------------
     def _ensure_results_link(self, job_id: str, status_info: JobStatusInfo) -> None:

@@ -68,6 +68,31 @@ class JobManagerConfig(BaseModel):
         description="Maximum wait time in seconds between retry attempts",
     )
 
+    results_fetch_timeout: float = Field(
+        default=30.0,
+        gt=0,
+        description="Total timeout in seconds for a single remote /results fetch attempt",
+    )
+
+    results_fetch_max_retries: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum retry attempts for transient errors when fetching remote results",
+    )
+
+    results_fetch_retry_base_wait: float = Field(
+        default=1.0,
+        gt=0,
+        description="Base wait time in seconds for exponential backoff between results-fetch retries",
+    )
+
+    results_fetch_retry_max_wait: float = Field(
+        default=10.0,
+        gt=0,
+        description="Maximum wait time in seconds between results-fetch retry attempts",
+    )
+
     model_config = {
         "frozen": True,  # Immutable after creation for safety
         "extra": "forbid",  # Reject unknown fields
@@ -87,6 +112,10 @@ class JobManagerConfig(BaseModel):
             poll_interval=settings.UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL,
             rewrite_remote_links=settings.UMP_REWRITE_REMOTE_LINKS,
             verify_remote_results=settings.UMP_VERIFY_REMOTE_RESULTS,
+            results_fetch_timeout=settings.UMP_RESULTS_FETCH_TIMEOUT,
+            results_fetch_max_retries=settings.UMP_RESULTS_FETCH_MAX_RETRIES,
+            results_fetch_retry_base_wait=settings.UMP_RESULTS_FETCH_RETRY_BASE_WAIT,
+            results_fetch_retry_max_wait=settings.UMP_RESULTS_FETCH_RETRY_MAX_WAIT,
             # poll_timeout removed: now resolved per-process from provider/process config
             # inline_inputs_size_limit, forward_max_retries, forward_retry_base_wait,
             # forward_retry_max_wait all use defaults (no settings exist yet)
