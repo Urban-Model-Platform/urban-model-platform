@@ -9,7 +9,19 @@ data:
   UMP_PROVIDERS_FILE: {{ .Values.config.providersFilePath | quote }}
   UMP_API_SERVER_URL: {{ .Values.config.apiServerUrl | quote }}
   UMP_API_SERVER_URL_PREFIX: {{ .Values.config.apiServerUrlPrefix | quote }}
+  UMP_API_SERVER_PORT: {{ .Values.config.apiServerPort | quote }}
   UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: {{ .Values.config.remoteJobStatusRequestInterval | quote }}
   UMP_JOB_DELETE_INTERVAL: {{ .Values.config.jobDeleteInterval | quote }}
   UMP_API_SERVER_WORKERS: {{ .Values.config.apiServerWorkers | quote }}
-  UMP_SERVER_TIMEOUT: {{ .Values.config.serverWorkerTimeout | quote }}
+  UMP_JOB_STORE: {{ .Values.config.jobStore | quote }}
+  UMP_REWRITE_REMOTE_LINKS: {{ .Values.config.rewriteRemoteLinks | quote }}
+  UMP_VERIFY_REMOTE_RESULTS: {{ .Values.config.verifyRemoteResults | quote }}
+  UMP_PER_PROCESS_FETCH: {{ .Values.config.perProcessFetch | quote }}
+  UMP_SUPPORTED_API_VERSIONS: {{ .Values.config.supportedApiVersions | quote }}
+  UMP_SITE_TITLE: {{ .Values.config.siteTitle | quote }}
+  UMP_SITE_DESCRIPTION: {{ .Values.config.siteDescription | quote }}
+  UMP_SITE_CONTACT: {{ .Values.config.siteContact | quote }}
+  UMP_AUTH_ENABLED: {{ .Values.auth.enabled | quote }}
+  UMP_PUBLIC_PROCESSES: {{ .Values.auth.publicProcesses | quote }}
+  UMP_JWT_ROLES_CLAIMS: {{ .Values.auth.jwtRolesClaims | quote }}
+  UMP_JWKS_CACHE_TTL_SECONDS: {{ .Values.auth.jwksCacheTtlSeconds | quote }}

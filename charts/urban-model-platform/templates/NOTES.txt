@@ -1,14 +1,13 @@
 {{- if .Values.tls.enabled }}
 Your application can be accessed via HTTPS:
-{{- if .Values.tls.hostname }}
-  https://{{ .Values.tls.hostname }}
+{{- if .Values.tls.gateway.hostName }}
+  https://{{ .Values.tls.gateway.hostName }}
 {{- else }}
-  WARNING: No hostname configured. Please set .Values.tls.hostname
+  WARNING: No hostname configured. Please set .Values.tls.gateway.hostName
 {{- end }}
 
 TLS is enabled with:
-  - Certificate issuer: {{ .Values.tls.issuer.name }}
-  - Certificate type: {{ .Values.tls.issuer.kind }}
+  - Certificate issuer: {{ .Values.tls.clusterIssuerRef.name }}
 {{- else }}
 Your application can be accessed within the cluster at:
   http://{{ include "ump.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
