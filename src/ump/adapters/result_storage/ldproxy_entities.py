@@ -38,6 +38,7 @@ from __future__ import annotations
 import yaml
 
 from ump.adapters.result_storage.gpkg_writer import GpkgLayerSchema, validate_output_id
+from ump.core.interfaces.result_storage import UnsupportedResultError
 
 # ---------------------------------------------------------------------------
 # Public builders — all return plain dicts
@@ -68,6 +69,41 @@ def build_provider_entity(
       geopandas/pyogrio writes by default.
     """
     validate_output_id(output_id)
+    return build_provider_entity_multi(job_uuid, {output_id: schema}, crs_epsg)
+
+
+def build_provider_entity_multi(
+    job_uuid: str,
+    schemas: dict[str, GpkgLayerSchema],
+    crs_epsg: int = 4326,
+) -> dict:
+    """Build one provider entity carrying one ``types`` entry per output.
+
+    A job can produce several storable outputs, all backed by a single
+    GeoPackage (one layer per output — see ``write_layers_to_gpkg``). The
+    ldproxy model is correspondingly *one provider per job* with one
+    ``types.{output_id}`` block per output, so this is the multi-output
+    counterpart to ``build_provider_entity`` (which delegates here for the
+    single-output case, keeping one source of truth for the entity shape).
+
+    Args:
+        job_uuid: The job UUID — the provider ``id`` and ``{job_uuid}.gpkg``.
+        schemas:  Mapping of ``output_id`` → ``GpkgLayerSchema``, exactly what
+                  ``write_layers_to_gpkg`` returns. Insertion order is
+                  preserved so the YAML ``types`` order matches the layer order.
+        crs_epsg: Native CRS EPSG code for all layers.
+
+    Raises:
+        UnsupportedResultError: if ``schemas`` is empty or any ``output_id`` is
+                                not a valid storage identifier.
+    """
+    if not schemas:
+        raise UnsupportedResultError(
+            "build_provider_entity_multi: at least one output schema is required"
+        )
+    for output_id in schemas:
+        validate_output_id(output_id)
+
     return {
         "id": job_uuid,
         "enabled": True,
@@ -99,7 +135,8 @@ def build_provider_entity(
             "computeNumberMatched": True,
         },
         "types": {
-            output_id: _build_feature_type(output_id, schema),
+            output_id: _build_feature_type(output_id, schema)
+            for output_id, schema in schemas.items()
         },
     }
 
