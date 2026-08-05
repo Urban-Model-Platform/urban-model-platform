@@ -148,6 +148,13 @@ class UmpSettings(BaseSettings):
     # entities.  OGC GeoJSON is WGS84 by RFC 7946, so 4326 is the right default.
     UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: int = 4326
 
+    # Logical id of the shared ldproxy service that publishes all stored
+    # results.  This is the single source of truth for that id: it names the
+    # service entity file/ConfigMap (`{id}.yml`) AND must match the final path
+    # segment of UMP_RESULTSTORE_LDPROXY_BASE_URL (…/ump-results).  Changing it
+    # here without updating the base URL (and vice versa) breaks result links.
+    UMP_RESULTSTORE_LDPROXY_SERVICE_ID: str = "ump-results"
+
     # Where entity YAML files (ldproxy provider + service configs) are written.
     # 'filesystem': write directly to UMP_RESULTSTORE_LDPROXY_ROOTPATH (dev/Docker).
     # 'k8s': create/patch Kubernetes ConfigMaps via the k8s API (production).

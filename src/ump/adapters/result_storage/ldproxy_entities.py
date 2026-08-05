@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import yaml
 
-from ump.adapters.result_storage.gpkg_writer import GpkgLayerSchema
+from ump.adapters.result_storage.gpkg_writer import GpkgLayerSchema, validate_output_id
 
 # ---------------------------------------------------------------------------
 # Public builders — all return plain dicts
@@ -67,6 +67,7 @@ def build_provider_entity(
     - The ``geometry`` pseudo-property maps the ``Shape`` column that
       geopandas/pyogrio writes by default.
     """
+    validate_output_id(output_id)
     return {
         "id": job_uuid,
         "enabled": True,
@@ -184,6 +185,7 @@ def collection_id_for(job_uuid: str, output_id: str) -> str:
     shared ``ump-results`` service (the only access control in v1).  The
     output name suffix makes the ID self-descriptive in ldproxy's UI and logs.
     """
+    validate_output_id(output_id)
     return f"{job_uuid}-{output_id}"
 
 

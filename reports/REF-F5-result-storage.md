@@ -98,7 +98,7 @@ src/ump/adapters/result_storage/gpkg_writer.py             — GeoJSON FeatureCo
 src/ump/adapters/result_storage/ldproxy_entities.py        — build provider YAML + one collection block
 src/ump/adapters/result_storage/service_registry.py        — read-modify-write the shared service entity (locked)
 src/ump/adapters/result_storage/atomic_fs.py               — atomic write (temp file + os.replace)
-src/ump/adapters/result_storage/entity_config_backend.py   — EntityConfigBackendPort ABC + factory
+src/ump/adapters/result_storage/entity_config_backend.py   — EntityConfigBackendPort ABC + ConfigConflict (factory deferred to V-8, see decision note)
 src/ump/adapters/result_storage/entity_config_fs.py        — FilesystemEntityConfigBackend (dev / Docker)
 src/ump/adapters/result_storage/entity_config_k8s.py       — K8sConfigMapEntityConfigBackend (Kubernetes)
 ```
@@ -183,13 +183,29 @@ unless the result declares otherwise. Documented assumption.
    On any failure, clean up temp files and raise `ResultStorageError`.
 2. **Shared-service-file concurrency (the topology's main hazard)** — with a
    single `ump-results.yml`, two jobs completing at once do a read-modify-write
-   of the *same* file. Across multiple UMP pods on one Azure File share an
-   in-process `asyncio.Lock` is **not** enough — a lost update would drop a
-   collection. The `service_registry` therefore serializes every edit behind a
-   cross-process lock. Reuse the existing advisory-lock infrastructure
-   (`PollLockPort` / `PgAdvisoryPollLock`) with a single fixed key for the
-   `ump-results` registry; a `NoOpLock` covers single-instance/dev. Read →
-   mutate collections map → atomic-replace the whole file, all under the lock.
+   of the *same* file. A lost update would drop a collection.
+
+   > **DECISION (2026-08-04, implemented in V-5a) — changed from the original
+   > advisory-lock plan.** We do **not** use `PollLockPort` /
+   > `PgAdvisoryPollLock`. Instead the `EntityConfigBackendPort` exposes
+   > **optimistic concurrency**: `read_service_entity` returns
+   > `(yaml_text, version)` and `write_service_entity(..., expected_version)`
+   > raises `ConfigConflict` if the stored version moved on. Each backend uses
+   > its **native** version primitive — Kubernetes `resourceVersion` (concern
+   > 10), the filesystem backend a **SHA-256 hash of the file content**
+   > (changed from `st_mtime_ns` during V-5b hardening: mtime resolution can be
+   > too coarse to distinguish rapid successive writes, causing a stale token
+   > to pass; a content hash is deterministic and semantically exact — identical
+   > content does not conflict). Rationale: the
+   > dangerous multi-pod RMW only ever happens through the **k8s API** (entity
+   > YAML lives in ConfigMaps in production, concern 8); the filesystem backend
+   > is single-instance only, so an in-process `asyncio.Lock` in the service
+   > registry (V-5c) plus the version guard is sufficient there. This removes
+   > the Postgres advisory-lock dependency from the storage path entirely and
+   > avoids holding any lock across slow File-share writes.
+
+   The `service_registry` (V-5c) still owns the read → mutate collections map →
+   atomic-write sequence; on `ConfigConflict` it re-reads and retries.
 3. **Idempotency** — keyed by job UUID; re-storing overwrites the gpkg/provider
    deterministically and upserts the collection entry. `exists(job_id)`
    short-circuits a redundant store.
@@ -333,14 +349,14 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 | ~~V-0b~~ | ~~`ProcessConfig.transmission_mode_policy` + startup validation rules~~ | ✅ done |
 | ~~V-1~~ | ~~`ResultStoragePort` + dataclasses + exceptions (core)~~ | ✅ done |
 | ~~V-2~~ | ~~`ResultStorageCoordinator` (core, decide-fetch-store-linkinject)~~ | ✅ done |
-| ~~V-3~~ | ~~`atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir~~ | ✅ done |
+| ~~V-3~~ | ~~`atomic_fs` + `gpkg_writer` (GeoJSON→gpkg) with unit tests over temp dir~~ ✅ done. **V-6 groundwork added:** (1) `validate_output_id` — a shared identifier safeguard (letters/digits/underscore, must start with a letter) since `output_id` becomes a GeoPackage layer name, an ldproxy `types` key, and half of the collection id; called from `write_layers_to_gpkg` and from `ldproxy_entities.build_provider_entity`/`collection_id_for`; (2) `write_layers_to_gpkg` — additive multi-layer counterpart to `write_to_gpkg`, writes every output of one job into a single GeoPackage (one layer per output) in one atomic operation, validating and parsing all layers *before* writing any — matches the "one provider, one `types` entry per output" model from V-4 for jobs with multiple storable outputs. | V-4 |
 | ~~V-4~~ | ~~`ldproxy_entities` (provider YAML + one collection block from a FeatureCollection)~~ | ✅ done |
-| V-5a | `EntityConfigBackendPort` + `FilesystemEntityConfigBackend` (write entity YAMLs to disk) | V-4 |
-| V-5b | `K8sConfigMapEntityConfigBackend` (write entity YAMLs as ConfigMaps, retry on 409) | V-4 |
-| V-5c | `service_registry` (locked read-modify-write of shared service entity, works over both backends) | V-5a |
+| ~~V-5a~~ | ~~`EntityConfigBackendPort` + `FilesystemEntityConfigBackend`~~ ✅ done. **Deviations from plan:** (1) port uses **optimistic versioning** (`read`→`(text, version)`, `write(..., expected_version)`, `ConfigConflict`) instead of an advisory lock — see concern 2 decision note; (2) **no factory** in this step (deferred to V-8) to avoid dead `NotImplementedError` code before the k8s backend exists; (3) `delete_provider_entity` already on the port for V-9. | V-4 |
+| ~~V-5b~~ | ~~`K8sConfigMapEntityConfigBackend` (same port; maps k8s 409 → `ConfigConflict`; `resourceVersion` is the version token)~~ ✅ done. **Design notes:** (1) `kubernetes` is an **optional** dependency behind the `k8s` extra, imported lazily in `_build_default_api` (`load_incluster_config`) so dev/Docker never pulls it; (2) `core_v1_api` is **injectable** for tests; (3) ConfigMap bodies are plain **dicts** and errors are dispatched on the exception's `status` attribute — both keep the module import-free of `kubernetes`, so unit tests run without it installed; (4) provider write uses **`replace`→(404)→`create`** (idempotent re-store is one API call); (5) error mapping: 409→`ConfigConflict`, 404 read→`None`, 404 delete→no-op, other API errors→`ResultStorageError`, non-API errors re-raised untouched. | V-4 |
+| ~~V-5c~~ | ~~`service_registry` (in-process `asyncio.Lock` + read → mutate → `write_service_entity`, retrying on `ConfigConflict`; bootstraps skeleton when `read` returns `None`)~~ ✅ done. **Design notes:** (1) `register_collection(collection_id, job_uuid, output_id)` takes the collection id **explicit** from the caller (V-6 derives it via `collection_id_for` once, reuses it for the V-10 back-link — `ServiceRegistry` never derives ids itself); (2) both mutations (`register`/`deregister`) are idempotent (`dict.update` / `dict.pop(..., None)`) so a retried V-6 step or unconditional V-9 cleanup never breaks; (3) backend calls run through `asyncio.to_thread` inside the lock — the lock is held across the `await`, which is correct here since the whole RMW is the critical section; (4) proven against a **real** `FilesystemEntityConfigBackend` with genuine concurrent `asyncio.gather` tasks, not just an isolated mock, for the lost-update hazard. | V-5a |
 | V-6 | `LdproxyResultStorage` adapter wiring 3-5 together, atomic ordering | V-3, V-4, V-5c |
 | V-7 | `ResultStorageObserver` (eager trigger on `on_job_completed`) | V-2 |
-| V-8 | Compose in `asgi.py`; inject port + coordinator + observer + registry lock | V-2, V-6, V-7 |
+| V-8 | Compose in `asgi.py`; inject port + coordinator + observer. **Backend factory (`filesystem`\|`k8s`) lives here** (moved out of V-5a) so it is only built once both backends exist — matches explicit-DI rule. | V-2, V-6, V-7 |
 | V-9 | `delete()` + cleanup wiring (anonymous/expiry, deregister collection) | V-6 |
 | V-10 | Ref links in statusInfo `links` + `GET /results` returns 302/link | V-2 |
 

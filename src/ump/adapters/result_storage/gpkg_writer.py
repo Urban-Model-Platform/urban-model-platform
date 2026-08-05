@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -36,8 +37,8 @@ from typing import Optional
 import geopandas as gpd
 import pandas as pd
 
-from ump.core.interfaces.result_storage import UnsupportedResultError
 from ump.adapters.result_storage.atomic_fs import atomic_write_path
+from ump.core.interfaces.result_storage import UnsupportedResultError
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +54,14 @@ SUPPORTED_MEDIA_TYPES: dict[str, str] = {
 # Used by the schema derivation step so V-4 (ldproxy_entities) can emit
 # correct YAML without re-reading the GeoPackage.
 _DTYPE_TO_LDPROXY: dict[str, str] = {
-    "i": "INTEGER",   # signed integer (int8 … int64)
-    "u": "INTEGER",   # unsigned integer
-    "f": "FLOAT",     # float32, float64
-    "b": "BOOLEAN",   # bool
+    "i": "INTEGER",  # signed integer (int8 … int64)
+    "u": "INTEGER",  # unsigned integer
+    "f": "FLOAT",  # float32, float64
+    "b": "BOOLEAN",  # bool
     "M": "DATETIME",  # datetime64
-    "O": "STRING",    # object (string, mixed — treat as STRING)
-    "S": "STRING",    # bytes string (rare)
-    "U": "STRING",    # unicode string
+    "O": "STRING",  # object (string, mixed — treat as STRING)
+    "S": "STRING",  # bytes string (rare)
+    "U": "STRING",  # unicode string
 }
 
 # Mapping from Shapely geometry type names to ldproxy geometryType strings.
@@ -73,6 +74,34 @@ _GEOM_TYPE_TO_LDPROXY: dict[str, str] = {
     "MultiPolygon": "MULTI_POLYGON",
     "GeometryCollection": "GEOMETRY",
 }
+
+# An output_id becomes, in order: a GeoPackage layer name (effectively a SQL
+# table name), an ldproxy provider `types` key, a `sourcePath` segment, and
+# half of a collection id (`{job_uuid}-{output_id}`, see ldproxy_entities).
+# Every one of those contexts is safe for a simple identifier — letters,
+# digits, underscore, not starting with a digit — so we validate once, here,
+# at the narrowest point, rather than trusting the remote server's output
+# naming or defensively re-checking it in every consumer.
+_OUTPUT_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def validate_output_id(output_id: str) -> None:
+    """Raise ``UnsupportedResultError`` if *output_id* is not a safe identifier.
+
+    A malformed output_id (empty, containing ``/``, ``.``, spaces, etc.) would
+    otherwise corrupt the GeoPackage layer name, the ldproxy provider's
+    ``types`` key/``sourcePath``, and the collection id derived from it. This
+    is treated the same as any other unsupported-result condition: the
+    ResultStorageCoordinator falls back to the inline value under
+    ``emulate-ref`` or surfaces a 502 under ``emulate-ref-only`` — the
+    computation still succeeded, only this output cannot be stored.
+    """
+    if not _OUTPUT_ID_RE.match(output_id):
+        raise UnsupportedResultError(
+            f"Output id {output_id!r} is not a valid storage identifier "
+            "(must start with a letter and contain only letters, digits, "
+            "or underscores) — cannot use it as a GeoPackage layer name."
+        )
 
 
 @dataclass(frozen=True)
@@ -163,6 +192,78 @@ def write_to_gpkg(
     return schema
 
 
+def write_layers_to_gpkg(
+    layers: list[tuple[str, bytes, str]],
+    output_path: Path,
+    target_crs_epsg: int = 4326,
+) -> dict[str, GpkgLayerSchema]:
+    """Write multiple outputs of the *same job* as separate layers in one GeoPackage.
+
+    A job can produce several storable outputs (e.g. ``voronoi_diagram`` and
+    ``buffer_zones``). The ldproxy entity model (V-4) is one provider per job
+    with one ``types`` entry per output, backed by one GeoPackage with one
+    layer per output — so multiple outputs must land in a single file, not one
+    file each. This is the multi-output counterpart to ``write_to_gpkg``.
+
+    Args:
+        layers:          One ``(output_id, body_bytes, media_type)`` tuple per
+                         output to store. ``output_id`` becomes the GeoPackage
+                         layer name — see ``validate_output_id``.
+        output_path:     Destination ``.gpkg`` file path. The parent directory
+                         must already exist. Written atomically: either every
+                         layer ends up in the file, or none does.
+        target_crs_epsg: EPSG code every layer is reprojected to if necessary.
+
+    Returns:
+        A ``dict`` mapping each ``output_id`` to its ``GpkgLayerSchema``, so
+        the caller can build one provider ``types`` entry per output without
+        re-opening the file.
+
+    Raises:
+        UnsupportedResultError: if *layers* is empty, an ``output_id`` is not a
+                                valid identifier, a ``media_type`` is
+                                unsupported, or a FeatureCollection is empty.
+        ResultStorageError:     if a GeoDataFrame cannot be read.
+
+    All inputs are validated and parsed *before* anything is written, so a
+    problem with the third output never leaves a partial file containing the
+    first two — the same all-or-nothing guarantee ``write_to_gpkg`` gives for
+    a single layer, extended to the whole batch.
+    """
+    if not layers:
+        raise UnsupportedResultError(
+            "write_layers_to_gpkg: at least one layer is required"
+        )
+
+    schemas: dict[str, GpkgLayerSchema] = {}
+    prepared: list[tuple[str, gpd.GeoDataFrame]] = []
+
+    for output_id, body_bytes, media_type in layers:
+        validate_output_id(output_id)
+        normalised_type = _normalise_media_type(media_type)
+        driver = _require_supported_type(normalised_type)
+
+        gdf = _read_geodataframe(body_bytes, driver, output_id)
+        if gdf.empty:
+            raise UnsupportedResultError(
+                f"Layer '{output_id}': FeatureCollection contains no features. "
+                "An empty GeoPackage cannot be registered with ldproxy."
+            )
+        gdf = _ensure_crs(gdf, target_crs_epsg, output_id)
+        schemas[output_id] = _derive_schema(gdf, target_crs_epsg)
+        prepared.append((output_id, gdf))
+
+    _write_gpkg_layers(prepared, output_path)
+
+    logger.debug(
+        "[gpkg] wrote %d layer(s) to %s (layers=%s)",
+        len(prepared),
+        output_path.name,
+        ", ".join(output_id for output_id, _ in prepared),
+    )
+    return schemas
+
+
 # ---------------------------------------------------------------------------
 # Internal steps — each does one thing and is independently testable
 # ---------------------------------------------------------------------------
@@ -185,7 +286,9 @@ def _require_supported_type(normalised_type: str) -> str:
     return driver
 
 
-def _read_geodataframe(body_bytes: bytes, driver: str, layer_name: str) -> gpd.GeoDataFrame:
+def _read_geodataframe(
+    body_bytes: bytes, driver: str, layer_name: str
+) -> gpd.GeoDataFrame:
     """Parse *body_bytes* into a GeoDataFrame using pyogrio as the I/O engine.
 
     pyogrio auto-detects the format from the content's magic bytes, so we do
@@ -195,6 +298,7 @@ def _read_geodataframe(body_bytes: bytes, driver: str, layer_name: str) -> gpd.G
         gdf = gpd.read_file(io.BytesIO(body_bytes), engine="pyogrio")
     except Exception as exc:
         from ump.core.interfaces.result_storage import ResultStorageError
+
         raise ResultStorageError(
             f"Layer '{layer_name}': could not parse {driver} bytes: {exc}"
         ) from exc
@@ -286,10 +390,31 @@ def _write_gpkg(gdf: gpd.GeoDataFrame, layer_name: str, output_path: Path) -> No
         gdf.to_file(str(tmp), driver="GPKG", layer=layer_name, engine="pyogrio")
 
 
+def _write_gpkg_layers(
+    prepared: list[tuple[str, gpd.GeoDataFrame]], output_path: Path
+) -> None:
+    """Write each ``(layer_name, gdf)`` pair into one GeoPackage, atomically.
+
+    The first layer creates the file (default ``to_file`` mode); every
+    subsequent layer is appended via ``mode="a"`` — GPKG is a SQLite container
+    that natively supports multiple tables/layers in one file. All writes
+    happen inside the same ``atomic_write_path`` temp file, so a crash
+    mid-batch leaves no file at the destination at all, never a half-written
+    one with only some layers.
+    """
+    with atomic_write_path(output_path) as tmp:
+        for index, (layer_name, gdf) in enumerate(prepared):
+            mode = "w" if index == 0 else "a"
+            gdf.to_file(
+                str(tmp), driver="GPKG", layer=layer_name, engine="pyogrio", mode=mode
+            )
+
+
 def _is_null(geom: object) -> bool:
     """Return True if *geom* is a null/None/NaN geometry value."""
     try:
         import math
+
         if isinstance(geom, float) and math.isnan(geom):
             return True
     except TypeError:

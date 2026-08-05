@@ -82,6 +82,16 @@ rich = "^15.0.0"
 # engine that geopandas delegates to for GeoPackage writes.
 geopandas = "^1.0"
 pyogrio = "^0.13"
+# Feature V (V-5b): Kubernetes ConfigMap backend for the ldproxy adapter.
+# Optional — only pulled in for production (UMP_RESULTSTORE_CONFIG_BACKEND=k8s)
+# via the `k8s` extra.  Dev/Docker uses the filesystem backend and never needs
+# the k8s client; the v5b unit tests inject a mock CoreV1Api instead.
+kubernetes = { version = "^31", optional = true }
+
+[tool.poetry.extras]
+# `poetry install --extras k8s` (or `pip install .[k8s]`) enables the
+# Kubernetes ConfigMap backend for result storage.
+k8s = ["kubernetes"]
 
 [tool.poetry.group.dev.dependencies]
 # formatting, quality, tests
