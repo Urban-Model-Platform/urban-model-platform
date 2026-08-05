@@ -1,24 +1,44 @@
 {{- if .Values.allowedOrigins }}
-{{- range $.Values.allowedOrigins }}
+{{- /*
+Traefik's headers middleware intercepts every CORS preflight (OPTIONS with
+Origin + Access-Control-Request-Method) at whichever middleware runs first in
+the chain and answers it directly, regardless of whether the origin matches
+its own allow list. Chaining one Middleware per origin therefore only lets the
+first-configured origin's preflight succeed; every other origin's preflight is
+swallowed with no Access-Control-Allow-Origin header. To avoid this, combine
+all origins into a single Middleware, mirroring the flattened UMP_CORS_ORIGINS
+env var used by the app-level CORSMiddleware.
+*/}}
+{{- $hosts := list }}
+{{- $methods := list }}
+{{- $headers := list }}
+{{- $credentials := false }}
+{{- range .Values.allowedOrigins }}
+{{- $hosts = concat $hosts .hosts }}
+{{- $methods = concat $methods .allowedMethods }}
+{{- $headers = concat $headers .allowedHeaders }}
+{{- if .allowCredentials }}
+{{- $credentials = true }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
-  name: ump-api-cors-{{ .name | lower }}
+  name: ump-api-cors
 spec:
   headers:
     accessControlAllowOriginList:
-{{- range .hosts }}
+{{- range $hosts | uniq }}
       - {{ . | quote }}
 {{- end }}
     accessControlAllowMethods:
-{{- range .allowedMethods }}
+{{- range $methods | uniq }}
       - {{ . | upper }}
 {{- end }}
     accessControlAllowHeaders:
-{{- range .allowedHeaders }}
+{{- range $headers | uniq }}
       - {{ . | quote }}
 {{- end }}
-    accessControlAllowCredentials: {{ .allowCredentials }}
-{{- end }}
+    accessControlAllowCredentials: {{ $credentials }}
 {{- end }}
