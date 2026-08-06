@@ -355,16 +355,49 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 | ~~V-5b~~ | ~~`K8sConfigMapEntityConfigBackend` (same port; maps k8s 409 → `ConfigConflict`; `resourceVersion` is the version token)~~ ✅ done. **Design notes:** (1) `kubernetes` is an **optional** dependency behind the `k8s` extra, imported lazily in `_build_default_api` (`load_incluster_config`) so dev/Docker never pulls it; (2) `core_v1_api` is **injectable** for tests; (3) ConfigMap bodies are plain **dicts** and errors are dispatched on the exception's `status` attribute — both keep the module import-free of `kubernetes`, so unit tests run without it installed; (4) provider write uses **`replace`→(404)→`create`** (idempotent re-store is one API call); (5) error mapping: 409→`ConfigConflict`, 404 read→`None`, 404 delete→no-op, other API errors→`ResultStorageError`, non-API errors re-raised untouched. | V-4 |
 | ~~V-5c~~ | ~~`service_registry` (in-process `asyncio.Lock` + read → mutate → `write_service_entity`, retrying on `ConfigConflict`; bootstraps skeleton when `read` returns `None`)~~ ✅ done. **Design notes:** (1) `register_collection(collection_id, job_uuid, output_id)` takes the collection id **explicit** from the caller (V-6 derives it via `collection_id_for` once, reuses it for the V-10 back-link — `ServiceRegistry` never derives ids itself); (2) both mutations (`register`/`deregister`) are idempotent (`dict.update` / `dict.pop(..., None)`) so a retried V-6 step or unconditional V-9 cleanup never breaks; (3) backend calls run through `asyncio.to_thread` inside the lock — the lock is held across the `await`, which is correct here since the whole RMW is the critical section; (4) proven against a **real** `FilesystemEntityConfigBackend` with genuine concurrent `asyncio.gather` tasks, not just an isolated mock, for the lost-update hazard. | V-5a |
 | ~~V-6~~ | ~~`LdproxyResultStorage` adapter wiring 3-5 together, atomic ordering~~ ✅ done. **Design notes:** (1) crash-safe write order gpkg → provider → collections, each stage referencing only the previous, so a crash never leaves a collection pointing at nothing; (2) `store` is **transactional** — a failure after stage 1 rolls back (deregister collections → delete provider entity → delete gpkg) so `exists` stays an honest "fully stored" signal and no orphan survives for a retry; (3) `exists` tests the gpkg (always on the filesystem for both backends — no k8s call); (4) blocking calls (`write_layers_to_gpkg`, backend writes) run via `asyncio.to_thread`; (5) `UnsupportedResultError`/`ResultStorageError` propagate unchanged for the coordinator to apply policy; (6) `delete` is the idempotent minimal form — **collection deregistration + cleanup wiring is V-9** (documented in the docstring). | V-3, V-4, V-5c |
-| V-7 | `ResultStorageObserver` (eager trigger on `on_job_completed`) | V-2 |
+| ~~V-7~~ | ~~`ResultStorageObserver` (eager trigger on `on_job_completed`)~~ ✅ done. **Design notes:** (1) deliberately thin — it gates on `status == successful`, resolves `ProcessConfig`, asks `coordinator.should_store`, then delegates; no storage concepts leak into it; (2) non-successful jobs short-circuit *before* the provider lookup, so failed jobs cost nothing; (3) an unresolvable `ProcessConfig` (provider removed from `providers.yaml` mid-run) and a raising `ProvidersPort` are both logged and skipped — never raised into the notify loop; (4) `JobRepositoryPort` is constructor-injected because `coordinate()` needs it but `on_job_completed` does not supply it; (5) **`emulate-ref-only` failure handling:** `coordinator.coordinate` re-raises `ResultStorageError`, but `JobManager._notify_job_completed` swallows observer exceptions — so the observer catches it and records the reason on `job.diagnostic` (best-effort persist), leaving the job **successful** since the computation itself succeeded. This is the hand-off to V-10. | V-2 |
 | V-8 | Compose in `asgi.py`; inject port + coordinator + observer. **Backend factory (`filesystem`\|`k8s`) lives here** (moved out of V-5a) so it is only built once both backends exist — matches explicit-DI rule. | V-2, V-6, V-7 |
 | V-9 | `delete()` + cleanup wiring (anonymous/expiry, deregister collection) | V-6 |
-| V-10 | Ref links in statusInfo `links` + `GET /results` returns 302/link | V-2 |
+| V-10 | Ref links in statusInfo `links` + `GET /results` returns 302/link. **Also: surface the `emulate-ref` silent downgrade** — see note below. | V-2 |
 
 Steps V-3, V-4 and V-5a/c are pure/file-only and fully unit-testable against a
 temp directory with no ldproxy or Kubernetes running — that is where most of
 the defensive test coverage goes (schema derivation, atomic ordering, concurrent
 registry edits under the lock, malformed/empty/mixed-geometry FeatureCollections,
 409-retry loop). V-5b is tested against a mocked `kubernetes` client.
+
+### 📌 Open point for V-10 — make the `emulate-ref` downgrade visible
+
+*Raised by the user during V-7; deferred to V-10 on purpose.*
+
+**The gap.** Under `emulate-ref`, `should_store` returns True only when the
+client **explicitly** asked for `transmissionMode: reference`. So the storage
+failure path in `ResultStorageCoordinator._handle_storage_failure` is precisely
+the case "the client asked for a reference and silently gets a value instead".
+Today that leaves nothing but a log line — unlike the `emulate-ref-only` path,
+which V-7 records on `job.diagnostic`. The client cannot detect that its
+explicit request was not honoured.
+
+**Why not fix it in V-7.** The behaviour itself is correct and stays: with
+`emulate-ref` the value channel is legitimately open, so delivering the result
+beats erroring out on a successfully computed job (that is the whole difference
+to `emulate-ref-only`, where value is blocked and an error is the only honest
+answer). Only the *transparency* is missing — and the client-facing
+representation (`links`, `GET /results`) is built in V-10. Persisting a marker
+in V-7 would populate a field nothing reads yet.
+
+**To do in V-10.**
+1. Record the downgrade on the job (same mechanism V-7 uses for
+   `emulate-ref-only`, i.e. `job.diagnostic` or a dedicated field) so it is
+   visible in the job status, not only in the logs. Requires
+   `_handle_storage_failure` to report the fallback to its caller instead of
+   swallowing it — e.g. return a result object or take a callback; keep the
+   coordinator free of repository writes if possible.
+2. Make it **machine-detectable** for the client: either a distinct `rel` on
+   the returned link or an explicit field in the statusInfo, so a client that
+   requested `reference` can tell it received `value`.
+3. Test: client requests `reference` + storage fails under `emulate-ref` →
+   value is delivered **and** the downgrade is discoverable via the API.
 
 ## Decisions (confirmed by user 2026-07-24)
 

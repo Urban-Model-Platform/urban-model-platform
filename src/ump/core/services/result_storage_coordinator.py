@@ -219,6 +219,16 @@ class ResultStorageCoordinator:
             inline when the client polls ``/results``.  Log a warning so
             operators know storage was attempted and failed.
 
+            Known gap (V-10): ``should_store`` only returns True here when the
+            client *explicitly* asked for ``transmissionMode: reference``, so
+            this branch is exactly the case "client asked for a reference and
+            silently gets a value".  The fallback itself is correct — the value
+            channel is open under this policy, so delivering the result beats
+            failing a successfully computed job.  But the downgrade is currently
+            invisible outside the logs.  V-10 must report it back to the caller
+            so it can be persisted on the job and made machine-detectable in the
+            statusInfo / ``GET /results`` response.
+
         ``emulate-ref-only``:
             The policy promises that results are *always* stored.  We cannot
             satisfy that promise, so re-raise.  The caller surfaces this as a
