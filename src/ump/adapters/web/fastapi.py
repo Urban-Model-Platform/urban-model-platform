@@ -2,7 +2,7 @@
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable, Protocol
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
@@ -28,6 +28,13 @@ from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.process import Process, ProcessList
 from ump.core.services.authorization import AuthorizationService
 from ump.core.settings import app_settings, logger
+
+# OGC API - Processes Part 1: Core, /req/core/job-exception-no-such-job (and the
+# equivalent job-results requirement) mandate this exact exception type URI
+# whenever a jobID does not resolve to an existing job - including jobs that
+# once existed but were permanently removed by the V-9 cleanup service. A
+# removed job must be indistinguishable from a jobID that never existed.
+NO_SUCH_JOB_TYPE = "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/no-such-job"
 
 
 # module global helpers
@@ -110,6 +117,19 @@ async def _recover_orphaned_polls(
 # but the core does not depend on this adapter
 # it does not need to implement a port/interface itself
 # it just uses the interface of the core (ProcessesPort)
+class BackgroundRunner(Protocol):
+    """Structural protocol for any start/stop background loop (e.g. cleanup).
+
+    Deliberately generic: the web adapter starts and stops these at the right
+    point in the FastAPI lifespan without knowing what they do — job cleanup
+    (V-9) is the first user, but nothing here is specific to it.
+    """
+
+    def start(self) -> None: ...
+
+    async def stop(self) -> Awaitable[None]: ...
+
+
 def create_app(
     process_manager_factory: Callable[[HttpClientPort], ProcessManager],
     http_client: HttpClientPort,
@@ -119,6 +139,7 @@ def create_app(
     auth_port: AuthPort | None = None,
     authorization_service: AuthorizationService | None = None,
     site_info: SiteInfoPort | None = None,
+    background_runners: list[BackgroundRunner] | None = None,
 ):
     """Create the FastAPI app.
 
@@ -157,11 +178,16 @@ def create_app(
             # running by a previously crashed or restarted instance.
             await _recover_orphaned_polls(job_repo, job_manager)
 
+            for runner in background_runners or []:
+                runner.start()
+
             try:
                 yield
             finally:
                 if hasattr(job_manager, "shutdown"):
                     await job_manager.shutdown()
+                for runner in background_runners or []:
+                    await runner.stop()
 
     app = FastAPI(lifespan=lifespan, redirect_slashes=False)
 
@@ -184,7 +210,7 @@ def create_app(
         )
 
     app.add_middleware(
-        ProxyHeadersMiddleware, # type: ignore[arg-type]
+        ProxyHeadersMiddleware,  # type: ignore[arg-type]
         trusted_hosts="*",
     )
 
@@ -335,6 +361,7 @@ def create_app(
                     title="Job Not Found",
                     detail=f"Job '{job_id}' not found",
                     request=request,
+                    type_uri=NO_SUCH_JOB_TYPE,
                 )
             )
         return job.status_info
@@ -350,6 +377,7 @@ def create_app(
                     title="Job Not Found",
                     detail=f"Job '{job_id}' not found",
                     request=request,
+                    type_uri=NO_SUCH_JOB_TYPE,
                 )
             )
         try:

@@ -21,6 +21,7 @@ from ump.adapters.colon_process_id_validator import ProcessIdValidator
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.adapters.jwt_auth_adapter import JwtAuthAdapter
 from ump.adapters.logging_adapter import LoggingAdapter
+from ump.adapters.periodic_task_runner import PeriodicTaskRunner
 from ump.adapters.poll_lock_noop import NoOpPollLock
 from ump.adapters.process_description_proxy import PolicyBasedProcessDescriptionProxy
 from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
@@ -28,25 +29,26 @@ from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
 from ump.adapters.retry_tenacity import TenacityRetryAdapter
 from ump.adapters.site_info_static_adapter import StaticSiteInfoAdapter
 from ump.adapters.web.fastapi import create_app
+from ump.composition.result_storage import (
+    build_result_storage_port,
+    ensure_ldproxy_bootstrapped,
+    ldproxy_required,
+)
 from ump.core.config import JobManagerConfig
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.logging_config import configure_logging
 from ump.core.managers.job_manager import JobManager
 from ump.core.managers.observers import (
     PollingSchedulerObserver,
-    ResultsVerificationObserver,
     ResultStorageObserver,
+    ResultsVerificationObserver,
     StatusHistoryObserver,
 )
 from ump.core.managers.process_manager import ProcessManager
 from ump.core.services.authorization import AuthorizationService
+from ump.core.services.job_cleanup_service import JobCleanupService
 from ump.core.services.result_storage_coordinator import ResultStorageCoordinator
 from ump.core.settings import app_settings, set_logger
-from ump.composition.result_storage import (
-    build_result_storage_port,
-    ensure_ldproxy_bootstrapped,
-    ldproxy_required,
-)
 
 
 def _validate_resultstore_settings() -> None:
@@ -223,6 +225,29 @@ else:
     job_repo = InMemoryJobRepository("scratch/ump_jobs")
     poll_lock = NoOpPollLock()
 
+# Feature V-9: periodic removal of expired jobs (+ their stored results, if
+# any). Generic — runs regardless of whether a result store is configured;
+# `result_storage_port` is a harmless NullResultStorage in that case. The
+# cleanup cycle itself decides nothing about *which* jobs to fetch beyond the
+# two independent retention settings (anonymous vs. authenticated); see
+# JobCleanupService for the rationale behind treating them separately.
+job_cleanup_service = JobCleanupService(
+    job_repo=job_repo,
+    result_storage=result_storage_port,
+    anonymous_retention_minutes=app_settings.UMP_JOB_DELETE_INTERVAL,
+    authenticated_retention_minutes=app_settings.UMP_JOB_DELETE_INTERVAL_AUTHENTICATED,
+)
+job_cleanup_runner = PeriodicTaskRunner(
+    task=job_cleanup_service.run_once,
+    # The interval between *runs* reuses the anonymous retention window as a
+    # sensible cadence (checking more often than the shortest retention rule
+    # would ever expire anything is pointless); jobs are only ever removed
+    # once they are actually past their own cutoff, this only controls polling
+    # frequency, not correctness.
+    interval_seconds=app_settings.UMP_JOB_DELETE_INTERVAL * 60,
+    name="job-cleanup",
+)
+
 # ---------------------------------------------------------------------------
 # App factory (called once per worker)
 # ---------------------------------------------------------------------------
@@ -237,4 +262,5 @@ app = create_app(
     auth_port=jwt_auth,
     authorization_service=AuthorizationService(providers_port, process_id_validator),
     site_info=StaticSiteInfoAdapter(),
+    background_runners=[job_cleanup_runner],
 )

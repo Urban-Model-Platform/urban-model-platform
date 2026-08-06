@@ -23,6 +23,18 @@ if stage 2 or 3 fails, it rolls back the .gpkg and provider it already wrote
 before re-raising. That way ``exists`` (which tests for the .gpkg) stays an
 honest "fully stored" signal and no orphan survives to confuse a later retry.
 
+``delete`` (V-9) reverses the write order — deregister collections, then the
+provider entity, then the .gpkg — so ldproxy never sees a collection whose
+provider has already vanished. Reconstructing *which* collections belong to a
+job requires knowing its output ids, which nothing else persists; rather than
+add a ``read_provider_entity`` method to ``EntityConfigBackendPort`` (forcing
+both backends to support reading back and re-parsing YAML they only ever
+wrote) ``store`` also writes a tiny sidecar **manifest** — a JSON file listing
+the job's output ids — next to the GeoPackage. The manifest is always a plain
+file on the shared filesystem, regardless of which ``EntityConfigBackendPort``
+is configured, exactly like the GeoPackage itself (see V-6/V-8 notes: binary
+/ large artifacts always live on the file share, never in a ConfigMap).
+
 The adapter is a pure orchestrator: it holds no ldproxy YAML knowledge itself
 (that lives in ldproxy_entities) and no persistence knowledge (that lives in
 the backend). Everything it needs is injected at the composition root (V-8).
@@ -31,9 +43,11 @@ the backend). Everything it needs is injected at the composition root (V-8).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from pathlib import Path
 
+from ump.adapters.result_storage.atomic_fs import atomic_write_text
 from ump.adapters.result_storage.entity_config_backend import EntityConfigBackendPort
 from ump.adapters.result_storage.gpkg_writer import write_layers_to_gpkg
 from ump.adapters.result_storage.ldproxy_entities import (
@@ -91,6 +105,12 @@ class LdproxyResultStorage(ResultStoragePort):
             write_layers_to_gpkg, layers, gpkg_path, self._native_crs
         )
 
+        # Record which output ids this job stored, so `delete` can later
+        # reconstruct the collection ids to deregister without having to read
+        # and re-parse the provider entity YAML (see module docstring).
+        output_ids = [p.output_id for p in payloads]
+        await asyncio.to_thread(self._write_manifest, job_id, output_ids)
+
         registered: list[str] = []
         try:
             # Stage 2: one provider entity with one `types` entry per output.
@@ -124,16 +144,50 @@ class LdproxyResultStorage(ResultStoragePort):
         return references
 
     async def delete(self, job_id: str) -> None:
-        """Remove a job's GeoPackage and provider entity (idempotent).
+        """Remove everything ``store`` created for *job_id* (idempotent).
 
-        NOTE (V-6 scope): this does *not* yet deregister the job's collections
-        from the shared service entity — that, plus the anonymous/expiry cleanup
-        wiring, is V-9. Until then a deleted job leaves its collection entries
-        behind; they resolve to a missing provider and are harmless, but should
-        not be mistaken for a bug.
+        Reverses the write order from ``store``: deregister collections
+        first, then the provider entity, then the GeoPackage and the
+        manifest that named its collections. This ordering matters for the
+        same reason it does when writing — ldproxy must never observe a
+        collection whose provider (or provider's data) has already vanished.
+
+        Idempotent and safe to call unconditionally, including for a job that
+        was never stored (e.g. ``NullResultStorage`` was active at the time,
+        or the job failed before storage): a missing manifest means there is
+        nothing to deregister, and every underlying removal call is itself
+        idempotent (see ``EntityConfigBackendPort`` docstrings).
+
+        Best-effort per step: a failure deregistering one collection does not
+        prevent attempting the rest, or the provider/gpkg/manifest removal —
+        cleanup should make maximum forward progress rather than abandon
+        everything on the first error. Each failure is logged; the caller
+        (the cleanup service, V-9) treats the overall operation as best-effort
+        and proceeds with deleting the job record regardless.
         """
+        output_ids = await asyncio.to_thread(self._read_manifest, job_id)
+        for output_id in output_ids:
+            collection_id = collection_id_for(job_id, output_id)
+            try:
+                await self._registry.deregister_collection(collection_id)
+            except Exception:
+                logger.warning(
+                    "[ldproxy] delete: could not deregister collection %s "
+                    "for job_id=%s",
+                    collection_id,
+                    job_id,
+                )
+
+        try:
+            await asyncio.to_thread(self._backend.delete_provider_entity, job_id)
+        except Exception:
+            logger.warning(
+                "[ldproxy] delete: could not remove provider entity for job_id=%s",
+                job_id,
+            )
+
         await asyncio.to_thread(self._gpkg_path(job_id).unlink, True)  # missing_ok
-        await asyncio.to_thread(self._backend.delete_provider_entity, job_id)
+        await asyncio.to_thread(self._manifest_path(job_id).unlink, True)  # missing_ok
 
     async def exists(self, job_id: str) -> bool:
         """Return True if this job is fully stored.
@@ -152,6 +206,38 @@ class LdproxyResultStorage(ResultStoragePort):
         # ldproxy resolves the provider's `database: {job_id}.gpkg` relative to
         # its `resources/features/` directory, so the file must live here.
         return self._root / "resources" / "features" / f"{job_id}.gpkg"
+
+    def _manifest_path(self, job_id: str) -> Path:
+        # Kept next to the GeoPackage — same directory, same always-on-the-
+        # filesystem guarantee, regardless of the configured entity backend.
+        return self._root / "resources" / "features" / f"{job_id}.manifest.json"
+
+    def _write_manifest(self, job_id: str, output_ids: list[str]) -> None:
+        path = self._manifest_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, json.dumps({"output_ids": output_ids}))
+
+    def _read_manifest(self, job_id: str) -> list[str]:
+        """Return the stored output ids for *job_id*, or [] if never stored.
+
+        A missing or unreadable manifest is treated as "nothing to clean up"
+        rather than an error — ``delete`` must remain safe to call for jobs
+        that were never stored (see its docstring), and a corrupted manifest
+        should not block the rest of cleanup (gpkg/provider removal still run).
+        """
+        path = self._manifest_path(job_id)
+        try:
+            data = json.loads(path.read_text())
+            return list(data.get("output_ids", []))
+        except FileNotFoundError:
+            return []
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            logger.warning(
+                "[ldproxy] delete: could not read manifest for job_id=%s: %s",
+                job_id,
+                exc,
+            )
+            return []
 
     def _reference_for(self, collection_id: str) -> StoredReference:
         collection_url = f"{self._base_url}/collections/{collection_id}"
@@ -189,3 +275,9 @@ class LdproxyResultStorage(ResultStoragePort):
             await asyncio.to_thread(gpkg_path.unlink, True)  # missing_ok
         except OSError:
             logger.warning("[ldproxy] rollback: could not remove %s", gpkg_path)
+        try:
+            await asyncio.to_thread(self._manifest_path(job_id).unlink, True)
+        except OSError:
+            logger.warning(
+                "[ldproxy] rollback: could not remove manifest for job_id=%s", job_id
+            )

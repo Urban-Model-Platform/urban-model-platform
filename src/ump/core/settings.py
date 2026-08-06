@@ -63,7 +63,16 @@ class UmpSettings(BaseSettings):
     # UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
     # UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
     # ---------------------------
+    # Retention period (minutes) after which a *finished* job is eligible for
+    # cleanup (V-9). Applies to anonymous jobs (user_id IS NULL) — unchanged
+    # default/behaviour from the legacy implementation.
     UMP_JOB_DELETE_INTERVAL: int = 240  # minutes
+    # Retention period (minutes) for jobs created by an *authenticated* user.
+    # None (the default) means authenticated jobs are never auto-deleted —
+    # they are a user's history, not disposable scratch state, so opting into
+    # deletion is a deliberate operator decision distinct from the anonymous
+    # cleanup interval above.
+    UMP_JOB_DELETE_INTERVAL_AUTHENTICATED: int | None = None
     # jwt-based user-facing auth
     UMP_API_SERVER_URL_PREFIX: str = "/"
     # Supported API versions (major.minor strings). Used to mount versioned routes like /v1.0/

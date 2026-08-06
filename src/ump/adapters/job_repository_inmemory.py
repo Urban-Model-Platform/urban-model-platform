@@ -3,14 +3,15 @@
 Thread-safe / async-safe using an asyncio.Lock. Suitable for TDD and local tests.
 Not intended for production; replace with SQLModel/Postgres adapter.
 """
+
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, Optional, Sequence, List
 import json
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Sequence
 
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.models.job import Job, JobStatusInfo, StatusCode
@@ -39,13 +40,18 @@ class InMemoryJobRepository(JobRepositoryPort):
                 },
                 "job": job.model_dump(exclude={"status_info"}),
                 "latest_status": latest,
-                "history": [s.model_dump() for s in self._status_history.get(job.id, [])],
+                "history": [
+                    s.model_dump() for s in self._status_history.get(job.id, [])
+                ],
                 "events": self._events.get(job.id, []),
             }
             if job.inputs is not None:
                 payload["inputs"] = job.inputs
             elif job.inputs_storage == "object":
-                payload["inputs"] = {"omitted": True, "reason": "stored externally / too large"}
+                payload["inputs"] = {
+                    "omitted": True,
+                    "reason": "stored externally / too large",
+                }
             path = os.path.join(self._dump_dir, f"{job.id}.json")
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
@@ -105,12 +111,16 @@ class InMemoryJobRepository(JobRepositoryPort):
                 jobs = [j for j in jobs if j.user_id is None]
             elif user_id is not None:
                 if include_public:
-                    jobs = [j for j in jobs if j.user_id == user_id or j.user_id is None]
+                    jobs = [
+                        j for j in jobs if j.user_id == user_id or j.user_id is None
+                    ]
                 else:
                     jobs = [j for j in jobs if j.user_id == user_id]
             return [deepcopy(j) for j in jobs]
 
-    async def mark_failed(self, job_id: str, reason: str, diagnostic: Optional[str] = None) -> Optional[Job]:
+    async def mark_failed(
+        self, job_id: str, reason: str, diagnostic: Optional[str] = None
+    ) -> Optional[Job]:
         async with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -132,7 +142,9 @@ class InMemoryJobRepository(JobRepositoryPort):
             self._dump(job)
             return deepcopy(job)
 
-    async def append_status(self, job_id: str, status_info: JobStatusInfo) -> Optional[Job]:
+    async def append_status(
+        self, job_id: str, status_info: JobStatusInfo
+    ) -> Optional[Job]:
         async with self._lock:
             job = self._jobs.get(job_id)
             if not job:
@@ -150,8 +162,47 @@ class InMemoryJobRepository(JobRepositoryPort):
                 self._events[job_id] = []
             self._events[job_id].append(deepcopy(event))
 
+    async def list_expired(
+        self,
+        anonymous_cutoff: Optional[datetime] = None,
+        authenticated_cutoff: Optional[datetime] = None,
+    ) -> Sequence[Job]:
+        terminal = {
+            str(StatusCode.successful),
+            str(StatusCode.failed),
+            str(StatusCode.dismissed),
+        }
+        async with self._lock:
+            expired: List[Job] = []
+            for job in self._jobs.values():
+                if job.status not in terminal:
+                    continue
+                finished = job.finished_at()
+                if finished is None:
+                    continue
+                cutoff = (
+                    anonymous_cutoff if job.user_id is None else authenticated_cutoff
+                )
+                if cutoff is not None and finished < cutoff:
+                    expired.append(deepcopy(job))
+            return expired
+
+    async def delete(self, job_id: str) -> None:
+        async with self._lock:
+            self._jobs.pop(job_id, None)
+            self._status_history.pop(job_id, None)
+            self._events.pop(job_id, None)
+            if self._dump_dir:
+                path = os.path.join(self._dump_dir, f"{job_id}.json")
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+
     # Convenience accessors (not part of port but useful for tests)
-    async def history(self, job_id: str) -> List[JobStatusInfo]:  # pragma: no cover simple access
+    async def history(
+        self, job_id: str
+    ) -> List[JobStatusInfo]:  # pragma: no cover simple access
         async with self._lock:
             return [deepcopy(s) for s in self._status_history.get(job_id, [])]
 

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional, Sequence
 
 from sqlalchemy import Column, DateTime
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -61,6 +62,12 @@ class JobRecord(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    # Denormalized from status_info.finished so cleanup (V-9) can filter and
+    # index on it directly instead of extracting from JSONB on every run.
+    finished: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True, index=True),
+    )
     inputs_url: Optional[str] = Field(default=None)
     inputs_storage: Optional[str] = Field(default=None)
     inputs_size: Optional[int] = Field(default=None)
@@ -100,6 +107,7 @@ class JobRecord(SQLModel, table=True):
             status=job.status,
             created=job.created,
             updated=job.updated,
+            finished=job.finished_at(),
             status_info=job.status_info.model_dump(mode="json")
             if job.status_info
             else None,
@@ -325,6 +333,8 @@ class SQLModelJobRepository(JobRepositoryPort):
             record.status_info = status_info.model_dump(mode="json")
             record.status = str(status_info.status)
             record.updated = datetime.now(timezone.utc)
+            if status_info.finished is not None:
+                record.finished = status_info.finished
             session.add(record)
 
             await session.commit()
@@ -339,3 +349,57 @@ class SQLModelJobRepository(JobRepositoryPort):
         For now this is a no-op — the history table stores status snapshots
         only.  A separate events table can be added in a future migration.
         """
+
+    async def list_expired(
+        self,
+        anonymous_cutoff: Optional[datetime] = None,
+        authenticated_cutoff: Optional[datetime] = None,
+    ) -> Sequence[Job]:
+        from sqlalchemy import and_, or_
+
+        terminal = {
+            str(StatusCode.successful),
+            str(StatusCode.failed),
+            str(StatusCode.dismissed),
+        }
+        conditions = []
+        if anonymous_cutoff is not None:
+            conditions.append(
+                and_(
+                    col(JobRecord.user_id).is_(None),
+                    col(JobRecord.finished) < anonymous_cutoff,
+                )
+            )
+        if authenticated_cutoff is not None:
+            conditions.append(
+                and_(
+                    col(JobRecord.user_id).is_not(None),
+                    col(JobRecord.finished) < authenticated_cutoff,
+                )
+            )
+        if not conditions:
+            # Both cutoffs disabled — deliberately return nothing rather than
+            # "everything", so a caller cannot accidentally sweep the table.
+            return []
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(JobRecord)
+                .where(col(JobRecord.status).in_(terminal))
+                .where(col(JobRecord.finished).is_not(None))
+                .where(or_(*conditions))
+            )
+            result = await session.execute(stmt)
+            return [row.to_domain() for row in result.scalars().all()]
+
+    async def delete(self, job_id: str) -> None:
+        async with self._session_factory() as session:
+            await session.execute(
+                sa_delete(JobStatusHistoryRecord).where(
+                    col(JobStatusHistoryRecord.job_id) == job_id
+                )
+            )
+            await session.execute(
+                sa_delete(JobRecord).where(col(JobRecord.id) == job_id)
+            )
+            await session.commit()
