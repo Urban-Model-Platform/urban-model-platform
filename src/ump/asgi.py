@@ -13,6 +13,7 @@ Each worker process imports this module independently, so every worker
 gets its own adapter instances (file watchers, HTTP clients, DB connections).
 """
 
+import asyncio
 import os
 
 from ump.adapters.aiohttp_client_adapter import AioHttpClientAdapter
@@ -34,11 +35,18 @@ from ump.core.managers.job_manager import JobManager
 from ump.core.managers.observers import (
     PollingSchedulerObserver,
     ResultsVerificationObserver,
+    ResultStorageObserver,
     StatusHistoryObserver,
 )
 from ump.core.managers.process_manager import ProcessManager
 from ump.core.services.authorization import AuthorizationService
+from ump.core.services.result_storage_coordinator import ResultStorageCoordinator
 from ump.core.settings import app_settings, set_logger
+from ump.composition.result_storage import (
+    build_result_storage_port,
+    ensure_ldproxy_bootstrapped,
+    ldproxy_required,
+)
 
 
 def _validate_resultstore_settings() -> None:
@@ -48,13 +56,13 @@ def _validate_resultstore_settings() -> None:
     This check runs at startup, after providers have been loaded, so the error
     message names the offending process rather than showing a generic config
     complaint later at job-completion time.
+
+    This only validates deterministic configuration — missing settings, an
+    unrecognised backend name.  It deliberately does NOT try to reach the
+    store itself; that reachability check is a separate, non-fatal startup
+    step (see ``ensure_ldproxy_bootstrapped`` below and its call site).
     """
-    ldproxy_required = any(
-        proc.result_storage == "ldproxy"
-        for provider in providers_port.get_providers()
-        for proc in provider.processes
-    )
-    if not ldproxy_required:
+    if not ldproxy_required(providers_port):
         return  # nothing to validate
 
     missing: list[str] = []
@@ -140,6 +148,7 @@ def _job_manager_factory(client, process_manager):
         retry_port=retry_adapter,
         remote_auth=remote_auth,
         poll_lock=poll_lock,
+        result_storage_port=result_storage_port,
         observers=[],
     )
     jm._observers = [
@@ -147,6 +156,25 @@ def _job_manager_factory(client, process_manager):
         PollingSchedulerObserver(schedule_callback=jm._schedule_poll),
         ResultsVerificationObserver(http_client=client),
     ]
+    # Only wire the storage-completion trigger when a real store is active —
+    # NullResultStorage never needs a job's completion, so a plain
+    # pass-through deployment does not pay for an extra no-op observer call
+    # on every job.
+    if result_storage_registry is not None:
+        jm._observers.append(
+            ResultStorageObserver(
+                coordinator=result_storage_coordinator,
+                providers=providers_port,
+                repository=job_repo,
+            )
+        )
+        # Best-effort startup bootstrap of the shared service entity (V-8).
+        # `_job_manager_factory` runs once per worker inside the async
+        # lifespan context (see fastapi.py), so this is a safe place to
+        # schedule it as a background task: it must never block or fail
+        # app startup (see ensure_ldproxy_bootstrapped docstring), only
+        # shorten the delay before the first stored result becomes visible.
+        asyncio.create_task(ensure_ldproxy_bootstrapped(result_storage_registry))
     process_manager.attach_job_manager(jm)
     return jm
 
@@ -167,6 +195,20 @@ http_client = AioHttpClientAdapter()
 process_id_validator = ProcessIdValidator(app_settings.UMP_PROCESS_ID_SEPARATOR)
 remote_auth = RemoteAuthAdapter()
 jwt_auth = JwtAuthAdapter(app_settings)
+
+# Feature V: result storage.  `result_storage_registry` is None when no
+# process is configured with result-storage: ldproxy — in that case
+# `result_storage_port` is a NullResultStorage and no ldproxy dependency
+# (backend, registry, GDAL/geopandas) is ever constructed or imported.
+result_storage_port, result_storage_registry = build_result_storage_port(
+    app_settings, providers_port
+)
+result_storage_coordinator = ResultStorageCoordinator(
+    storage_port=result_storage_port,
+    http_client=http_client,
+    providers=providers_port,
+    remote_auth=remote_auth,
+)
 
 if app_settings.UMP_JOB_STORE == "postgres":
     from ump.adapters.job_repository_sql import SQLModelJobRepository

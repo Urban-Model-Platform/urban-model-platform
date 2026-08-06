@@ -99,6 +99,29 @@ class ServiceRegistry:
 
         await self._read_modify_write(mutate)
 
+    async def ensure_bootstrapped(self) -> None:
+        """Make sure the shared service entity exists, creating it if absent.
+
+        This is a startup convenience (V-8), not a new bootstrap mechanism:
+        it runs the exact same read -> mutate -> write path as
+        ``register_collection``/``deregister_collection``, just with a
+        no-op mutation.  If the entity is already there, this degrades to an
+        unnecessary but harmless read; the skeleton-creation logic used when
+        it is missing lives in exactly one place — inside
+        ``_read_modify_write`` — regardless of which caller triggered it.
+
+        Callers decide what a failure means for them.  The composition root
+        (V-8) treats an exception here as a transient reachability problem
+        (store not mounted yet, API briefly unavailable) and logs a warning
+        instead of failing startup — the registry heals itself on the first
+        successful job anyway. This method itself does not swallow errors.
+        """
+
+        def mutate(service: dict) -> None:
+            pass  # existence is the only thing we care about here
+
+        await self._read_modify_write(mutate)
+
     # ------------------------------------------------------------------
     # Internal: the retry loop
     # ------------------------------------------------------------------
