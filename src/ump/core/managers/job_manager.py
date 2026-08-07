@@ -12,6 +12,7 @@ Responsibilities (Step 1):
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -27,9 +28,9 @@ from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.observers import JobStateObserver
 from ump.core.interfaces.poll_lock import PollLockPort
-from ump.core.interfaces.result_storage import ResultStoragePort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.providers import ProvidersPort
+from ump.core.interfaces.result_storage import ResultStoragePort
 from ump.core.interfaces.status_derivation import StatusDerivationContext
 from ump.core.managers.status_derivation_orchestrator import (
     StatusDerivationOrchestrator,
@@ -164,6 +165,24 @@ class TransientOGCError(OGCProcessException):
     """
 
     pass
+
+
+def _parse_json_document(
+    body_bytes: bytes, content_type: str
+) -> Optional[Dict[str, Any]]:
+    """Parse a remote results body as an OGC document response, if it is one.
+
+    Returns None (never raises) when the content type is not JSON or the
+    body does not decode as a JSON object — callers treat this as "no inline
+    outputs to merge" rather than an error.
+    """
+    if "json" not in (content_type or "").split(";")[0].strip().lower():
+        return None
+    try:
+        parsed = json.loads(body_bytes.decode("utf-8"))
+    except json.JSONDecodeError, UnicodeDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 class JobManager:
@@ -1078,6 +1097,21 @@ class JobManager:
             if self._remote_auth
             else {}
         )
+
+        # V-10: once any output has been persisted to a result store, always
+        # answer with an OGC ``document`` response — one JSON object with one
+        # entry per output, each an inline value or an ``href`` reference link.
+        # A single code path handles any mix of stored/inline outputs; no 302
+        # redirect is used (a redirect has exactly one target and cannot
+        # represent more than one output — see REF-F5 decision log).
+        # Jobs that never stored anything (pass-through / value-only / a
+        # non-downgraded emulate-ref value) are unaffected and keep the
+        # original transparent proxy below.
+        if job.stored_outputs:
+            return await self._build_stored_results_document(
+                job, results_url, auth_headers
+            )
+
         logger.debug(
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
         )
@@ -1116,6 +1150,58 @@ class JobManager:
                 "status": 500,
                 "body": {"detail": "Unexpected error fetching results"},
             }
+
+    async def _build_stored_results_document(
+        self,
+        job: Job,
+        results_url: str,
+        auth_headers: Optional[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        """Build the OGC ``document`` response for a job with stored outputs.
+
+        Stored outputs (``job.stored_outputs``, written by
+        ``ResultStorageCoordinator``) are authoritative and always become an
+        ``href`` entry pointing at the stored collection's ``items``
+        endpoint — no remote call is needed for those. Any output the
+        process produced but did *not* store (a mixed-output job, or one
+        under ``emulate-ref`` where only some outputs were reference-mode)
+        is filled in by fetching the remote document once and copying its
+        inline value.
+
+        Best-effort on the remote fetch: if the process has no further
+        un-stored outputs, or the remote call fails, we still return the
+        outputs we do have rather than fail a request that has real,
+        storable data to offer — this mirrors the best-effort philosophy
+        used throughout result storage (V-9 cleanup, V-7 fallback).
+        """
+        document: Dict[str, Any] = {}
+
+        try:
+            body_bytes, content_type = await self._fetch_results_once(
+                results_url, auth_headers, job
+            )
+            remote_document = _parse_json_document(body_bytes, content_type)
+            if remote_document:
+                document.update(remote_document)
+        except Exception as exc:
+            logger.warning(
+                f"[job:results] remote fetch failed while building stored "
+                f"document job_id={job.id} err={exc} — "
+                "serving stored outputs only"
+            )
+
+        for output_id, ref in job.stored_outputs.items():
+            document[output_id] = {
+                "href": ref["items_url"],
+                "rel": "item",
+                "type": "application/geo+json",
+            }
+
+        return {
+            "status": 200,
+            "content_type": "application/json",
+            "body_bytes": json.dumps(document).encode("utf-8"),
+        }
 
     async def _fetch_results_once(
         self, results_url: str, headers: Optional[Dict[str, str]], job: Job

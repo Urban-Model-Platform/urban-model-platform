@@ -136,7 +136,9 @@ class ResultStorageCoordinator:
         try:
             payloads = await self._fetch_and_extract_payloads(job, process_config)
         except ResultStorageError as exc:
-            return self._handle_storage_failure(exc, job.id, policy, step="fetch")
+            if self._handle_storage_failure(exc, job.id, policy, step="fetch"):
+                await self._record_downgrade(job, repo)
+            return
 
         if not payloads:
             logger.warning(
@@ -149,10 +151,12 @@ class ResultStorageCoordinator:
         try:
             references = await self._storage.store(job.id, payloads)
         except ResultStorageError as exc:
-            return self._handle_storage_failure(exc, job.id, policy, step="store")
+            if self._handle_storage_failure(exc, job.id, policy, step="store"):
+                await self._record_downgrade(job, repo)
+            return
 
         if references:
-            updated_job = _inject_reference_links(job, references)
+            updated_job = _apply_stored_references(job, payloads, references)
             await repo.update(updated_job)
             logger.info(
                 "[storage] stored %d collection(s) for job_id=%s",
@@ -210,24 +214,24 @@ class ResultStorageCoordinator:
         job_id: str,
         policy: str,
         step: str,
-    ) -> None:
+    ) -> bool:
         """Decide what to do when storage fails, based on the configured policy.
+
+        Returns True when the caller must record a client-visible downgrade
+        (``emulate-ref``: value delivered instead of the requested reference).
+        Raises for ``emulate-ref-only``, where the caller has no fallback to
+        offer.
 
         ``emulate-ref``:
             The client was allowed to request either value or reference.  If we
-            cannot store, we fall back silently — the value will be returned
-            inline when the client polls ``/results``.  Log a warning so
-            operators know storage was attempted and failed.
-
-            Known gap (V-10): ``should_store`` only returns True here when the
-            client *explicitly* asked for ``transmissionMode: reference``, so
-            this branch is exactly the case "client asked for a reference and
-            silently gets a value".  The fallback itself is correct — the value
-            channel is open under this policy, so delivering the result beats
-            failing a successfully computed job.  But the downgrade is currently
-            invisible outside the logs.  V-10 must report it back to the caller
-            so it can be persisted on the job and made machine-detectable in the
-            statusInfo / ``GET /results`` response.
+            cannot store, we fall back to the inline value — the value channel
+            is open under this policy, so delivering the result beats failing a
+            successfully computed job.  This branch is reached only when the
+            client *explicitly* asked for ``transmissionMode: reference``
+            (see ``should_store``), so the fallback is precisely the case the
+            client must be told about: True tells ``coordinate`` to persist a
+            machine-detectable marker (``JobStatusInfo.transmissionModeApplied``)
+            instead of leaving it invisible in the logs.
 
         ``emulate-ref-only``:
             The policy promises that results are *always* stored.  We cannot
@@ -243,10 +247,33 @@ class ResultStorageCoordinator:
                 type(exc).__name__,
                 exc,
             )
-            return  # silent fallback; method returns None
+            return True  # caller must record the downgrade
 
         # emulate-ref-only: we promised a reference, so failure is fatal.
         raise exc
+
+    async def _record_downgrade(self, job: Job, repo: JobRepositoryPort) -> None:
+        """Persist the emulate-ref value-fallback so clients can detect it.
+
+        Best-effort: ``job.status_info`` is always set by the time the
+        completion observer runs, but if it were ever missing there is nothing
+        to annotate — skip rather than raise from a background hand-off.
+        """
+        if job.status_info is None:
+            return
+
+        updated_info = job.status_info.model_copy(
+            update={
+                "transmissionModeApplied": "value",
+                "message": _append_message(
+                    job.status_info.message,
+                    "Requested result reference could not be stored; "
+                    "delivering the value inline instead.",
+                ),
+            }
+        )
+        updated_job = job.model_copy(update={"status_info": updated_info})
+        await repo.update(updated_job)
 
 
 # ---------------------------------------------------------------------------
@@ -453,26 +480,64 @@ def _unwrap_output_value(
     return str(raw_value).encode("utf-8"), "text/plain"
 
 
-def _inject_reference_links(job: Job, references: list[StoredReference]) -> Job:
-    """Return a copy of the job with OGC ``rel=results`` links added.
+def _apply_stored_references(
+    job: Job,
+    payloads: list[ResultPayload],
+    references: list[StoredReference],
+) -> Job:
+    """Return a copy of the job with stored references applied.
 
-    One link is added per ``StoredReference``, pointing at the OGC API Features
-    ``/items`` endpoint.  This link is what clients receive when they poll
-    ``GET /jobs/{id}`` after a reference-mode job completes.
+    Two client-visible effects, both additive and idempotent (safe to call
+    again for the same job, e.g. after an observer retry):
 
-    The original job object is not mutated; a ``model_copy`` is returned so
-    callers can safely persist the new version.
+    1. ``job.stored_outputs[output_id]`` — the structured record ``GET
+       /jobs/{id}/results`` (V-10) reads to build the OGC ``document``
+       response, keyed by output_id so no href-parsing is needed.
+    2. ``status_info.links`` — one ``rel="item"`` link per stored output, so
+       the reference is already visible to a client polling ``GET
+       /jobs/{id}`` without waiting for a ``/results`` call.
+
+    Bugfix note: the previous implementation appended to ``job.links`` (the
+    internal, non-client-facing field) while the API serves
+    ``job.status_info.links`` to callers — the stored reference therefore
+    never reached a client.  This corrects that wiring.
+
+    ``store()`` returns references in the same order as the ``payloads`` list
+    it was given (see ``LdproxyResultStorage.store``), so ``zip`` pairs each
+    reference back up with the output_id that produced it.
     """
-    new_links = list(job.links)
+    new_stored_outputs = dict(job.stored_outputs or {})
+    new_links = list((job.status_info.links if job.status_info else None) or [])
+    existing_hrefs = {link.href for link in new_links}
 
-    for ref in references:
-        new_links.append(
-            Link(
-                href=ref.items_url,
-                rel="results",
-                type="application/geo+json",
-                title=f"Stored result collection: {ref.collection_id}",
+    for payload, ref in zip(payloads, references):
+        new_stored_outputs[payload.output_id] = {
+            "collection_id": ref.collection_id,
+            "collection_url": ref.collection_url,
+            "items_url": ref.items_url,
+        }
+        if ref.items_url not in existing_hrefs:
+            new_links.append(
+                Link(
+                    href=ref.items_url,
+                    rel="item",
+                    type="application/geo+json",
+                    title=f"Stored result: {payload.output_id}",
+                )
             )
-        )
+            existing_hrefs.add(ref.items_url)
 
-    return job.model_copy(update={"links": new_links})
+    updates: dict = {"stored_outputs": new_stored_outputs}
+    if job.status_info is not None:
+        updates["status_info"] = job.status_info.model_copy(update={"links": new_links})
+
+    return job.model_copy(update=updates)
+
+
+def _append_message(existing: Optional[str], addition: str) -> str:
+    """Append *addition* to an existing statusInfo message, or return it alone."""
+    if not existing:
+        return addition
+    if addition in existing:
+        return existing  # idempotent: do not duplicate on a re-run
+    return f"{existing} {addition}"

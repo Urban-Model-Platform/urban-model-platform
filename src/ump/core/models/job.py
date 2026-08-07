@@ -28,6 +28,14 @@ class JobStatusInfo(BaseModel):
     progress: Optional[int] = Field(None, ge=0, le=100)
     links: Optional[List[Link]] = None
 
+    # V-10: additive, non-standard property (OGC API Processes explicitly
+    # permits additional properties on statusInfo).  Set to "value" when the
+    # client explicitly requested transmissionMode: reference under the
+    # emulate-ref policy but storage failed, so the result was delivered
+    # inline instead.  None in every other case — including jobs that never
+    # attempted storage — so its mere presence signals a downgrade happened.
+    transmissionModeApplied: Optional[str] = None
+
 
 class JobList(BaseModel):
     jobs: List[JobStatusInfo]
@@ -91,6 +99,15 @@ class Job(BaseModel):
 
     # Links (results, status, etc.)
     links: List[Link] = Field(default_factory=list)
+
+    # V-10: outputs that have been persisted to a result store, keyed by
+    # output_id.  Each value mirrors one core.interfaces.result_storage.
+    # StoredReference as a plain dict ("collection_id", "collection_url",
+    # "items_url") so it survives JSON round-tripping without importing the
+    # dataclass into the JSONB-backed ORM layer.  None/empty means this job
+    # never stored anything — GET /jobs/{id}/results then proxies the remote
+    # result unchanged, exactly as before V-10.
+    stored_outputs: Optional[dict] = None
 
     # Internal/diagnostic fields
     diagnostic: Optional[str] = None  # capture provider error text or failure reason

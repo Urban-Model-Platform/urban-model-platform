@@ -90,6 +90,11 @@ class JobRecord(SQLModel, table=True):
     )
     inputs: Optional[dict] = Field(default=None, sa_column=Column(JSONB, nullable=True))
     links: Optional[list] = Field(default=None, sa_column=Column(JSONB, nullable=True))
+    # V-10: output_id -> {collection_id, collection_url, items_url}. JSONB so
+    # it round-trips without a migration when the shape evolves.
+    stored_outputs: Optional[dict] = Field(
+        default=None, sa_column=Column(JSONB, nullable=True)
+    )
 
     # ------------------------------------------------------------------
     # Domain ↔ ORM mapping bridge
@@ -123,6 +128,7 @@ class JobRecord(SQLModel, table=True):
             version=job.version,
             response_mode=job.response_mode,
             outputs_spec=job.outputs_spec,
+            stored_outputs=job.stored_outputs,
         )
 
     def to_domain(self) -> Job:
@@ -149,6 +155,7 @@ class JobRecord(SQLModel, table=True):
             version=self.version,
             response_mode=self.response_mode,
             outputs_spec=self.outputs_spec,
+            stored_outputs=self.stored_outputs,
         )
 
 
