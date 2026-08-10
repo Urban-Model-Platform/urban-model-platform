@@ -17,7 +17,6 @@ import pytest
 import yaml
 
 from tests.test_result_storage_v3 import _geojson_polygon_collection
-from ump.adapters.result_storage.entity_config_backend import EntityConfigBackendPort
 from ump.adapters.result_storage.entity_config_fs import FilesystemEntityConfigBackend
 from ump.adapters.result_storage.ldproxy_result_storage import LdproxyResultStorage
 from ump.adapters.result_storage.service_registry import ServiceRegistry
@@ -58,9 +57,9 @@ def _provider_path(tmp_path, job_id=JOB_ID):
     return tmp_path / "entities" / "instances" / "providers" / f"{job_id}.yml"
 
 
-def _service(tmp_path):
+def _service(tmp_path) -> dict:
     path = tmp_path / "entities" / "instances" / "services" / "ump-results.yml"
-    return yaml.safe_load(path.read_text()) if path.exists() else None
+    return yaml.safe_load(path.read_text()) if path.exists() else {}
 
 
 class TestStoreHappyPath:
@@ -196,3 +195,96 @@ class TestTransactionalRollback:
         features_dir = tmp_path / "resources" / "features"
         leftovers = list(features_dir.glob(".*")) if features_dir.exists() else []
         assert leftovers == []
+
+
+class TestEnsureDefaultProvider:
+    """The shared service's *default* feature provider (V-6 bootstrap).
+
+    ldproxy 3.x refuses to start an OGC_API service unless it can resolve a
+    default feature provider whose id equals the service id, backed by a real,
+    connectable GeoPackage (``initFailFast``). ``ensure_default_provider`` must
+    create both, idempotently, on every startup — even though no per-job
+    collection ever uses this provider (each overrides ``featureProvider``).
+    """
+
+    def _seed_path(self, tmp_path):
+        return tmp_path / "resources" / "features" / "__ump_default__.gpkg"
+
+    def _default_provider_path(self, tmp_path):
+        return tmp_path / "entities" / "instances" / "providers" / "ump-results.yml"
+
+    @pytest.mark.asyncio
+    async def test_writes_seed_gpkg_and_provider_entity(self, tmp_path):
+        storage = _make_storage(tmp_path)
+        await storage.ensure_default_provider()
+
+        seed = self._seed_path(tmp_path)
+        assert seed.exists(), "seed GeoPackage was not written"
+        gdf = gpd.read_file(str(seed), engine="pyogrio")
+        assert len(gdf) == 1
+
+        provider = yaml.safe_load(self._default_provider_path(tmp_path).read_text())
+        # Provider id MUST equal the service id — that is how ldproxy resolves
+        # the service's default provider.
+        assert provider["id"] == "ump-results"
+        assert provider["connectionInfo"]["database"] == "__ump_default__.gpkg"
+
+    @pytest.mark.asyncio
+    async def test_default_provider_uses_fid_geom_columns(self, tmp_path):
+        """The entity's columns must match what write_seed_gpkg (pyogrio/GDAL)
+        actually emits — fid/geom — or ldproxy fails at query time with a
+        missing-column SQL error (the OBJECTID/Shape class of bug)."""
+        storage = _make_storage(tmp_path)
+        await storage.ensure_default_provider()
+
+        provider = yaml.safe_load(self._default_provider_path(tmp_path).read_text())
+        assert provider["sourcePathDefaults"]["primaryKey"] == "fid"
+        typ = provider["types"]["default"]
+        assert typ["properties"]["id"]["sourcePath"] == "fid"
+        assert typ["properties"]["geometry"]["sourcePath"] == "geom"
+
+    @pytest.mark.asyncio
+    async def test_default_type_is_not_a_collection(self, tmp_path):
+        """The default provider's single type must never appear as a published
+        collection, so it stays invisible under /collections."""
+        storage = _make_storage(tmp_path)
+        await storage.ensure_default_provider()
+
+        service = _service(tmp_path)
+        collections = (service or {}).get("collections") or {}
+        assert "default" not in collections
+        assert "ump-results-default" not in collections
+
+    @pytest.mark.asyncio
+    async def test_idempotent_and_seed_written_only_when_missing(self, tmp_path):
+        """A second call must not fail and must not rewrite the existing seed
+        (the write-only-when-missing optimisation), while still refreshing the
+        provider entity via an atomic overwrite of identical content."""
+        storage = _make_storage(tmp_path)
+        await storage.ensure_default_provider()
+
+        seed = self._seed_path(tmp_path)
+        first_mtime = seed.stat().st_mtime_ns
+
+        await storage.ensure_default_provider()  # must not raise
+        assert seed.stat().st_mtime_ns == first_mtime, (
+            "seed GeoPackage was rewritten on the second call; it should only "
+            "be written when missing"
+        )
+
+    @pytest.mark.asyncio
+    async def test_respects_custom_service_id(self, tmp_path):
+        backend = FilesystemEntityConfigBackend(tmp_path)
+        registry = ServiceRegistry(backend, service_id="custom-svc")
+        storage = LdproxyResultStorage(
+            backend=backend,
+            service_registry=registry,
+            root_path=tmp_path,
+            base_url=BASE_URL,
+            service_id="custom-svc",
+        )
+        await storage.ensure_default_provider()
+
+        path = tmp_path / "entities" / "instances" / "providers" / "custom-svc.yml"
+        provider = yaml.safe_load(path.read_text())
+        assert provider["id"] == "custom-svc"

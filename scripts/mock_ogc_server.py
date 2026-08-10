@@ -45,12 +45,15 @@ Usage (docker-compose-dev.yaml)
         - id: hello-world
         - id: slow
         - id: failing-job
+        - id: random-geo
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import random
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from logging import getLogger
@@ -180,6 +183,102 @@ PROCESSES: List[Dict[str, Any]] = [
         "inputs": {},
         "outputs": {},
         "links": [_self_link("/processes/failing-job")],
+    },
+    {
+        "id": "random-geo",
+        "version": "1.0.0",
+        "title": "Random Geo",
+        "description": (
+            "Produces a GeoJSON FeatureCollection of N random points in "
+            "Hamburg. Use this to exercise UMP result storage (ldproxy)."
+        ),
+        "jobControlOptions": ["async-execute", "sync-execute"],
+        # Advertise both so UMP's emulate-ref policy can offer a reference.
+        "outputTransmission": ["value", "reference"],
+        "inputs": {
+            "count": {
+                "title": "Count",
+                "description": "How many random points to generate (default 5).",
+                "schema": {"type": "integer"},
+                "minOccurs": 0,
+                "maxOccurs": 1,
+            }
+        },
+        "outputs": {
+            "result": {
+                "title": "Result",
+                "description": "A GeoJSON FeatureCollection.",
+                "schema": {
+                    "type": "object",
+                    "contentMediaType": "application/geo+json",
+                },
+            }
+        },
+        "links": [_self_link("/processes/random-geo")],
+    },
+    {
+        "id": "random-geo-ondemand",
+        "version": "1.0.0",
+        "title": "Random Geo (on demand)",
+        "description": (
+            "Same as random-geo. Under UMP's emulate-ref policy, storage is "
+            "only triggered when the client requests transmissionMode: reference."
+        ),
+        "jobControlOptions": ["async-execute", "sync-execute"],
+        "outputTransmission": ["value", "reference"],
+        "inputs": {
+            "count": {
+                "title": "Count",
+                "description": "How many random points to generate (default 5).",
+                "schema": {"type": "integer"},
+                "minOccurs": 0,
+                "maxOccurs": 1,
+            }
+        },
+        "outputs": {
+            "result": {
+                "title": "Result",
+                "description": "A GeoJSON FeatureCollection.",
+                "schema": {
+                    "type": "object",
+                    "contentMediaType": "application/geo+json",
+                },
+            }
+        },
+        "links": [_self_link("/processes/random-geo-ondemand")],
+    },
+    {
+        "id": "random-fgb",
+        "version": "1.0.0",
+        "title": "Random FlatGeobuf",
+        "description": (
+            "Produces N random points in Hamburg as a FlatGeobuf binary "
+            "(application/flatgeobuf), returned as a RAW response. Use this to "
+            "test UMP result storage with a binary geo format."
+        ),
+        "jobControlOptions": ["async-execute", "sync-execute"],
+        "outputTransmission": ["value", "reference"],
+        "inputs": {
+            "count": {
+                "title": "Count",
+                "description": "How many random points to generate (default 5).",
+                "schema": {"type": "integer"},
+                "minOccurs": 0,
+                "maxOccurs": 1,
+            }
+        },
+        "outputs": {
+            "result": {
+                "title": "Result",
+                "description": "A FlatGeobuf FeatureCollection.",
+                "schema": {
+                    "type": "string",
+                    "format": "binary",
+                    "contentMediaType": "application/flatgeobuf",
+                },
+            }
+        },
+        "links": [_self_link("/processes/random-fgb")],
     },
 ]
 
@@ -324,11 +423,150 @@ async def _run_failing(job_id: str, _inputs: Dict[str, Any]) -> None:
     )
 
 
+def _random_hamburg_point() -> Dict[str, Any]:
+    # Rough bounding box around Hamburg, WGS84 (lon, lat) per RFC 7946.
+    lon = round(random.uniform(9.7, 10.3), 6)
+    lat = round(random.uniform(53.4, 53.7), 6)
+    return {"type": "Point", "coordinates": [lon, lat]}
+
+
+async def _run_random_geo(job_id: str, inputs: Dict[str, Any]) -> None:
+    process_id = _jobs[job_id]["process_id"]
+    started = _now()
+    _jobs[job_id]["status"] = "running"
+    _jobs[job_id]["status_info"] = _make_status(
+        job_id, process_id, "running", message="Running", started=started, progress=20
+    )
+    await asyncio.sleep(JOB_DELAY)
+    finished = _now()
+
+    try:
+        count = int(inputs.get("count", 5))
+    except TypeError, ValueError:
+        count = 5
+    count = max(1, min(count, 100))
+
+    feature_collection = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "id": i,
+                "geometry": _random_hamburg_point(),
+                "properties": {"name": f"point-{i}", "value": random.randint(0, 100)},
+            }
+            for i in range(count)
+        ],
+    }
+    # Document response: top-level key is the output id, value is inline GeoJSON.
+    _results[job_id] = {"result": feature_collection}
+    _jobs[job_id]["status"] = "successful"
+    _jobs[job_id]["status_info"] = _make_status(
+        job_id,
+        process_id,
+        "successful",
+        message="Completed",
+        started=started,
+        finished=finished,
+        progress=100,
+    )
+
+
+def _random_points_gdf(count: int):
+    """Build a GeoDataFrame of *count* random Hamburg points (lazy geo import).
+
+    geopandas/shapely are only needed for the FlatGeobuf process, so they are
+    imported here rather than at module load — the rest of the mock server runs
+    without any geospatial dependencies installed.
+    """
+    import geopandas as gpd  # noqa: PLC0415 — deliberate lazy import
+    from shapely.geometry import Point  # noqa: PLC0415
+
+    names, values, points = [], [], []
+    for i in range(count):
+        geom = _random_hamburg_point()
+        lon, lat = geom["coordinates"]
+        points.append(Point(lon, lat))
+        names.append(f"point-{i}")
+        values.append(random.randint(0, 100))
+    return gpd.GeoDataFrame(
+        {"name": names, "value": values, "geometry": points},
+        crs="EPSG:4326",
+    )
+
+
+def _encode_flatgeobuf(count: int) -> bytes:
+    """Serialise *count* random points to FlatGeobuf bytes via GDAL/pyogrio.
+
+    GDAL's FlatGeobuf driver writes to a file path, not an in-memory buffer,
+    so we round-trip through a temporary file and read the bytes back.
+    """
+    gdf = _random_points_gdf(count)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fgb_path = os.path.join(tmpdir, "result.fgb")
+        gdf.to_file(fgb_path, driver="FlatGeobuf")
+        with open(fgb_path, "rb") as handle:
+            return handle.read()
+
+
+async def _run_random_fgb(job_id: str, inputs: Dict[str, Any]) -> None:
+    process_id = _jobs[job_id]["process_id"]
+    started = _now()
+    _jobs[job_id]["status"] = "running"
+    _jobs[job_id]["status_info"] = _make_status(
+        job_id, process_id, "running", message="Running", started=started, progress=20
+    )
+    await asyncio.sleep(JOB_DELAY)
+
+    try:
+        count = int(inputs.get("count", 5))
+    except TypeError, ValueError:
+        count = 5
+    count = max(1, min(count, 100))
+
+    try:
+        fgb_bytes = await asyncio.to_thread(_encode_flatgeobuf, count)
+    except Exception as exc:  # geo deps missing or GDAL error
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["status_info"] = _make_status(
+            job_id,
+            process_id,
+            "failed",
+            message=f"FlatGeobuf generation failed: {exc}",
+            started=started,
+            finished=_now(),
+        )
+        return
+
+    finished = _now()
+    # RAW binary response: stored with a sentinel so get_job_results serves the
+    # bytes verbatim with the FlatGeobuf content type (not JSON).
+    _results[job_id] = {
+        "__binary__": {
+            "media_type": "application/flatgeobuf",
+            "data": fgb_bytes,
+        }
+    }
+    _jobs[job_id]["status"] = "successful"
+    _jobs[job_id]["status_info"] = _make_status(
+        job_id,
+        process_id,
+        "successful",
+        message="Completed",
+        started=started,
+        finished=finished,
+        progress=100,
+    )
+
+
 _RUNNERS = {
     "echo": _run_echo,
     "hello-world": _run_echo,  # same logic
     "slow": _run_slow,
     "failing-job": _run_failing,
+    "random-geo": _run_random_geo,
+    "random-geo-ondemand": _run_random_geo,
+    "random-fgb": _run_random_fgb,
 }
 
 # ---------------------------------------------------------------------------
@@ -483,6 +721,14 @@ async def get_job_results(job_id: str):
     results = _results.get(job_id)
     if not results:
         raise HTTPException(status_code=404, detail="Results not found")
+    # Binary (raw) results carry a sentinel — serve the bytes verbatim with the
+    # remote's content type, exactly as a real OGC server returns a raw output.
+    binary = results.get("__binary__")
+    if binary:
+        return Response(
+            content=binary["data"],
+            media_type=binary["media_type"],
+        )
     return results
 
 

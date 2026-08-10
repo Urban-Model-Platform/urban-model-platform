@@ -176,7 +176,9 @@ def _job_manager_factory(client, process_manager):
         # schedule it as a background task: it must never block or fail
         # app startup (see ensure_ldproxy_bootstrapped docstring), only
         # shorten the delay before the first stored result becomes visible.
-        asyncio.create_task(ensure_ldproxy_bootstrapped(result_storage_registry))
+        asyncio.create_task(
+            ensure_ldproxy_bootstrapped(result_storage_registry, result_storage_port)
+        )
     process_manager.attach_job_manager(jm)
     return jm
 

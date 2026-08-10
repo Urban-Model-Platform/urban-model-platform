@@ -140,6 +140,41 @@ UMP **bootstraps** `ump-results.yml` on startup if it is missing (global `api:`
 building blocks + empty `collections:` map), then only ever mutates the
 `collections:` map.
 
+### ldproxy 4.x deployment (verified on 4.6.1)
+
+The store layout above is **unchanged** by the 3.x→4.x upgrade: ldproxy 4.6.1
+reads the same `entityStorageVersion: 2` entities UMP writes, with **no schema
+migration**. Only the *deployment* differs, verified empirically end-to-end:
+
+- **Store mount = the data-dir itself.** In 4.x `--data-dir` *is* the store
+  root (`FS . [ALL]`), so the shared volume mounts at `/ldproxy/data`, **not**
+  `/ldproxy/data/store` as in 3.x. UMP still writes `entities/` and
+  `resources/` at `{root}`.
+- **API path dropped the `/rest/services` prefix.** Collections are served at
+  `/{service-id}/collections/{collection_id}/items` (so
+  `UMP_RESULTSTORE_LDPROXY_BASE_URL` ends in `…/ump-results`, no `/rest/services`).
+- **Hot-reload actually works.** With `store.watch: true` (see
+  `ldproxy-cfg.yml`) 4.x reloads the affected service/provider on change
+  ("Reloading configuration for service … reloaded successfully") — so a new
+  per-job collection becomes queryable within seconds **without a restart**.
+  This is the concrete win over 3.6.4, which detected changes but never applied
+  them (every job would otherwise have needed a restart).
+- **Default provider still required.** 4.x, like 3.x, refuses to start an
+  `OGC_API` service that cannot resolve a default feature provider whose id
+  equals the service id (verified: removing it yields "No feature provider
+  found"). UMP therefore still writes a seed GPKG + default provider on startup
+  (`ensure_default_provider`), and writes it **before** the service entity so
+  ldproxy's cold-start watcher sees the provider first (ordering is asserted by
+  a unit test).
+- **Fresh-volume bootstrap.** A brand-new volume is root-owned and empty; UMP
+  runs as uid 1000 and ldproxy's watcher only tracks store subdirs that exist
+  at start. The ldproxy service's entrypoint pre-creates the
+  `entities/instances/{providers,services}` + `resources/features` skeleton and
+  `chown`s it to 1000:2000, so first-run needs no manual `chown`/restart. The
+  idle landing page may briefly 404 (no collections yet); the first job's
+  collection self-heals it (service reload once the default provider is
+  `AVAILABLE`).
+
 **Entity / id model:**
 - `provider id = gpkg filename = job UUID`.
 - `collection id = job UUID` (single output) or `{job_uuid}_{output_id}`
@@ -152,9 +187,15 @@ building blocks + empty `collections:` map), then only ever mutates the
 
 **Provider YAML** generated per the attached documented example:
 `providerType: FEATURE`, `providerSubType: SQL`, `connectionInfo.dialect: GPKG`,
-`database: {job_uuid}.gpkg`, one `types.{output_id}` entry per output with an
-`OBJECTID` integer primary key (the GeoPackage fid), a `Shape`
-`PRIMARY_GEOMETRY`, and one typed property per GeoJSON attribute.
+`database: {job_uuid}.gpkg`, one `types.{output_id}` entry per output with a
+`fid` integer primary key (the GeoPackage feature id) as the `ID` property, a
+`geom` `PRIMARY_GEOMETRY`, and one typed property per GeoJSON attribute.
+
+> **Column names (`fid`/`geom`) are load-bearing.** pyogrio/GDAL write the
+> GeoPackage primary key as `fid` and the geometry column as `geom`. The
+> provider entity's `sourcePath`s must match those exact names or ldproxy fails
+> at query time with a missing-column SQL error. (An earlier draft used Esri-
+> style `OBJECTID`/`Shape`; that was wrong and is fixed — verified end-to-end.)
 
 **Service YAML** (`ump-results.yml`): `serviceType: OGC_API`; static global
 `api:` building blocks (`SCHEMA`, `QUERYABLES`, `FILTER`, `CRS`, `FLATGEOBUF` —

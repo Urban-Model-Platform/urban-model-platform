@@ -9,13 +9,24 @@ volumes:
   geoserver_postgres_data:
   kc-db_data:
   geoserver_data:
+  # Shared ldproxy store: UMP writes GeoPackages + entity YAML here, ldproxy
+  # reads and publishes them. Both services mount this same volume.
+  ldproxy_store:
 
 services:
   # !NOTE: this is for testing the current app version in a container, only!
   # development is executed locally
   # and the prod deployment differs anyway!
   ump:
+    # Pull the released registry image by default. To test the CURRENT working
+    # tree instead (e.g. unreleased V-10 result-storage code), run
+    # `docker compose -f docker-compose-dev.yaml build ump` first: Compose then
+    # builds locally and tags the result under this same image name, so nothing
+    # else in the file has to change.
     image: ${CONTAINER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: "unless-stopped"
     ports:
       - ${WEBAPP_PORT_EXTERNAL}:8000
@@ -51,8 +62,69 @@ services:
       UMP_JWT_ROLES_CLAIMS: realm_access.roles,resource_access.ump-client.roles
       UMP_JWKS_CACHE_TTL_SECONDS: 3600
       UMP_PUBLIC_PROCESSES: true
+      #
+      # ── Feature V: result storage (ldproxy) ──────────────────────────────
+      # Store root shared with the ldproxy service (see ldproxy_store volume).
+      UMP_RESULTSTORE_LDPROXY_ROOTPATH: /data/ldproxy-store
+      # Public base URL clients use to fetch stored collections. ldproxy 4.x
+      # serves each API at the root path `/{service-id}` (the `/rest/services`
+      # prefix of 3.x was removed). Adjust host/port to your deployment.
+      UMP_RESULTSTORE_LDPROXY_BASE_URL: "http://localhost:7080/ump-results"
+      UMP_RESULTSTORE_LDPROXY_SERVICE_ID: ump-results
+      UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: 4326
+      UMP_RESULTSTORE_CONFIG_BACKEND: filesystem
     volumes:
       - ./providers.yaml:/app/providers.yaml
+      - ldproxy_store:/data/ldproxy-store
+    depends_on:
+      - ump-db
+      - mock-ogc-server
+      - modelserver
+      - ldproxy
+    networks:
+      - dev
+
+  # ldproxy publishes the stored GeoPackages as OGC API Features collections.
+  # With `store.watch: true` (see ./ldproxy-cfg.yml) ldproxy 4.x *hot-reloads*
+  # the per-job provider/service entities UMP writes — no restart per job.
+  # NOTE: pin to a known-good tag; :latest may change entity-schema
+  # expectations. ldproxy 4.x is backward-compatible with the
+  # entityStorageVersion:2 layout UMP writes
+  # (entities/instances/{providers,services}, resources/features).
+  #
+  # STORE LAYOUT (changed vs 3.x): in 4.x the `--data-dir` *is* the store root
+  # (`FS . [ALL]`), so the shared volume is mounted at /ldproxy/data — NOT at
+  # /ldproxy/data/store as in 3.x. UMP writes entities/ and resources/ at the
+  # volume root, which ldproxy then reads directly as its data dir.
+  #
+  # FRESH-VOLUME BOOTSTRAP (entrypoint override): on a brand-new volume the
+  # dirs are root-owned and empty. UMP runs as uid 1000 and must write the
+  # entity/resource files, and ldproxy's file watcher only registers the
+  # store subdirectories that already exist when it starts. So before launching
+  # ldproxy we (1) pre-create the skeleton UMP writes into and (2) chown it to
+  # uid 1000 so UMP can write and the watcher hot-reloads the very first job
+  # without any manual chown or restart. ldproxy runs as root, so it still
+  # reads everything. This mirrors ldproxy's own entrypoint (see `docker
+  # inspect`), only prefixed with the mkdir/chown.
+  ldproxy:
+    image: iide/ldproxy:4.6.1
+    restart: "unless-stopped"
+    entrypoint:
+      - /bin/bash
+      - -c
+      - >
+        mkdir -p /ldproxy/data/entities/instances/providers
+        /ldproxy/data/entities/instances/services
+        /ldproxy/data/resources/features &&
+        chown -R 1000:2000 /ldproxy/data/entities /ldproxy/data/resources &&
+        exec /ldproxy/bin/ldproxy --data-dir=/ldproxy/data --start-time=$$(date +%s%3N)
+    ports:
+      - "7080:7080"
+    volumes:
+      - ldproxy_store:/ldproxy/data
+      # Global config enabling store `watch: true` so ldproxy hot-reloads the
+      # per-job provider/service entities UMP writes, without a restart.
+      - ./ldproxy-cfg.yml:/ldproxy/data/cfg.yml:ro
     networks:
       - dev
 
@@ -69,10 +141,41 @@ services:
       MOCK_JOB_DELAY_SECONDS: "2"
       MOCK_SLOW_DELAY_SECONDS: "10"
     command: >
-      sh -c "pip install fastapi uvicorn --quiet &&
+      sh -c "pip install fastapi uvicorn geopandas pyogrio shapely --quiet &&
              uvicorn mock_ogc_server:app --host 0.0.0.0 --port 5001"
     ports:
-      - "5001:5001"
+      - "5002:5001"
+    networks:
+      - dev
+
+  # Real pygeoapi model server (modelserver_example) — exposes the rewritten,
+  # UMP-compatible geo processes:
+  #   - hello-world / squareroot   (plain value passthrough)
+  #   - random-geo                 (application/geo+json FeatureCollection)
+  #   - random-fgb / random-fgb-href (raw application/flatgeobuf bytes)
+  # Installed at container start from the mounted source (same pattern as the
+  # mock server) so local edits to the process code take effect on restart.
+  # fiona/shapely ship manylinux wheels with bundled GDAL; libexpat1 is the
+  # only extra system lib fiona needs at runtime.
+  modelserver:
+    image: python:3.11-slim-bookworm
+    working_dir: /app
+    volumes:
+      - ./modelserver_example:/app
+    environment:
+      PYGEOAPI_CONFIG: /app/pygeoapi-config.yaml
+      PYGEOAPI_OPENAPI: /app/example-openapi.yaml
+      PYGEOAPI_SERVER_HOST: modelserver
+      PYGEOAPI_SERVER_PORT_INTERNAL: "5000"
+      PYGEOAPI_SERVER_PORT_EXTERNAL: "5000"
+    command: >
+      sh -c "apt-get update && apt-get install -y --no-install-recommends libexpat1 &&
+             pip install --quiet 'pygeoapi==0.16.1' flask-cors 'fiona>=1.9,<2.0' shapely &&
+             pip install --quiet --no-deps -e /app &&
+             pygeoapi openapi generate /app/pygeoapi-config.yaml --output-file /app/example-openapi.yaml &&
+             pygeoapi serve --flask"
+    ports:
+      - "5000:5000"
     networks:
       - dev
 

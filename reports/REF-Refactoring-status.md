@@ -762,9 +762,11 @@ building blocks + empty `collections:` map), then only ever mutates the
 
 **Provider YAML** generated per the attached documented example:
 `providerType: FEATURE`, `providerSubType: SQL`, `connectionInfo.dialect: GPKG`,
-`database: {job_uuid}.gpkg`, one `types.{output_id}` entry per output with an
-`OBJECTID` integer primary key (the GeoPackage fid), a `Shape`
-`PRIMARY_GEOMETRY`, and one typed property per GeoJSON attribute.
+`database: {job_uuid}.gpkg`, one `types.{output_id}` entry per output with a
+`fid` integer primary key and a `geom` `PRIMARY_GEOMETRY` (these column names
+are load-bearing — pyogrio/GDAL writes the GeoPackage with exactly `fid`/`geom`,
+so the provider mapping must match), plus one typed property per GeoJSON
+attribute.
 
 **Service YAML** (`ump-results.yml`): `serviceType: OGC_API`; static global
 `api:` building blocks (`SCHEMA`, `QUERYABLES`, `FILTER`, `CRS`, `FLATGEOBUF` —

@@ -36,6 +36,7 @@ import json
 import logging
 from typing import Optional
 
+from ump.core.exceptions import OptimisticLockError
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.providers import ProvidersPort
@@ -53,6 +54,13 @@ from ump.core.models.link import Link
 from ump.core.models.providers_config import ProcessConfig
 
 logger = logging.getLogger(__name__)
+
+# The result-storage observer runs concurrently with the pipeline's finalize
+# step; both persist the same job row. Optimistic locking makes one of them
+# lose the race. We re-read and re-apply a bounded number of times so the
+# stored reference is never silently dropped just because finalize committed
+# first.
+_PERSIST_MAX_ATTEMPTS = 5
 
 
 class ResultStorageCoordinator:
@@ -156,8 +164,9 @@ class ResultStorageCoordinator:
             return
 
         if references:
-            updated_job = _apply_stored_references(job, payloads, references)
-            await repo.update(updated_job)
+            await self._persist_stored_references(
+                job, payloads, references, repo
+            )
             logger.info(
                 "[storage] stored %d collection(s) for job_id=%s",
                 len(references),
@@ -258,22 +267,97 @@ class ResultStorageCoordinator:
         Best-effort: ``job.status_info`` is always set by the time the
         completion observer runs, but if it were ever missing there is nothing
         to annotate — skip rather than raise from a background hand-off.
+
+        Uses the same re-read-and-retry strategy as reference persistence so a
+        concurrent finalize commit cannot swallow the downgrade marker.
         """
         if job.status_info is None:
             return
 
-        updated_info = job.status_info.model_copy(
-            update={
-                "transmissionModeApplied": "value",
-                "message": _append_message(
-                    job.status_info.message,
-                    "Requested result reference could not be stored; "
-                    "delivering the value inline instead.",
-                ),
-            }
+        def apply(fresh: Job) -> Optional[Job]:
+            if fresh.status_info is None:
+                return None
+            updated_info = fresh.status_info.model_copy(
+                update={
+                    "transmissionModeApplied": "value",
+                    "message": _append_message(
+                        fresh.status_info.message,
+                        "Requested result reference could not be stored; "
+                        "delivering the value inline instead.",
+                    ),
+                }
+            )
+            return fresh.model_copy(update={"status_info": updated_info})
+
+        await self._persist_with_retry(job, repo, apply, what="downgrade marker")
+
+    async def _persist_stored_references(
+        self,
+        job: Job,
+        payloads: list[ResultPayload],
+        references: list[StoredReference],
+        repo: JobRepositoryPort,
+    ) -> None:
+        """Persist stored-reference links + stored_outputs, retrying on races.
+
+        The transform is a pure function of ``payloads``/``references`` applied
+        onto the freshest job snapshot, so re-applying after a re-read is safe
+        and idempotent (``_apply_stored_references`` keys on href/output_id).
+        """
+
+        def apply(fresh: Job) -> Job:
+            return _apply_stored_references(fresh, payloads, references)
+
+        await self._persist_with_retry(job, repo, apply, what="stored references")
+
+    async def _persist_with_retry(
+        self,
+        job: Job,
+        repo: JobRepositoryPort,
+        apply,
+        what: str,
+    ) -> None:
+        """Read-modify-write ``job`` with bounded retries on optimistic-lock loss.
+
+        ``apply`` receives the freshest job snapshot and returns the mutated
+        copy to persist (or ``None`` to skip). On ``OptimisticLockError`` we
+        re-read the job and re-apply, because the completion observer races the
+        pipeline's finalize step for the same row.
+        """
+        current = job
+        for attempt in range(1, _PERSIST_MAX_ATTEMPTS + 1):
+            updated = apply(current)
+            if updated is None:
+                return
+            try:
+                await repo.update(updated)
+                return
+            except OptimisticLockError:
+                fresh = await repo.get(job.id)
+                if fresh is None:
+                    logger.warning(
+                        "[storage] job_id=%s vanished while persisting %s",
+                        job.id,
+                        what,
+                    )
+                    return
+                current = fresh
+                logger.debug(
+                    "[storage] retry %d/%d persisting %s for job_id=%s "
+                    "after concurrent modification",
+                    attempt,
+                    _PERSIST_MAX_ATTEMPTS,
+                    what,
+                    job.id,
+                )
+        logger.error(
+            "[storage] gave up persisting %s for job_id=%s after %d attempts "
+            "— stored data exists but the job record could not be annotated",
+            what,
+            job.id,
+            _PERSIST_MAX_ATTEMPTS,
         )
-        updated_job = job.model_copy(update={"status_info": updated_info})
-        await repo.update(updated_job)
+
 
 
 # ---------------------------------------------------------------------------
@@ -320,22 +404,67 @@ def _extract_payloads(
     """
     normalised_ct = (content_type or "").split(";")[0].strip().lower()
 
-    if "json" in normalised_ct:
-        # Document response: one JSON object with output_id → value mapping.
+    # Discriminate document response vs raw single-output response.
+    #
+    # An OGC *document* response is served as ``application/json`` and its
+    # top-level keys are output IDs. A raw single output (a GeoJSON
+    # FeatureCollection, a FlatGeobuf, ...) is NOT a document — its bytes ARE
+    # the output.
+    #
+    # Critically, ``application/geo+json`` must be treated as RAW, not as a
+    # document: a GeoJSON FeatureCollection's top-level keys are ``type`` and
+    # ``features``, which are not output IDs. The previous ``"json" in ct``
+    # test wrongly matched ``geo+json`` and tried to iterate those keys,
+    # yielding a bare ``features`` array that pyogrio cannot parse.
+    if normalised_ct == "application/json":
+        # Could be a genuine document response, OR a GeoJSON payload that the
+        # server mislabelled as application/json. Parse once and disambiguate
+        # on the JSON shape rather than trusting the header alone.
         try:
             document = json.loads(body_bytes.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ResultStorageError(
                 f"Could not parse document response body as JSON: {exc}"
             ) from exc
+        if _is_geojson_document(document):
+            # Whole body is a single GeoJSON output despite the generic label.
+            return _extract_single_raw_payload(
+                body_bytes, "application/geo+json", store_outputs_config, outputs_spec
+            )
         return _extract_payloads_from_document(
             document, store_outputs_config, outputs_spec
         )
-    else:
-        # Raw response: the entire body is one output.
-        return _extract_single_raw_payload(
-            body_bytes, normalised_ct, store_outputs_config, outputs_spec
-        )
+
+    # Raw response: the entire body is one output (geo+json, flatgeobuf, ...).
+    return _extract_single_raw_payload(
+        body_bytes, normalised_ct, store_outputs_config, outputs_spec
+    )
+
+
+def _is_geojson_document(document: object) -> bool:
+    """Return True if ``document`` is a GeoJSON object, not an OGC document response.
+
+    GeoJSON objects carry a top-level ``type`` of ``FeatureCollection``,
+    ``Feature``, or a geometry type. An OGC document response instead maps
+    output IDs to values and has no such ``type`` discriminator. Detecting the
+    GeoJSON shape lets us store a single geo output correctly even when a
+    server labels it ``application/json`` instead of ``application/geo+json``.
+    """
+    if not isinstance(document, dict):
+        return False
+    geojson_types = {
+        "FeatureCollection",
+        "Feature",
+        "Point",
+        "MultiPoint",
+        "LineString",
+        "MultiLineString",
+        "Polygon",
+        "MultiPolygon",
+        "GeometryCollection",
+    }
+    return document.get("type") in geojson_types
+
 
 
 def _extract_payloads_from_document(

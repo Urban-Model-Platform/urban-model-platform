@@ -13,7 +13,10 @@ import yaml
 
 from ump.adapters.result_storage.gpkg_writer import GpkgLayerSchema
 from ump.adapters.result_storage.ldproxy_entities import (
+    DEFAULT_PROVIDER_DATABASE,
+    DEFAULT_PROVIDER_TYPE,
     build_collection_block,
+    build_default_provider_entity,
     build_provider_entity,
     build_service_skeleton,
     collection_id_for,
@@ -80,8 +83,8 @@ class TestBuildProviderEntity:
         entity = build_provider_entity("uuid", "layer", schema)
         parsed = self._parse(entity)
 
-        assert parsed["sourcePathDefaults"]["primaryKey"] == "OBJECTID"
-        assert parsed["sourcePathDefaults"]["sortKey"] == "OBJECTID"
+        assert parsed["sourcePathDefaults"]["primaryKey"] == "fid"
+        assert parsed["sourcePathDefaults"]["sortKey"] == "fid"
 
     def test_feature_type_source_path(self, schema):
         entity = build_provider_entity("uuid", "flood_zones", schema)
@@ -95,7 +98,7 @@ class TestBuildProviderEntity:
         parsed = self._parse(entity)
 
         id_prop = parsed["types"]["layer"]["properties"]["id"]
-        assert id_prop["sourcePath"] == "OBJECTID"
+        assert id_prop["sourcePath"] == "fid"
         assert id_prop["role"] == "ID"
         assert "RECEIVABLE" in id_prop["excludedScopes"]
 
@@ -104,7 +107,7 @@ class TestBuildProviderEntity:
         parsed = self._parse(entity)
 
         geom = parsed["types"]["layer"]["properties"]["geometry"]
-        assert geom["sourcePath"] == "Shape"
+        assert geom["sourcePath"] == "geom"
         assert geom["role"] == "PRIMARY_GEOMETRY"
         assert geom["geometryType"] == "POLYGON"  # from fixture schema
 
@@ -174,6 +177,44 @@ class TestBuildServiceSkeleton:
 
 
 # ---------------------------------------------------------------------------
+# Default provider (required by ldproxy 3.x for the shared service to start)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDefaultProviderEntity:
+    def _parse(self, entity: dict) -> dict:
+        return yaml.safe_load(to_yaml(entity))
+
+    def test_id_equals_service_id(self):
+        parsed = self._parse(build_default_provider_entity("ump-results"))
+        # ldproxy resolves the service's default provider by matching ids.
+        assert parsed["id"] == "ump-results"
+
+    def test_backed_by_seed_gpkg(self):
+        parsed = self._parse(build_default_provider_entity())
+        assert parsed["connectionInfo"]["database"] == DEFAULT_PROVIDER_DATABASE
+        assert parsed["connectionInfo"]["dialect"] == "GPKG"
+
+    def test_uses_fid_geom_columns(self):
+        parsed = self._parse(build_default_provider_entity())
+        assert parsed["sourcePathDefaults"]["primaryKey"] == "fid"
+        typ = parsed["types"][DEFAULT_PROVIDER_TYPE]
+        assert typ["properties"]["id"]["sourcePath"] == "fid"
+        assert typ["properties"]["geometry"]["sourcePath"] == "geom"
+
+    def test_single_default_type(self):
+        parsed = self._parse(build_default_provider_entity())
+        # Exactly one type, never registered as a collection, so it stays
+        # invisible under /collections.
+        assert list(parsed["types"].keys()) == [DEFAULT_PROVIDER_TYPE]
+
+    def test_custom_service_id_and_crs(self):
+        parsed = self._parse(build_default_provider_entity("custom-svc", 3857))
+        assert parsed["id"] == "custom-svc"
+        assert parsed["nativeCrs"]["code"] == 3857
+
+
+# ---------------------------------------------------------------------------
 # Collection block
 # ---------------------------------------------------------------------------
 
@@ -187,7 +228,9 @@ class TestBuildCollectionBlock:
         assert entry["enabled"] is True
 
     def test_label_uses_output_id_not_collection_id(self):
-        block = build_collection_block("job-uuid-flood_zones", "job-uuid", "flood_zones")
+        block = build_collection_block(
+            "job-uuid-flood_zones", "job-uuid", "flood_zones"
+        )
         # Label should be the readable output name, not the full collection id
         assert block["job-uuid-flood_zones"]["label"] == "flood_zones"
 

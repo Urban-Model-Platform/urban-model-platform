@@ -154,18 +154,36 @@ def build_result_storage_port(
             "UMP_RESULTSTORE_LDPROXY_BASE_URL",
         ),
         native_crs_epsg=settings.UMP_RESULTSTORE_LDPROXY_NATIVE_CRS,
+        service_id=settings.UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
     )
     return storage_port, registry
 
 
-async def ensure_ldproxy_bootstrapped(registry: Optional[ServiceRegistry]) -> None:
+async def ensure_ldproxy_bootstrapped(
+    registry: Optional[ServiceRegistry],
+    storage_port: Optional[ResultStoragePort] = None,
+) -> None:
     """Best-effort startup bootstrap of the shared ldproxy service entity.
 
-    Deliberately swallows failures: a missing service entity is not fatal
-    (``ServiceRegistry.ensure_bootstrapped`` is idempotent and gets retried by
-    the first successful ``register_collection`` anyway), and the failure
-    modes here are typically *transient reachability* problems — the file
-    share not mounted yet, the Kubernetes API briefly unavailable — rather
+    Two idempotent steps, both required before ldproxy can publish any result.
+    Order matters: the *default provider* is written **before** the service
+    entity. ldproxy (verified on 3.6.x and 4.6.x) refuses to start an
+    ``OGC_API`` service that cannot resolve its default feature provider, and
+    on a cold start its file watcher processes the two new files in write
+    order — so if the service appeared first it would fail to start ("No
+    feature provider found") and would *not* be retried when the provider file
+    arrived a moment later. Writing the provider first makes the service start
+    on the first pass.
+
+    1. The service's *default* feature provider exists
+       (``LdproxyResultStorage.ensure_default_provider``) — even though every
+       published collection overrides ``featureProvider`` per-collection.
+    2. The shared service entity exists (``ServiceRegistry.ensure_bootstrapped``).
+
+    Deliberately swallows failures: both steps are idempotent and get retried
+    on the first successful ``register_collection`` / job store anyway, and the
+    failure modes here are typically *transient reachability* problems — the
+    file share not mounted yet, the Kubernetes API briefly unavailable — rather
     than configuration errors. Configuration errors (missing settings, unknown
     backend name) are caught earlier and deliberately raise instead of landing
     here, so anything reaching this except-block is an operational condition
@@ -177,6 +195,14 @@ async def ensure_ldproxy_bootstrapped(registry: Optional[ServiceRegistry]) -> No
         return
 
     try:
+        # Write the default provider FIRST, then the service entity, so ldproxy's
+        # cold-start watcher sees the provider before the service and the service
+        # starts on the first pass (see docstring). Only LdproxyResultStorage
+        # carries a default provider; NullResultStorage (which never comes with a
+        # non-None registry) does not — guard by type so the composition stays
+        # honest about optional wiring.
+        if isinstance(storage_port, LdproxyResultStorage):
+            await storage_port.ensure_default_provider()
         await registry.ensure_bootstrapped()
     except Exception as exc:  # noqa: BLE001 — deliberately broad, see docstring
         logger.warning(

@@ -49,8 +49,13 @@ from pathlib import Path
 
 from ump.adapters.result_storage.atomic_fs import atomic_write_text
 from ump.adapters.result_storage.entity_config_backend import EntityConfigBackendPort
-from ump.adapters.result_storage.gpkg_writer import write_layers_to_gpkg
+from ump.adapters.result_storage.gpkg_writer import (
+    write_layers_to_gpkg,
+    write_seed_gpkg,
+)
 from ump.adapters.result_storage.ldproxy_entities import (
+    DEFAULT_PROVIDER_DATABASE,
+    build_default_provider_entity,
     build_provider_entity_multi,
     collection_id_for,
     to_yaml,
@@ -75,6 +80,7 @@ class LdproxyResultStorage(ResultStoragePort):
         root_path: str | Path,
         base_url: str,
         native_crs_epsg: int = 4326,
+        service_id: str = "ump-results",
     ) -> None:
         self._backend = backend
         self._registry = service_registry
@@ -82,6 +88,7 @@ class LdproxyResultStorage(ResultStoragePort):
         # Normalise once so URL construction never produces a double slash.
         self._base_url = base_url.rstrip("/")
         self._native_crs = native_crs_epsg
+        self._service_id = service_id
 
     # ------------------------------------------------------------------
     # ResultStoragePort
@@ -197,6 +204,40 @@ class LdproxyResultStorage(ResultStoragePort):
         idempotency guard — and it lives on the filesystem for both backends.
         """
         return self._gpkg_path(job_id).exists()
+
+    async def ensure_default_provider(self) -> None:
+        """Create the shared service's default feature provider if absent.
+
+        ldproxy (verified on 3.6.x and 4.6.x) will not start an ``OGC_API``
+        service unless it can resolve a default feature provider whose id equals
+        the service id, backed by a real, connectable GeoPackage
+        (``initFailFast`` validates the file at startup). Per-job providers
+        alone do not satisfy this, even though every published collection
+        overrides ``featureProvider`` per-collection — so without this the
+        service never starts and no stored result is reachable.
+
+        Idempotent and cheap to call on every startup: the seed GeoPackage is
+        written only when missing, and the provider entity write is an atomic
+        overwrite of identical content. The seed's single ``default`` type is
+        never registered as a collection, so it stays invisible under
+        ``/collections``.
+        """
+        seed_path = self._root / "resources" / "features" / DEFAULT_PROVIDER_DATABASE
+        seed_path.parent.mkdir(parents=True, exist_ok=True)
+        if not seed_path.exists():
+            await asyncio.to_thread(write_seed_gpkg, seed_path, self._native_crs)
+
+        provider_yaml = to_yaml(
+            build_default_provider_entity(self._service_id, self._native_crs)
+        )
+        await asyncio.to_thread(
+            self._backend.write_provider_entity, self._service_id, provider_yaml
+        )
+        logger.info(
+            "[ldproxy] ensured default feature provider '%s' (seed=%s)",
+            self._service_id,
+            seed_path.name,
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers

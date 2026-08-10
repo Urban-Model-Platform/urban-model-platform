@@ -178,3 +178,90 @@ class TestEnsureLdproxyBootstrapped:
 
         # Must not raise.
         await ensure_ldproxy_bootstrapped(registry)
+
+    @pytest.mark.asyncio
+    async def test_ensures_default_provider_for_ldproxy_port(self):
+        """When a real LdproxyResultStorage is passed, its default feature
+        provider must be created — this is the second bootstrap step ldproxy
+        3.x requires before it will start the shared OGC_API service.
+        """
+        registry = Mock()
+        registry.ensure_bootstrapped = AsyncMock()
+        port = Mock(spec=LdproxyResultStorage)
+        port.ensure_default_provider = AsyncMock()
+
+        await ensure_ldproxy_bootstrapped(registry, port)
+
+        registry.ensure_bootstrapped.assert_awaited_once()
+        port.ensure_default_provider.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_default_provider_for_non_ldproxy_port(self):
+        """A non-Ldproxy port (e.g. NullResultStorage) carries no default
+        provider; the isinstance guard must skip it rather than call a method
+        it does not have.
+        """
+        registry = Mock()
+        registry.ensure_bootstrapped = AsyncMock()
+        port = NullResultStorage()
+
+        # Must not raise (NullResultStorage has no ensure_default_provider).
+        await ensure_ldproxy_bootstrapped(registry, port)
+
+        registry.ensure_bootstrapped.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_skips_default_provider_when_port_is_none(self):
+        """The default storage_port argument is None (callers that only pass a
+        registry). The registry step still runs; nothing else is attempted.
+        """
+        registry = Mock()
+        registry.ensure_bootstrapped = AsyncMock()
+
+        await ensure_ldproxy_bootstrapped(registry)
+
+        registry.ensure_bootstrapped.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_default_provider_failure_is_swallowed(self):
+        """A failure in the default-provider step is transient (share not
+        mounted yet) and must be swallowed exactly like the registry step \u2014
+        it self-heals on the first stored result.
+        """
+        registry = Mock()
+        registry.ensure_bootstrapped = AsyncMock()
+        port = Mock(spec=LdproxyResultStorage)
+        port.ensure_default_provider = AsyncMock(
+            side_effect=ConnectionError("share not mounted yet")
+        )
+
+        # Must not raise.
+        await ensure_ldproxy_bootstrapped(registry, port)
+
+    @pytest.mark.asyncio
+    async def test_default_provider_written_before_service(self):
+        """Order is a correctness requirement, not an incidental detail.
+
+        ldproxy refuses to start a service whose default provider it cannot
+        resolve, and on a cold start its file watcher processes new entity
+        files in write order and does NOT retry a service that failed for a
+        missing provider. So the provider MUST be written before the service
+        entity, or the very first job's collection is unreachable until an
+        ldproxy restart.
+        """
+        manager = Mock()
+        registry = Mock()
+        registry.ensure_bootstrapped = AsyncMock()
+        port = Mock(spec=LdproxyResultStorage)
+        port.ensure_default_provider = AsyncMock()
+        # Attach both to a shared manager so call order is recorded globally.
+        manager.attach_mock(registry.ensure_bootstrapped, "service")
+        manager.attach_mock(port.ensure_default_provider, "provider")
+
+        await ensure_ldproxy_bootstrapped(registry, port)
+
+        order = [c[0] for c in manager.mock_calls]
+        assert order == ["provider", "service"], (
+            f"default provider must be written before the service entity, "
+            f"got call order: {order}"
+        )

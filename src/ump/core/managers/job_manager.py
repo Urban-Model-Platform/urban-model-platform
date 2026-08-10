@@ -180,7 +180,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
 

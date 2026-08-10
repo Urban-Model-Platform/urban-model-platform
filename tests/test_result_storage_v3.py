@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -28,10 +27,10 @@ from ump.adapters.result_storage.atomic_fs import (
     atomic_write_text,
 )
 from ump.adapters.result_storage.gpkg_writer import (
-    SUPPORTED_MEDIA_TYPES,
-    GpkgLayerSchema,
+    DEFAULT_SEED_LAYER,
     _normalise_media_type,
     _require_supported_type,
+    write_seed_gpkg,
     write_to_gpkg,
 )
 from ump.core.interfaces.result_storage import UnsupportedResultError
@@ -212,7 +211,7 @@ class TestRequireSupportedType:
 
 class TestWriteToGpkg:
     def test_geojson_polygon_roundtrip(self, tmp_path):
-        """GeoJSON FeatureCollection writes a readable GeoPackage with correct schema."""
+        """GeoJSON FeatureCollection writes a readable GeoPackage w/ correct schema."""
         import geopandas as gpd
 
         path = tmp_path / "result.gpkg"
@@ -255,7 +254,7 @@ class TestWriteToGpkg:
         assert len(gdf) == 2
 
     def test_empty_collection_raises(self, tmp_path):
-        """An empty FeatureCollection is rejected — ldproxy needs at least one feature."""
+        """An empty FeatureCollection is rejected — ldproxy needs ≥ 1 feature."""
         path = tmp_path / "empty.gpkg"
         with pytest.raises(UnsupportedResultError, match="empty"):
             write_to_gpkg(
@@ -320,3 +319,61 @@ class TestWriteToGpkg:
             target_crs_epsg=4326,
         )
         assert schema.crs_epsg == 4326
+
+
+class TestWriteSeedGpkg:
+    """The seed GeoPackage backs the ldproxy default provider.
+
+    ldproxy 3.x refuses to start an OGC_API service without a resolvable
+    default feature provider whose backing file exists and is connectable
+    (``initFailFast``). ``write_seed_gpkg`` produces that file. The columns
+    it writes (``fid`` primary key, ``geom`` geometry) must match exactly what
+    ``build_default_provider_entity`` declares, or ldproxy fails at query time
+    with a missing-column SQL error — the same class of bug that the earlier
+    OBJECTID/Shape mismatch caused.
+    """
+
+    def test_creates_readable_single_feature_gpkg(self, tmp_path):
+        import geopandas as gpd
+
+        path = tmp_path / "__ump_default__.gpkg"
+        write_seed_gpkg(path)
+
+        assert path.exists(), "seed GeoPackage was not created"
+        gdf = gpd.read_file(str(path), layer=DEFAULT_SEED_LAYER, engine="pyogrio")
+        assert len(gdf) == 1, "seed layer must contain exactly one feature"
+
+    def test_layer_name_matches_default_type(self, tmp_path):
+        """The layer name must equal the type sourcePath the default provider
+        declares (``/default``), so ldproxy can resolve it."""
+        import pyogrio
+
+        path = tmp_path / "seed.gpkg"
+        write_seed_gpkg(path)
+
+        layers = [name for name, _ in pyogrio.list_layers(str(path))]
+        assert layers == [DEFAULT_SEED_LAYER]
+
+    def test_geometry_is_point(self, tmp_path):
+        import geopandas as gpd
+
+        path = tmp_path / "seed.gpkg"
+        write_seed_gpkg(path)
+
+        gdf = gpd.read_file(str(path), engine="pyogrio")
+        assert gdf.geom_type.iloc[0] == "Point"
+
+    def test_target_crs_is_respected(self, tmp_path):
+        import geopandas as gpd
+
+        path = tmp_path / "seed.gpkg"
+        write_seed_gpkg(path, target_crs_epsg=3857)
+
+        gdf = gpd.read_file(str(path), engine="pyogrio")
+        assert gdf.crs is not None
+        assert gdf.crs.to_epsg() == 3857
+
+    def test_atomic_no_temp_file_left(self, tmp_path):
+        path = tmp_path / "seed.gpkg"
+        write_seed_gpkg(path)
+        assert list(tmp_path.glob(".*.tmp")) == []

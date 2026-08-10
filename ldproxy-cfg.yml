@@ -1,0 +1,12 @@
+# ldproxy global configuration (v4.x)
+#
+# Enable filesystem watching of the store so that new feature-provider and
+# service entities written by UMP (into the shared ldproxy_store volume) are
+# hot-reloaded WITHOUT restarting the ldproxy container. Unlike 3.x \u2014 which
+# detected store changes but never applied them \u2014 ldproxy 4.x actually reloads
+# the affected service/provider on change ("Reloading configuration for service
+# ... reloaded successfully"), which is essential in production where every
+# completed job writes a new per-job provider entity and collection.
+store:
+  mode: RW
+  watch: true

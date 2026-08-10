@@ -30,12 +30,10 @@ from __future__ import annotations
 import io
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import geopandas as gpd
-import pandas as pd
 
 from ump.adapters.result_storage.atomic_fs import atomic_write_path
 from ump.core.interfaces.result_storage import UnsupportedResultError
@@ -147,7 +145,8 @@ def write_to_gpkg(
 
     Args:
         body_bytes:      Raw feature data in a supported format.
-        media_type:      IANA media type of *body_bytes* (e.g. ``application/geo+json``).
+        media_type:      IANA media type of *body_bytes*
+                         (e.g. ``application/geo+json``).
         layer_name:      Name of the layer inside the GeoPackage.  Also used as
                          the ldproxy ``featureType`` identifier.
         output_path:     Destination ``.gpkg`` file path.  The parent directory
@@ -388,6 +387,35 @@ def _write_gpkg(gdf: gpd.GeoDataFrame, layer_name: str, output_path: Path) -> No
     """Write *gdf* to *output_path* as a GeoPackage layer, atomically."""
     with atomic_write_path(output_path) as tmp:
         gdf.to_file(str(tmp), driver="GPKG", layer=layer_name, engine="pyogrio")
+
+
+# Layer name inside the seed GeoPackage that backs the ldproxy default provider.
+DEFAULT_SEED_LAYER = "default"
+
+
+def write_seed_gpkg(output_path: Path, target_crs_epsg: int = 4326) -> None:
+    """Write the minimal 1-feature GeoPackage that backs the ldproxy default provider.
+
+    ldproxy (verified on 3.6.x and 4.6.x) will not start an ``OGC_API`` service
+    unless it can resolve a *default* feature provider whose id equals the
+    service id — even when every published collection overrides
+    ``featureProvider`` per-collection (see
+    ``ldproxy_entities.build_default_provider_entity``). That default provider
+    is a GPKG provider, and ldproxy validates the backing file exists at
+    startup (``initFailFast``), so a real, connectable file must be present.
+
+    This writes a tiny single-point layer named ``DEFAULT_SEED_LAYER``. It is
+    never registered as a collection, so it stays invisible under
+    ``/collections`` while satisfying the startup requirement. The columns
+    (``fid`` primary key, ``geom`` geometry) are exactly what pyogrio/GDAL
+    emit, matching the entity the default provider declares.
+    """
+    gdf = gpd.GeoDataFrame(
+        {"note": ["ump default provider seed"]},
+        geometry=gpd.points_from_xy([0.0], [0.0]),
+        crs=f"EPSG:{target_crs_epsg}",
+    )
+    _write_gpkg(gdf, DEFAULT_SEED_LAYER, output_path)
 
 
 def _write_gpkg_layers(

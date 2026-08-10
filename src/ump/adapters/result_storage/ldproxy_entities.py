@@ -60,13 +60,13 @@ def build_provider_entity(
 
     - ``database`` is ``{job_uuid}.gpkg`` — ldproxy resolves this relative to
       its configured ``resources/features/`` directory.
-    - ``primaryKey`` and ``sortKey`` are both ``OBJECTID``, matching the FID
-      column that geopandas writes to GeoPackage.
+    - ``primaryKey`` and ``sortKey`` are both ``fid``, the integer primary-key
+      column that pyogrio/GDAL writes to every GeoPackage layer by default.
     - ``typeValidation: NONE`` keeps startup permissive during early iteration.
-    - The ``id`` pseudo-property maps OBJECTID and is hidden from reads
+    - The ``id`` pseudo-property maps ``fid`` and is hidden from reads
       (``excludedScopes: [RECEIVABLE]``).
-    - The ``geometry`` pseudo-property maps the ``Shape`` column that
-      geopandas/pyogrio writes by default.
+    - The ``geometry`` pseudo-property maps the ``geom`` column that
+      pyogrio/GDAL writes to GeoPackage by default.
     """
     validate_output_id(output_id)
     return build_provider_entity_multi(job_uuid, {output_id: schema}, crs_epsg)
@@ -127,8 +127,8 @@ def build_provider_entity_multi(
             },
         },
         "sourcePathDefaults": {
-            "primaryKey": "OBJECTID",
-            "sortKey": "OBJECTID",
+            "primaryKey": "fid",
+            "sortKey": "fid",
         },
         "queryGeneration": {
             "chunkSize": 10000,
@@ -137,6 +137,73 @@ def build_provider_entity_multi(
         "types": {
             output_id: _build_feature_type(output_id, schema)
             for output_id, schema in schemas.items()
+        },
+    }
+
+
+# Filename (relative to resources/features/) of the seed GeoPackage that backs
+# the default provider, and the single type it exposes. Kept in sync with
+# gpkg_writer.DEFAULT_SEED_LAYER.
+DEFAULT_PROVIDER_DATABASE = "__ump_default__.gpkg"
+DEFAULT_PROVIDER_TYPE = "default"
+
+
+def build_default_provider_entity(
+    service_id: str = "ump-results", crs_epsg: int = 4326
+) -> dict:
+    """Build the *default* feature provider entity the shared service requires.
+
+    ldproxy (verified on 3.6.x and 4.6.x) fails to start an ``OGC_API`` service
+    unless it can resolve a default feature provider whose id equals the service
+    id — even when every published collection overrides ``featureProvider``
+    per-collection. The
+    provider id therefore equals *service_id*, and it is backed by a tiny seed
+    GeoPackage (see ``gpkg_writer.write_seed_gpkg``) exposing a single
+    ``default`` type. That type is never registered as a collection, so it
+    stays invisible under ``/collections`` while satisfying the requirement.
+
+    The column names (``fid`` primary key, ``geom`` geometry) match exactly
+    what pyogrio/GDAL write, identical to the per-job provider entities.
+    """
+    return {
+        "id": service_id,
+        "enabled": True,
+        "entityStorageVersion": 2,
+        "providerType": "FEATURE",
+        "providerSubType": "SQL",
+        "nativeCrs": {"code": crs_epsg, "forceAxisOrder": "LON_LAT"},
+        "typeValidation": "NONE",
+        "connectionInfo": {
+            "dialect": "GPKG",
+            "database": DEFAULT_PROVIDER_DATABASE,
+            "pool": {
+                "maxConnections": -1,
+                "minConnections": 1,
+                "initFailFast": True,
+                "idleTimeout": "10m",
+                "shared": False,
+            },
+        },
+        "sourcePathDefaults": {"primaryKey": "fid", "sortKey": "fid"},
+        "types": {
+            DEFAULT_PROVIDER_TYPE: {
+                "sourcePath": f"/{DEFAULT_PROVIDER_TYPE}",
+                "properties": {
+                    "id": {
+                        "sourcePath": "fid",
+                        "type": "INTEGER",
+                        "role": "ID",
+                        "excludedScopes": ["RECEIVABLE"],
+                    },
+                    "geometry": {
+                        "sourcePath": "geom",
+                        "type": "GEOMETRY",
+                        "role": "PRIMARY_GEOMETRY",
+                        "geometryType": "POINT",
+                    },
+                    "note": {"sourcePath": "note", "type": "STRING"},
+                },
+            }
         },
     }
 
@@ -184,7 +251,7 @@ def build_collection_block(
     job_uuid: str,
     output_id: str,
 ) -> dict:
-    """Build a single collection entry to be merged into the service ``collections`` map.
+    """Build a single collection entry for the service ``collections`` map.
 
     Returns a one-key dict ``{collection_id: {...}}`` so the caller can do::
 
@@ -260,13 +327,13 @@ def _build_feature_type(output_id: str, schema: GpkgLayerSchema) -> dict:
     """
     properties: dict = {
         "id": {
-            "sourcePath": "OBJECTID",
+            "sourcePath": "fid",
             "type": "INTEGER",
             "role": "ID",
             "excludedScopes": ["RECEIVABLE"],
         },
         "geometry": {
-            "sourcePath": "Shape",
+            "sourcePath": "geom",
             "type": "GEOMETRY",
             "role": "PRIMARY_GEOMETRY",
             "geometryType": schema.geometry_type,
