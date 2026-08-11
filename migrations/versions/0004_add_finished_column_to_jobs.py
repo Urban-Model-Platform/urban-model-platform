@@ -1,7 +1,7 @@
 """add finished column to jobs for efficient cleanup queries
 
 The `finished` timestamp previously lived only inside the `status_info` JSONB
-blob. Feature V's cleanup service (V-9) needs to filter jobs by "finished
+blob. The cleanup service needs to filter jobs by "finished
 before cutoff X", split by two different retention rules (anonymous vs.
 authenticated). Doing that against JSONB text extraction is both fragile
 (depends on the exact key/serialisation format) and unindexed (full table

@@ -1,6 +1,6 @@
 """add stored_outputs column to jobs for V-10 result-storage references
 
-Feature V, V-10 makes stored result references visible to clients. When an
+This makes stored result references visible to clients. When an
 output is written to ldproxy, UMP records a small mapping per output:
 
     output_id -> {collection_id, collection_url, items_url}

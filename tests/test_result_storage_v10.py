@@ -412,6 +412,58 @@ class TestGetResultsDocument:
         assert body["voronoi"]["href"] == "https://geo/collections/x/items"
 
     @pytest.mark.asyncio
+    async def test_emulate_ref_only_never_leaks_inline_values(self):
+        """emulate-ref-only must return only href references, never fetching
+        or merging the remote document (see ProcessConfig.transmission_mode_policy:
+        the value channel is never open under this policy)."""
+        job = _job(
+            stored_outputs={
+                "voronoi": {
+                    "collection_id": f"{JOB_ID}-voronoi",
+                    "collection_url": "https://geo/collections/x",
+                    "items_url": "https://geo/collections/x/items",
+                }
+            }
+        )
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            side_effect=AssertionError(
+                "remote must not be fetched under emulate-ref-only"
+            )
+        )
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+        providers.get_process_config = Mock(
+            return_value=ProcessConfig(
+                id="process",
+                **{
+                    "transmission-mode-policy": "emulate-ref-only",
+                    "result-storage": "ldproxy",
+                },
+            )
+        )
+
+        manager = _job_manager(providers, http_client, repo)
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 200
+        import json
+
+        body = json.loads(result["body_bytes"])
+        assert body == {
+            "voronoi": {
+                "href": "https://geo/collections/x/items",
+                "rel": "item",
+                "type": "application/geo+json",
+            }
+        }
+
+    @pytest.mark.asyncio
     async def test_job_without_stored_outputs_keeps_raw_proxy_behaviour(self):
         """Jobs that never stored anything are unaffected by V-10."""
         job = _job(stored_outputs=None)

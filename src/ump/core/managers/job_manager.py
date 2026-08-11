@@ -180,7 +180,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -1108,8 +1108,9 @@ class JobManager:
         # non-downgraded emulate-ref value) are unaffected and keep the
         # original transparent proxy below.
         if job.stored_outputs:
+            policy = await self._resolve_transmission_mode_policy(job)
             return await self._build_stored_results_document(
-                job, results_url, auth_headers
+                job, results_url, auth_headers, policy
             )
 
         logger.debug(
@@ -1151,44 +1152,78 @@ class JobManager:
                 "body": {"detail": "Unexpected error fetching results"},
             }
 
+    async def _resolve_transmission_mode_policy(self, job: Job) -> Optional[str]:
+        """Best-effort lookup of the process's configured transmission-mode-policy.
+
+        Used only to decide the shape of the stored results document (see
+        ``_build_stored_results_document``). Never raises: a missing or
+        unresolvable process config (e.g. provider removed from
+        ``providers.yaml`` mid-run) falls back to ``None``, which keeps the
+        previous merge-with-remote behaviour rather than failing the request.
+        """
+        try:
+            provider_name, _ = await self._resolve_provider(job.process_id)
+            process_config = self._providers.get_process_config(
+                provider_name, job.process_id
+            )
+            return process_config.transmission_mode_policy if process_config else None
+        except Exception as exc:
+            logger.debug(
+                f"[job:results] could not resolve transmission-mode-policy "
+                f"job_id={job.id} process_id={job.process_id} err={exc}"
+            )
+            return None
+
     async def _build_stored_results_document(
         self,
         job: Job,
         results_url: str,
         auth_headers: Optional[Dict[str, str]],
+        policy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build the OGC ``document`` response for a job with stored outputs.
 
         Stored outputs (``job.stored_outputs``, written by
         ``ResultStorageCoordinator``) are authoritative and always become an
         ``href`` entry pointing at the stored collection's ``items``
-        endpoint — no remote call is needed for those. Any output the
-        process produced but did *not* store (a mixed-output job, or one
-        under ``emulate-ref`` where only some outputs were reference-mode)
-        is filled in by fetching the remote document once and copying its
-        inline value.
+        endpoint — no remote call is needed for those.
 
-        Best-effort on the remote fetch: if the process has no further
-        un-stored outputs, or the remote call fails, we still return the
-        outputs we do have rather than fail a request that has real,
-        storable data to offer — this mirrors the best-effort philosophy
-        used throughout result storage (V-9 cleanup, V-7 fallback).
+        Under ``transmission-mode-policy: emulate-ref-only`` the value
+        channel is never open (see ``ProcessConfig``): the client cannot
+        request ``value`` and every output is unconditionally stored. The
+        remote document is therefore never fetched or merged in this case —
+        doing so previously leaked the remote's inline value (or, if the
+        remote returned a non-document raw body, its unrelated top-level
+        keys) alongside the reference link. The response now consists
+        exclusively of the stored ``href`` references, matching the
+        policy's contract that only reference transmission is ever visible
+        to the client.
+
+        For ``emulate-ref`` (mixed value/reference per request), an output
+        the process produced but did *not* store — a mixed-output job, or
+        one where only some outputs were requested as reference — is still
+        filled in by fetching the remote document once and copying its
+        inline value. This fetch is best-effort: if it fails, we still
+        return the outputs we do have rather than fail a request that has
+        real, storable data to offer (mirrors the best-effort philosophy
+        used throughout result storage — V-9 cleanup, V-7 fallback).
         """
         document: Dict[str, Any] = {}
 
-        try:
-            body_bytes, content_type = await self._fetch_results_once(
-                results_url, auth_headers, job
-            )
-            remote_document = _parse_json_document(body_bytes, content_type)
-            if remote_document:
-                document.update(remote_document)
-        except Exception as exc:
-            logger.warning(
-                f"[job:results] remote fetch failed while building stored "
-                f"document job_id={job.id} err={exc} — "
-                "serving stored outputs only"
-            )
+        if policy != "emulate-ref-only":
+            try:
+                body_bytes, content_type = await self._fetch_results_once(
+                    results_url, auth_headers, job
+                )
+                remote_document = _parse_json_document(body_bytes, content_type)
+                if remote_document:
+                    document.update(remote_document)
+            except Exception as exc:
+                logger.warning(
+                    f"[job:results] remote fetch failed while building stored "
+                    f"document job_id={job.id} err={exc} — "
+                    "serving stored outputs only"
+                )
 
         for output_id, ref in job.stored_outputs.items():
             document[output_id] = {
