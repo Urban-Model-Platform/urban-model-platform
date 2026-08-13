@@ -38,7 +38,7 @@ from ump.core.managers.status_derivation_orchestrator import (
 from ump.core.models.job import Job, JobStatusInfo, StatusCode
 from ump.core.models.link import Link
 from ump.core.models.ogcp_exception import OGCExceptionResponse
-from ump.core.models.providers_config import ProviderConfig
+from ump.core.models.providers_config import ProcessConfig, ProviderConfig
 from ump.core.settings import logger
 
 REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
@@ -100,6 +100,7 @@ class JobExecutionContext(BaseModel):
     # ---- set by ValidateAndResolveStep ----
     provider: Optional[ProviderConfig] = None
     provider_process_id: str = ""  # raw process id without provider prefix
+    process_config: Optional[ProcessConfig] = None  # per-process policy config
 
     # ---- set by CreateLocalJobStep ----
     job: Optional[Job] = None

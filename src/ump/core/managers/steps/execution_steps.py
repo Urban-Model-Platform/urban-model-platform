@@ -84,6 +84,58 @@ def _resolve_location(base: str, location: str) -> str:
     return urljoin(base.rstrip("/") + "/", location.lstrip("/"))
 
 
+# Policies under which UMP takes ownership of the result: it fetches the value
+# from the remote, stores it, and hands the client a reference link. For these
+# the remote must always deliver ``value`` — the remote may not support
+# ``reference`` at all (that is the whole point of *emulating* it).
+_STORE_OWNING_POLICIES = ("emulate-ref", "emulate-ref-only")
+
+
+def _rewrite_outbound_transmission_mode(
+    payload: Dict[str, Any], policy: Optional[str]
+) -> Dict[str, Any]:
+    """Return the execute payload UMP should POST to the remote for *policy*.
+
+    Under a store-owning policy (``emulate-ref`` / ``emulate-ref-only``) every
+    output the client requested as ``transmissionMode: reference`` is rewritten
+    to ``value`` before forwarding: UMP fulfils the reference itself by storing
+    the value result and returning an href link on the way back. Outputs the
+    client already requested as ``value`` (and every other policy) are passed
+    through untouched.
+
+    This is a pure function: the input ``payload`` is never mutated. The
+    client's original intent is preserved in ``job.outputs_spec`` (captured
+    separately from the unmodified payload) so the result-storage coordinator
+    can still detect that a reference was requested.
+    """
+    if policy not in _STORE_OWNING_POLICIES:
+        return payload
+
+    outputs = payload.get("outputs")
+    if not isinstance(outputs, dict):
+        return payload
+
+    needs_rewrite = any(
+        isinstance(spec, dict) and spec.get("transmissionMode") == "reference"
+        for spec in outputs.values()
+    )
+    if not needs_rewrite:
+        return payload
+
+    rewritten_outputs: Dict[str, Any] = {}
+    for output_id, spec in outputs.items():
+        if isinstance(spec, dict) and spec.get("transmissionMode") == "reference":
+            new_spec = dict(spec)
+            new_spec["transmissionMode"] = "value"
+            rewritten_outputs[output_id] = new_spec
+        else:
+            rewritten_outputs[output_id] = spec
+
+    new_payload = dict(payload)
+    new_payload["outputs"] = rewritten_outputs
+    return new_payload
+
+
 def _ensure_self_link(job_id: str, status_info: JobStatusInfo) -> None:
     existing = status_info.links or []
     filtered = [
@@ -253,6 +305,13 @@ class ValidateAndResolveStep(PipelineStep):
 
         context.provider = provider
         context.provider_process_id = remote_id
+        # Carry the per-process config so downstream steps (ForwardToProviderStep)
+        # can apply the transmission-mode policy without re-resolving it. The
+        # remote_id is the verbatim configured ProcessConfig.id, so a direct
+        # match is exact.
+        context.process_config = next(
+            (pc for pc in provider.processes if pc.id == remote_id), None
+        )
         logger.debug(
             f"[step:resolve] process_id={context.process_id} provider={provider_prefix} remote_id={remote_id}"
         )
@@ -416,9 +475,26 @@ class ForwardToProviderStep(PipelineStep):
             else {}
         )
         forward_headers = {**auth_headers, **(({"Prefer": prefer}) if prefer else {})}
-        payload = context.execute_payload or {}
 
-        logger.debug(f"[step:forward] exec_url={exec_url} job_id={context.job.id}")
+        # Apply the transmission-mode policy to the *outbound* request only.
+        # Under emulate-ref / emulate-ref-only a client-requested
+        # transmissionMode=reference is downgraded to value so the remote (which
+        # may not support reference at all) returns the raw result; UMP then
+        # stores it and hands the client a reference link on the way back. The
+        # original client intent lives on in context.execute_payload / the
+        # persisted job.outputs_spec and is intentionally left untouched here.
+        policy = (
+            context.process_config.transmission_mode_policy
+            if context.process_config is not None
+            else None
+        )
+        payload = _rewrite_outbound_transmission_mode(
+            context.execute_payload or {}, policy
+        )
+
+        logger.debug(
+            f"[step:forward] exec_url={exec_url} job_id={context.job.id} policy={policy}"
+        )
 
         async def _do_forward():
             try:
