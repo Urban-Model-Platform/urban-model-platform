@@ -62,7 +62,7 @@ class JobRecord(SQLModel, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
-    # Denormalized from status_info.finished so cleanup (V-9) can filter and
+    # Denormalized from status_info.finished so cleanup can filter and
     # index on it directly instead of extracting from JSONB on every run.
     finished: Optional[datetime] = Field(
         default=None,
@@ -75,7 +75,7 @@ class JobRecord(SQLModel, table=True):
     diagnostic: Optional[str] = Field(default=None)
     version: int = Field(default=0, nullable=False)
 
-    # ---- Execute-request context (needed by Feature VIII result storage) ----
+    # ---- Execute-request context ----
     # Stored as plain TEXT and JSONB so they survive without a schema migration
     # when the underlying Pydantic models evolve.
     response_mode: Optional[str] = Field(default=None)
@@ -90,7 +90,7 @@ class JobRecord(SQLModel, table=True):
     )
     inputs: Optional[dict] = Field(default=None, sa_column=Column(JSONB, nullable=True))
     links: Optional[list] = Field(default=None, sa_column=Column(JSONB, nullable=True))
-    # V-10: output_id -> {collection_id, collection_url, items_url}. JSONB so
+    # output_id -> {collection_id, collection_url, items_url}. JSONB so
     # it round-trips without a migration when the shape evolves.
     stored_outputs: Optional[dict] = Field(
         default=None, sa_column=Column(JSONB, nullable=True)

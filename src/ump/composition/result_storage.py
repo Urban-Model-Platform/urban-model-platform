@@ -1,4 +1,4 @@
-"""Composition for Feature V result storage (V-8).
+"""Composition for Feature V result storage.
 
 This module answers exactly one question for the process as a whole: *which*
 ``ResultStoragePort`` should the rest of UMP use?  Every function here is pure
@@ -8,7 +8,7 @@ import time, so tests can call these functions directly with fakes and never
 touch ``ump.asgi`` (which does have import-time side effects: file watchers,
 DB connections, app construction).
 
-Design summary (see reports/REF-F5-result-storage.md, step V-8, for the full
+Design summary (see reports/REF-F5-result-storage.md, for the full
 discussion this codifies):
 
   * If no configured process uses ``result-storage: ldproxy``, the whole
@@ -21,8 +21,7 @@ discussion this codifies):
     is not part of this composition.
   * The backend (filesystem vs. Kubernetes) is selected once, here, precisely
     because this is the first point in the codebase where both concrete
-    backends exist side by side (V-5a built the filesystem backend without a
-    factory on purpose, to avoid dead code before V-5b existed).
+    backends exist side by side
   * Exactly one ``ServiceRegistry`` is built per process. Its ``asyncio.Lock``
     only serialises concurrent collection registrations correctly if every
     caller shares this single instance — constructing a second one anywhere

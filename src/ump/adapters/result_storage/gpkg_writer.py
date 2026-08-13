@@ -49,7 +49,7 @@ SUPPORTED_MEDIA_TYPES: dict[str, str] = {
 }
 
 # Mapping from pandas dtype kinds to ldproxy property type strings.
-# Used by the schema derivation step so V-4 (ldproxy_entities) can emit
+# Used by the schema derivation step so ldproxy_entities can emit
 # correct YAML without re-reading the GeoPackage.
 _DTYPE_TO_LDPROXY: dict[str, str] = {
     "i": "INTEGER",  # signed integer (int8 … int64)
@@ -106,7 +106,7 @@ def validate_output_id(output_id: str) -> None:
 class GpkgLayerSchema:
     """Describes the schema of one layer inside a written GeoPackage.
 
-    Used by V-4 (ldproxy_entities) to generate the provider YAML without
+    Used by ldproxy_entities to generate the provider YAML without
     having to re-open the GeoPackage.
 
     Attributes:
@@ -199,7 +199,7 @@ def write_layers_to_gpkg(
     """Write multiple outputs of the *same job* as separate layers in one GeoPackage.
 
     A job can produce several storable outputs (e.g. ``voronoi_diagram`` and
-    ``buffer_zones``). The ldproxy entity model (V-4) is one provider per job
+    ``buffer_zones``). The ldproxy entity model is one provider per job
     with one ``types`` entry per output, backed by one GeoPackage with one
     layer per output — so multiple outputs must land in a single file, not one
     file each. This is the multi-output counterpart to ``write_to_gpkg``.

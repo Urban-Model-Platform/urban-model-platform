@@ -33,7 +33,7 @@ backend use the concurrency primitive it already has:
 Both express the same contract through ``read_service_entity`` /
 ``write_service_entity``: read returns the current ``(text, version)``; write
 only succeeds if the version still matches, otherwise it raises
-``ConfigConflict`` and the caller (the service registry, V-5c) retries the
+``ConfigConflict`` and the caller (the service registry) retries the
 read-modify-write.  This single contract works unchanged for both backends, so
 nothing downstream has to special-case the environment.
 """
@@ -56,7 +56,7 @@ class EntityConfigBackendPort(ABC):
     """Persist ldproxy entity YAML, abstracting filesystem vs. Kubernetes.
 
     Methods are synchronous: filesystem I/O and the official Kubernetes client
-    are both blocking.  The async result-storage adapter (V-6) offloads calls
+    are both blocking.  The async result-storage adapter offloads calls
     to a worker thread so the event loop never stalls on store latency.
     """
 
@@ -75,7 +75,7 @@ class EntityConfigBackendPort(ABC):
         """Remove a job's provider entity.
 
         Idempotent: deleting an entity that does not exist is a no-op, so
-        cleanup (V-9) can run without first checking for existence.
+        cleanup can run without first checking for existence.
         """
 
     # -- Shared service entity: optimistic concurrency ----------------------

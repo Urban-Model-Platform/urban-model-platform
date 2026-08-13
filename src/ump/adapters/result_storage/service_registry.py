@@ -49,7 +49,7 @@ class ServiceRegistry:
     """Registers and deregisters ldproxy collections in the shared service entity.
 
     One instance per running UMP process, constructed once at the composition
-    root (V-8) and shared by every job's storage flow — the ``asyncio.Lock``
+    root and shared by every job's storage flow — the ``asyncio.Lock``
     only serialises correctly if all callers share the same instance.
     """
 
@@ -75,7 +75,7 @@ class ServiceRegistry:
         """Add one collection to the shared service entity.
 
         Idempotent: registering the same ``collection_id`` again overwrites it
-        with an identical block, so a retried V-6 storage step never produces
+        with an identical block, so a retried storage step never produces
         a duplicate or inconsistent entry.
         """
 
@@ -90,7 +90,7 @@ class ServiceRegistry:
         """Remove one collection from the shared service entity.
 
         Idempotent: removing a ``collection_id`` that isn't registered is a
-        no-op, so cleanup (V-9) can run unconditionally without first checking
+        no-op, so cleanup can run unconditionally without first checking
         whether the job was ever stored.
         """
 
@@ -102,7 +102,7 @@ class ServiceRegistry:
     async def ensure_bootstrapped(self) -> None:
         """Make sure the shared service entity exists, creating it if absent.
 
-        This is a startup convenience (V-8), not a new bootstrap mechanism:
+        This is a startup convenience, not a new bootstrap mechanism:
         it runs the exact same read -> mutate -> write path as
         ``register_collection``/``deregister_collection``, just with a
         no-op mutation.  If the entity is already there, this degrades to an
@@ -111,7 +111,7 @@ class ServiceRegistry:
         ``_read_modify_write`` — regardless of which caller triggered it.
 
         Callers decide what a failure means for them.  The composition root
-        (V-8) treats an exception here as a transient reachability problem
+        treats an exception here as a transient reachability problem
         (store not mounted yet, API briefly unavailable) and logs a warning
         instead of failing startup — the registry heals itself on the first
         successful job anyway. This method itself does not swallow errors.

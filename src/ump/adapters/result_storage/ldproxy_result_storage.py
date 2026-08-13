@@ -1,10 +1,10 @@
-"""LdproxyResultStorage: the concrete ResultStoragePort adapter (V-6).
+"""LdproxyResultStorage: the concrete ResultStoragePort adapter.
 
 This is where the independently-built and independently-tested pieces of
 Feature V finally meet:
 
-    write_layers_to_gpkg (V-3)  ->  build_provider_entity_multi (V-4)
-        ->  EntityConfigBackendPort (V-5a/b)  ->  ServiceRegistry (V-5c)
+    write_layers_to_gpkg ->  build_provider_entity_multi
+        ->  EntityConfigBackendPort  ->  ServiceRegistry
 
 Storing one job's results is a three-stage write whose *order* is the whole
 point:
@@ -23,7 +23,7 @@ if stage 2 or 3 fails, it rolls back the .gpkg and provider it already wrote
 before re-raising. That way ``exists`` (which tests for the .gpkg) stays an
 honest "fully stored" signal and no orphan survives to confuse a later retry.
 
-``delete`` (V-9) reverses the write order — deregister collections, then the
+``delete`` reverses the write order — deregister collections, then the
 provider entity, then the .gpkg — so ldproxy never sees a collection whose
 provider has already vanished. Reconstructing *which* collections belong to a
 job requires knowing its output ids, which nothing else persists; rather than
@@ -32,12 +32,12 @@ both backends to support reading back and re-parsing YAML they only ever
 wrote) ``store`` also writes a tiny sidecar **manifest** — a JSON file listing
 the job's output ids — next to the GeoPackage. The manifest is always a plain
 file on the shared filesystem, regardless of which ``EntityConfigBackendPort``
-is configured, exactly like the GeoPackage itself (see V-6/V-8 notes: binary
+is configured, exactly like the GeoPackage itself (see notes: binary
 / large artifacts always live on the file share, never in a ConfigMap).
 
 The adapter is a pure orchestrator: it holds no ldproxy YAML knowledge itself
 (that lives in ldproxy_entities) and no persistence knowledge (that lives in
-the backend). Everything it needs is injected at the composition root (V-8).
+the backend). Everything it needs is injected at the composition root.
 """
 
 from __future__ import annotations

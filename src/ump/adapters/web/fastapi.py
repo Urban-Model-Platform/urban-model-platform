@@ -34,7 +34,9 @@ from ump.core.settings import app_settings, logger
 # whenever a jobID does not resolve to an existing job - including jobs that
 # once existed but were permanently removed by the V-9 cleanup service. A
 # removed job must be indistinguishable from a jobID that never existed.
-NO_SUCH_JOB_TYPE = "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/no-such-job"
+NO_SUCH_JOB_TYPE = (
+    "http://www.opengis.net/def/exceptions/ogcapi-processes-1/1.0/no-such-job"
+)
 
 
 # module global helpers
@@ -122,7 +124,7 @@ class BackgroundRunner(Protocol):
 
     Deliberately generic: the web adapter starts and stops these at the right
     point in the FastAPI lifespan without knowing what they do — job cleanup
-    (V-9) is the first user, but nothing here is specific to it.
+    is the first user, but nothing here is specific to it.
     """
 
     def start(self) -> None: ...

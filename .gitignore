@@ -173,4 +173,4 @@ cython_debug/
 geoserver_data
 postgresql_data
 scratch/*
-github/workflows/copilot-instructions.md
+.github/workflows/copilot-instructions.md
