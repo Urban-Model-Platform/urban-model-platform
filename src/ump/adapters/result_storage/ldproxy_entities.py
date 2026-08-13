@@ -324,14 +324,26 @@ def _build_feature_type(output_id: str, schema: GpkgLayerSchema) -> dict:
 
     The fixed pseudo-properties ``id`` and ``geometry`` always come first,
     followed by the data properties in schema insertion order.
+
+    Reserved-name collisions and the choice of ID column are resolved upstream
+    in ``gpkg_writer._sanitize_and_resolve_id`` — by the time the schema reaches
+    here, ``schema.id_source_path`` names the GeoPackage column that backs the
+    ID role, ``schema.properties`` never contains that column or any reserved
+    name, and the active geometry is always the physical ``geom`` column. This
+    builder therefore just wires those decisions into the entity shape.
     """
+    id_property: dict = {
+        "sourcePath": schema.id_source_path,
+        "type": schema.id_type,
+        "role": "ID",
+    }
+    # The synthetic GeoPackage primary key is internal plumbing, never client
+    # input; a promoted real ``id`` column carries no such restriction.
+    if schema.id_source_path == "fid":
+        id_property["excludedScopes"] = ["RECEIVABLE"]
+
     properties: dict = {
-        "id": {
-            "sourcePath": "fid",
-            "type": "INTEGER",
-            "role": "ID",
-            "excludedScopes": ["RECEIVABLE"],
-        },
+        "id": id_property,
         "geometry": {
             "sourcePath": "geom",
             "type": "GEOMETRY",

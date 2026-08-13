@@ -27,6 +27,7 @@ import pytest
 
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.core.config import JobManagerConfig
+from ump.core.exceptions import OGCExceptionResponse, OGCProcessException
 from ump.core.interfaces.result_storage import (
     ResultPayload,
     ResultStorageError,
@@ -194,7 +195,10 @@ def _coordinator(
 
 class TestDowngradeTransparency:
     @pytest.mark.asyncio
-    async def test_emulate_ref_storage_failure_marks_status_info(self):
+    async def test_emulate_ref_storage_failure_raises_no_value_fallback(self):
+        """Option A: a required store (client explicitly asked for reference)
+        that fails must NEVER fall back to the inline value — it raises so the
+        client sees an error rather than a potentially huge payload."""
         job = _job(
             outputs_spec={"voronoi": {"transmissionMode": "reference"}},
         )
@@ -226,11 +230,12 @@ class TestDowngradeTransparency:
             **{"transmission-mode-policy": "emulate-ref", "result-storage": "ldproxy"},
         )
 
-        await coordinator.coordinate(job, process_config, repo)
+        with pytest.raises(ResultStorageError):
+            await coordinator.coordinate(job, process_config, repo)
 
+        # No value-downgrade marker is written under Option A.
         persisted = await repo.get(JOB_ID)
-        assert persisted.status_info.transmissionModeApplied == "value"
-        assert "inline" in persisted.status_info.message.lower()
+        assert persisted.status_info.transmissionModeApplied != "value"
 
     @pytest.mark.asyncio
     async def test_emulate_ref_only_failure_still_raises(self):
@@ -317,9 +322,90 @@ class TestDowngradeTransparency:
         )
 
 
-# ---------------------------------------------------------------------------
-# 3. GET /jobs/{id}/results — always a document once anything is stored
-# ---------------------------------------------------------------------------
+class TestMixedTransmissionModes:
+    """emulate-ref with a mix of reference and value outputs in one request.
+
+    Regression guard for the voronoi bug: a value-requested output whose media
+    type is not storable (e.g. application/json) must NOT enter the store batch
+    and therefore must NOT downgrade the whole job. Only the reference-requested
+    geospatial output is stored; the value output is served inline by GET
+    /results (tested separately in TestGetResultsDocument).
+    """
+
+    @pytest.mark.asyncio
+    async def test_value_output_does_not_break_reference_store(self):
+        job = _job(
+            outputs_spec={
+                "voronoi_diagram": {"transmissionMode": "reference"},
+                "classification_breaks_wb": {"transmissionMode": "value"},
+                "classification_breaks_ma": {"transmissionMode": "value"},
+            },
+        )
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        # Capture what actually gets handed to the store. Only the reference
+        # output must appear here — never the application/json value outputs.
+        stored_payloads: list[ResultPayload] = []
+
+        async def _store(job_id, payloads):
+            stored_payloads.extend(payloads)
+            return [
+                StoredReference(
+                    collection_id=f"{job_id}-voronoi_diagram",
+                    collection_url="https://geo/collections/v",
+                    items_url="https://geo/collections/v/items",
+                )
+            ]
+
+        storage = Mock()
+        storage.exists = AsyncMock(return_value=False)
+        storage.store = AsyncMock(side_effect=_store)
+
+        # The remote document response carries all three outputs — one
+        # geospatial FeatureCollection and two non-geospatial JSON tables.
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            return_value=(
+                (
+                    b'{"voronoi_diagram": {"type": "FeatureCollection", '
+                    b'"features": []}, '
+                    b'"classification_breaks_wb": {"value": [1, 2, 3], '
+                    b'"mediaType": "application/json"}, '
+                    b'"classification_breaks_ma": {"value": [4, 5, 6], '
+                    b'"mediaType": "application/json"}}'
+                ),
+                "application/json",
+            )
+        )
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+
+        coordinator = _coordinator(
+            storage=storage, http_client=http_client, providers=providers
+        )
+        process_config = ProcessConfig(
+            id="process",
+            **{
+                "transmission-mode-policy": "emulate-ref",
+                "result-storage": "ldproxy",
+            },
+        )
+
+        await coordinator.coordinate(job, process_config, repo)
+
+        # Exactly one output stored — the reference-requested geospatial one.
+        assert [p.output_id for p in stored_payloads] == ["voronoi_diagram"]
+
+        persisted = await repo.get(JOB_ID)
+        # No downgrade: the value outputs never entered the batch, so the
+        # reference output stored cleanly.
+        assert persisted.status_info.transmissionModeApplied is None
+        assert persisted.stored_outputs["voronoi_diagram"]["items_url"] == (
+            "https://geo/collections/v/items"
+        )
 
 
 def _job_manager(providers, http_client, repo) -> JobManager:
@@ -485,3 +571,155 @@ class TestGetResultsDocument:
         assert result["status"] == 200
         assert result["content_type"] == "application/flatgeobuf"
         assert result["body_bytes"] == b"raw-bytes-passthrough"
+
+
+# ---------------------------------------------------------------------------
+# 4. Post-success results-fetch race (404 / transient) is retried
+# ---------------------------------------------------------------------------
+
+
+class TestResultsFetchRetry:
+    """A remote can report ``successful`` a beat before ``/results`` is
+    queryable. The storage fetch must retry transient failures rather than
+    immediately downgrade a reference output to an inline value."""
+
+    def _providers(self):
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+        return providers
+
+    def _ogc_error(self, status: int) -> OGCProcessException:
+        return OGCProcessException(
+            OGCExceptionResponse(
+                type="about:blank",
+                title="Upstream HTTP Error",
+                status=status,
+                detail=f"The remote service returned HTTP {status}.",
+                instance=None,
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_transient_404_is_retried_then_succeeds(self, monkeypatch):
+        # No real waiting between attempts.
+        monkeypatch.setattr(
+            "ump.core.services.result_storage_coordinator.asyncio.sleep",
+            AsyncMock(),
+        )
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            side_effect=[
+                self._ogc_error(404),
+                self._ogc_error(404),
+                (
+                    b'{"voronoi": {"type": "FeatureCollection", "features": []}}',
+                    "application/json",
+                ),
+            ]
+        )
+        coordinator = _coordinator(http_client=http_client, providers=self._providers())
+        job = _job(outputs_spec={"voronoi": {"transmissionMode": "reference"}})
+
+        body, content_type = await coordinator._fetch_results_with_retry(
+            "https://remote.example.com/jobs/r/results", None, job.id
+        )
+
+        assert content_type == "application/json"
+        assert b"FeatureCollection" in body
+        assert http_client.get_content.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_non_transient_error_is_not_retried(self, monkeypatch):
+        sleep = AsyncMock()
+        monkeypatch.setattr(
+            "ump.core.services.result_storage_coordinator.asyncio.sleep", sleep
+        )
+        http_client = Mock()
+        http_client.get_content = AsyncMock(side_effect=self._ogc_error(400))
+        coordinator = _coordinator(http_client=http_client, providers=self._providers())
+
+        with pytest.raises(ResultStorageError):
+            await coordinator._fetch_results_with_retry(
+                "https://remote.example.com/jobs/r/results", None, "job-x"
+            )
+
+        assert http_client.get_content.await_count == 1
+        sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_raise_result_storage_error(self, monkeypatch):
+        monkeypatch.setattr(
+            "ump.core.services.result_storage_coordinator.asyncio.sleep",
+            AsyncMock(),
+        )
+        http_client = Mock()
+        http_client.get_content = AsyncMock(side_effect=self._ogc_error(404))
+        coordinator = _coordinator(http_client=http_client, providers=self._providers())
+
+        with pytest.raises(ResultStorageError):
+            await coordinator._fetch_results_with_retry(
+                "https://remote.example.com/jobs/r/results", None, "job-x"
+            )
+
+        assert http_client.get_content.await_count == 5
+
+
+# ---------------------------------------------------------------------------
+# 5. Option A: a failed required store errors on GET /results (no value)
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredStoreFailureErrorsOnResults:
+    @pytest.mark.asyncio
+    async def test_storage_failed_marker_yields_error_not_value(self):
+        """A successful job carrying the storage-failure marker must surface a
+        502 error rather than proxying the (potentially huge) inline value."""
+        from ump.core.exceptions import OGCProcessException
+
+        job = _job(stored_outputs=None)
+        job.diagnostic = f"{Job.RESULT_STORAGE_FAILED_MARKER}: disk full"
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        # If the proxy path were taken, this would return a value — it must not.
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            return_value=(b"HUGE-VALUE-PAYLOAD", "application/json")
+        )
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+
+        manager = _job_manager(providers, http_client, repo)
+
+        with pytest.raises(OGCProcessException) as excinfo:
+            await manager.get_results(JOB_ID)
+
+        assert excinfo.value.response.status == 502
+        # The remote value channel must never be touched.
+        http_client.get_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_normal_successful_job_without_marker_still_proxies(self):
+        """A successful job without the marker keeps proxying as before."""
+        job = _job(stored_outputs=None)
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            return_value=(b"raw-value", "application/json")
+        )
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+
+        manager = _job_manager(providers, http_client, repo)
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 200
+        assert result["body_bytes"] == b"raw-value"

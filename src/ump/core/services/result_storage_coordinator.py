@@ -31,12 +31,13 @@ The coordinator is called eagerly at job completion by ``ResultStorageObserver``
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 from typing import Optional
 
-from ump.core.exceptions import OptimisticLockError
+from ump.core.exceptions import OGCProcessException, OptimisticLockError
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.providers import ProvidersPort
@@ -62,6 +63,24 @@ logger = logging.getLogger(__name__)
 # first.
 _PERSIST_MAX_ATTEMPTS = 5
 
+# Default storage-fetch retry budget. These are the fallback values used when a
+# ResultStorageCoordinator is constructed without explicit overrides; the
+# composition root injects the operator-tunable UMP_STORAGE_FETCH_* settings
+# instead. The remote model server can report a job ``successful`` a moment
+# before its ``/results`` endpoint is actually queryable (eventual consistency
+# between the job-status store and the result assembly). A GET issued the
+# instant we see ``successful`` therefore sometimes returns 404 (or a transient
+# 5xx / timeout). Because storage runs eagerly on completion, we retry the fetch
+# a bounded number of times with exponential backoff before giving up, so a few
+# seconds' lag on the remote side no longer silently fails a required store.
+_FETCH_MAX_ATTEMPTS = 5
+_FETCH_BASE_WAIT = 1.0
+_FETCH_MAX_WAIT = 10.0
+# HTTP statuses that mean "not ready yet / try again" rather than a permanent
+# failure. 404 is included deliberately: right after ``successful`` it signals
+# the result document has not materialised yet, not that it will never exist.
+_TRANSIENT_FETCH_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
+
 
 class ResultStorageCoordinator:
     """Orchestrates the full store-result lifecycle for one completed job.
@@ -76,11 +95,20 @@ class ResultStorageCoordinator:
         http_client: HttpClientPort,
         providers: ProvidersPort,
         remote_auth: Optional[RemoteAuthPort] = None,
+        fetch_max_attempts: int = _FETCH_MAX_ATTEMPTS,
+        fetch_base_wait: float = _FETCH_BASE_WAIT,
+        fetch_max_wait: float = _FETCH_MAX_WAIT,
     ) -> None:
         self._storage = storage_port
         self._http = http_client
         self._providers = providers
         self._remote_auth = remote_auth
+        # Storage-fetch retry budget. Injected at the composition root from
+        # settings (UMP_STORAGE_FETCH_*), with the module constants as defaults
+        # so existing callers/tests keep the historical behaviour unchanged.
+        self._fetch_max_attempts = fetch_max_attempts
+        self._fetch_base_wait = fetch_base_wait
+        self._fetch_max_wait = fetch_max_wait
 
     # ------------------------------------------------------------------
     # Public API
@@ -130,10 +158,13 @@ class ResultStorageCoordinator:
           5. Build reference links from the returned ``StoredReference`` list.
           6. Inject the links into the job record and persist.
 
-        On failure the error is handled according to ``transmission_mode_policy``:
-          - ``emulate-ref``:      log a warning and return quietly — the client
-            will receive the value inline when they poll ``/results``.
-          - ``emulate-ref-only``: re-raise so the caller can surface a 502.
+        On failure the result store is *required* (the client asked for a
+        reference), so we never fall back to the inline value — that would
+        risk emitting a huge payload the client deliberately avoided. Both
+        ``emulate-ref`` (client explicitly requested reference) and
+        ``emulate-ref-only`` re-raise ``ResultStorageError``; the completion
+        observer records a storage-failure marker and ``GET /results``
+        surfaces it as a results-unavailable error.
         """
         policy = process_config.transmission_mode_policy
 
@@ -144,8 +175,7 @@ class ResultStorageCoordinator:
         try:
             payloads = await self._fetch_and_extract_payloads(job, process_config)
         except ResultStorageError as exc:
-            if self._handle_storage_failure(exc, job.id, policy, step="fetch"):
-                await self._record_downgrade(job, repo)
+            self._handle_storage_failure(exc, job.id, policy, step="fetch")
             return
 
         if not payloads:
@@ -159,14 +189,11 @@ class ResultStorageCoordinator:
         try:
             references = await self._storage.store(job.id, payloads)
         except ResultStorageError as exc:
-            if self._handle_storage_failure(exc, job.id, policy, step="store"):
-                await self._record_downgrade(job, repo)
+            self._handle_storage_failure(exc, job.id, policy, step="store")
             return
 
         if references:
-            await self._persist_stored_references(
-                job, payloads, references, repo
-            )
+            await self._persist_stored_references(job, payloads, references, repo)
             logger.info(
                 "[storage] stored %d collection(s) for job_id=%s",
                 len(references),
@@ -202,16 +229,76 @@ class ResultStorageCoordinator:
             else {}
         )
 
-        body_bytes, content_type = await self._http.get_content(
-            results_url, headers=auth_headers or None
+        body_bytes, content_type = await self._fetch_results_with_retry(
+            results_url, auth_headers or None, job.id
+        )
+
+        store_output_ids = _resolve_store_output_ids(
+            policy=process_config.transmission_mode_policy,
+            outputs_spec=job.outputs_spec,
+            store_outputs_config=process_config.store_outputs,
         )
 
         return _extract_payloads(
             body_bytes=body_bytes,
             content_type=content_type,
             outputs_spec=job.outputs_spec,
-            store_outputs_config=process_config.store_outputs,
+            store_outputs_config=store_output_ids,
         )
+
+    async def _fetch_results_with_retry(
+        self,
+        results_url: str,
+        headers: Optional[dict[str, str]],
+        job_id: str,
+    ) -> tuple[bytes, str]:
+        """Fetch the remote results document, retrying on transient failures.
+
+        The remote can briefly answer 404 (or 5xx / time out) on ``/results``
+        immediately after reporting the job ``successful`` — the status store
+        and the result assembly are eventually consistent. We retry with
+        exponential backoff so a short lag no longer downgrades a reference
+        output to an inline value.
+
+        Any error that is still failing after the last attempt — or that is
+        non-transient (e.g. a genuine 4xx other than the ones listed in
+        ``_TRANSIENT_FETCH_STATUSES``) — is translated into a
+        ``ResultStorageError`` so the coordinator's policy-aware failure
+        handling applies, rather than escaping uncaught through the observer.
+        """
+        last_exc: Optional[OGCProcessException] = None
+        for attempt in range(1, self._fetch_max_attempts + 1):
+            try:
+                return await self._http.get_content(results_url, headers=headers)
+            except OGCProcessException as exc:
+                status = getattr(exc.response, "status", None)
+                is_transient = status in _TRANSIENT_FETCH_STATUSES
+                if not is_transient or attempt == self._fetch_max_attempts:
+                    raise ResultStorageError(
+                        f"Failed to fetch results for storage from {results_url}: "
+                        f"upstream status={status}"
+                    ) from exc
+                last_exc = exc
+                wait = min(
+                    self._fetch_base_wait * (2 ** (attempt - 1)),
+                    self._fetch_max_wait,
+                )
+                logger.info(
+                    "[storage] results not ready (status=%s) job_id=%s — "
+                    "retry %d/%d in %.1fs",
+                    status,
+                    job_id,
+                    attempt,
+                    self._fetch_max_attempts,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+
+        # Unreachable: the loop either returns, raises on the last attempt, or
+        # raises for a non-transient status. Guard for type-checkers.
+        raise ResultStorageError(
+            f"Failed to fetch results for storage from {results_url}"
+        ) from last_exc
 
     # ------------------------------------------------------------------
     # Error handling
@@ -223,42 +310,33 @@ class ResultStorageCoordinator:
         job_id: str,
         policy: str,
         step: str,
-    ) -> bool:
-        """Decide what to do when storage fails, based on the configured policy.
+    ) -> None:
+        """Handle a failure of a *required* result store — always fatal.
 
-        Returns True when the caller must record a client-visible downgrade
-        (``emulate-ref``: value delivered instead of the requested reference).
-        Raises for ``emulate-ref-only``, where the caller has no fallback to
-        offer.
+        A store only runs when the policy requires it and, under
+        ``emulate-ref``, only when the client *explicitly* asked for
+        ``transmissionMode: reference`` (see ``should_store``). In every case
+        reaching this point the client deliberately requested a reference —
+        typically because the inline value would be too large to return in the
+        response body.
 
-        ``emulate-ref``:
-            The client was allowed to request either value or reference.  If we
-            cannot store, we fall back to the inline value — the value channel
-            is open under this policy, so delivering the result beats failing a
-            successfully computed job.  This branch is reached only when the
-            client *explicitly* asked for ``transmissionMode: reference``
-            (see ``should_store``), so the fallback is precisely the case the
-            client must be told about: True tells ``coordinate`` to persist a
-            machine-detectable marker (``JobStatusInfo.transmissionModeApplied``)
-            instead of leaving it invisible in the logs.
-
-        ``emulate-ref-only``:
-            The policy promises that results are *always* stored.  We cannot
-            satisfy that promise, so re-raise.  The caller surfaces this as a
-            results-unavailable error to the client.
+        Silently falling back to that inline value would therefore violate the
+        client's intent and risk emitting a huge payload. Instead we always
+        re-raise: the completion observer records a machine-readable
+        storage-failure marker on the job (``_record_unavailable_result``), and
+        ``GET /jobs/{id}/results`` surfaces it as a results-unavailable error
+        rather than proxying the value. This holds identically for
+        ``emulate-ref`` and ``emulate-ref-only``.
         """
-        if policy == "emulate-ref":
-            logger.warning(
-                "[storage] %s failed for job_id=%s (%s) — "
-                "falling back to inline value: %s",
-                step,
-                job_id,
-                type(exc).__name__,
-                exc,
-            )
-            return True  # caller must record the downgrade
-
-        # emulate-ref-only: we promised a reference, so failure is fatal.
+        logger.error(
+            "[storage] %s failed for job_id=%s (%s) — result unavailable, "
+            "not falling back to inline value (policy=%s): %s",
+            step,
+            job_id,
+            type(exc).__name__,
+            policy,
+            exc,
+        )
         raise exc
 
     async def _record_downgrade(self, job: Job, repo: JobRepositoryPort) -> None:
@@ -359,7 +437,6 @@ class ResultStorageCoordinator:
         )
 
 
-
 # ---------------------------------------------------------------------------
 # Pure helper functions (no side effects, easy to unit-test)
 # ---------------------------------------------------------------------------
@@ -378,6 +455,53 @@ def _client_requested_reference(outputs_spec: Optional[dict]) -> bool:
         if isinstance(spec, dict) and spec.get("transmissionMode") == "reference":
             return True
     return False
+
+
+def _resolve_store_output_ids(
+    policy: str,
+    outputs_spec: Optional[dict],
+    store_outputs_config: Optional[list[str]],
+) -> Optional[list[str]]:
+    """Return the explicit list of output IDs to store, or None for auto-detect.
+
+    Precedence:
+
+    1. ``store_outputs_config`` — an operator's explicit ``store-outputs`` list
+       in providers.yaml always wins. It may use dot-notation paths to reach
+       nested outputs, so it is passed through verbatim.
+
+    2. ``emulate-ref`` — storage is scoped to exactly the outputs the client
+       asked to receive as ``transmissionMode: reference``. Outputs the client
+       requested as ``value`` are proxied inline and must NOT be stored: mixing
+       a non-geospatial ``value`` output (e.g. an ``application/json``
+       classification table) into the store batch would raise
+       ``UnsupportedResultError`` and, under emulate-ref, wrongly downgrade the
+       *whole* job — including the geospatial output the client legitimately
+       wanted as a reference. Returning only the reference-requested IDs keeps
+       each output on its intended channel.
+
+    3. ``emulate-ref-only`` (or any other store-activating policy) with no
+       explicit config — return None so the extractor auto-detects every output
+       in the document. Under emulate-ref-only every output is a reference by
+       policy, so no client-driven narrowing applies.
+
+    A pure function with no side effects for straightforward unit testing.
+    """
+    if store_outputs_config:
+        return store_outputs_config
+
+    if policy == "emulate-ref" and outputs_spec:
+        reference_ids = [
+            output_id
+            for output_id, spec in outputs_spec.items()
+            if isinstance(spec, dict) and spec.get("transmissionMode") == "reference"
+        ]
+        # None (not []) preserves auto-detect semantics if, defensively, no
+        # reference output is found — though should_store guarantees at least
+        # one under this policy.
+        return reference_ids or None
+
+    return None
 
 
 def _extract_payloads(
@@ -464,7 +588,6 @@ def _is_geojson_document(document: object) -> bool:
         "GeometryCollection",
     }
     return document.get("type") in geojson_types
-
 
 
 def _extract_payloads_from_document(

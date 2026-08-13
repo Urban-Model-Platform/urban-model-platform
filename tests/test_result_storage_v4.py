@@ -143,6 +143,76 @@ class TestBuildProviderEntity:
         assert geom["geometryType"] == "GEOMETRY"
 
 
+class TestReservedPropertyCollisions:
+    """The provider entity wires the ID role from ``schema.id_source_path``.
+
+    The decision of *which* column backs the ID role (and any reserved-name
+    renames) is made upstream in ``gpkg_writer._sanitize_and_resolve_id`` and
+    exercised in tests/test_gpkg_writer_id_sanitize.py. Here we only assert the
+    entity builder faithfully renders whatever the schema tells it.
+    """
+
+    def _parse(self, entity: dict) -> dict:
+        return yaml.safe_load(to_yaml(entity))
+
+    def test_promoted_id_column_becomes_id_role(self):
+        # Writer promoted a unique string 'id' column: id_source_path="id".
+        schema = GpkgLayerSchema(
+            geometry_type="POLYGON",
+            properties={"building_height": "FLOAT"},
+            feature_count=2144,
+            crs_epsg=4326,
+            id_source_path="id",
+            id_type="STRING",
+        )
+        entity = build_provider_entity("uuid", "voronoi_diagram", schema)
+        parsed = self._parse(entity)
+
+        props = parsed["types"]["voronoi_diagram"]["properties"]
+        id_prop = props["id"]
+        assert id_prop["role"] == "ID"
+        assert id_prop["sourcePath"] == "id"
+        assert id_prop["type"] == "STRING"
+        # A promoted real id is client-meaningful, so no RECEIVABLE exclusion.
+        assert "excludedScopes" not in id_prop
+        assert props["building_height"]["type"] == "FLOAT"
+
+    def test_synthetic_fid_id_role_when_not_promoted(self):
+        schema = GpkgLayerSchema(
+            geometry_type="POLYGON",
+            properties={"name": "STRING"},
+            feature_count=3,
+            crs_epsg=4326,
+            # defaults: id_source_path="fid", id_type="INTEGER"
+        )
+        entity = build_provider_entity("uuid", "layer", schema)
+        parsed = self._parse(entity)
+
+        id_prop = parsed["types"]["layer"]["properties"]["id"]
+        assert id_prop["role"] == "ID"
+        assert id_prop["sourcePath"] == "fid"
+        assert id_prop["type"] == "INTEGER"
+        assert "RECEIVABLE" in id_prop["excludedScopes"]
+
+    def test_exactly_one_id_role(self):
+        for id_source_path, id_type in (("id", "STRING"), ("fid", "INTEGER")):
+            schema = GpkgLayerSchema(
+                geometry_type="POLYGON",
+                properties={"name": "STRING"},
+                feature_count=1,
+                crs_epsg=4326,
+                id_source_path=id_source_path,
+                id_type=id_type,
+            )
+            entity = build_provider_entity("uuid", "layer", schema)
+            parsed = self._parse(entity)
+            roles = [
+                p.get("role") for p in parsed["types"]["layer"]["properties"].values()
+            ]
+            assert roles.count("ID") == 1
+            assert roles.count("PRIMARY_GEOMETRY") == 1
+
+
 # ---------------------------------------------------------------------------
 # Service skeleton
 # ---------------------------------------------------------------------------

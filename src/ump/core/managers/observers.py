@@ -313,7 +313,7 @@ class ResultStorageObserver:
         Best-effort by design: if even this write fails we log and move on,
         because the caller cannot act on an exception raised from an observer.
         """
-        reason = f"Result storage failed: {exc}"
+        reason = f"{Job.RESULT_STORAGE_FAILED_MARKER}: {exc}"
         logger.error(f"[observer:storage] {reason} job_id={job.id}")
 
         job.diagnostic = reason

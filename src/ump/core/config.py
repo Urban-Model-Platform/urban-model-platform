@@ -69,7 +69,7 @@ class JobManagerConfig(BaseModel):
     )
 
     results_fetch_timeout: float = Field(
-        default=30.0,
+        default=120.0,
         gt=0,
         description="Total timeout in seconds for a single remote /results fetch attempt",
     )

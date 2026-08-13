@@ -29,6 +29,29 @@ class AioHttpClientAdapter(HttpClientPort):
             sock_connect=self._default_sock_connect,
         )
 
+    def _build_client_timeout(self, timeout: float | None) -> aiohttp.ClientTimeout:
+        """Build a ClientTimeout for a request.
+
+        When a caller supplies an explicit ``timeout`` (interpreted as the
+        total budget for the whole request), the per-read (``sock_read``)
+        budget is scaled up to match. Otherwise a slow-but-still-progressing
+        remote (e.g. a server streaming a large GeoPackage/GeoJSON body it is
+        still assembling) would trip the small default ``sock_read`` long
+        before the intended ``total`` elapsed, producing a premature 504.
+        ``sock_connect`` stays at the default because establishing the TCP
+        connection should always be fast regardless of body size.
+        """
+        if timeout is None:
+            return self._default_client_timeout
+        # Read budget follows the total so large/slow bodies aren't cut off by
+        # the small default sock_read; never shrink below the adapter default.
+        sock_read = max(timeout, self._default_sock_read)
+        return aiohttp.ClientTimeout(
+            total=timeout,
+            sock_read=sock_read,
+            sock_connect=self._default_sock_connect,
+        )
+
     async def __aenter__(self):
         """Async context manager entry"""
         self._session = aiohttp.ClientSession()
@@ -50,15 +73,7 @@ class AioHttpClientAdapter(HttpClientPort):
                 "HTTP client not initialized. Use 'async with' context manager."
             )
         # Use provided timeout (total seconds) or fall back to adapter default
-        if timeout is None:
-            client_timeout = self._default_client_timeout
-        else:
-            # Keep adapter-level sock_read/sock_connect values but apply provided total
-            client_timeout = aiohttp.ClientTimeout(
-                total=timeout,
-                sock_read=self._default_sock_read,
-                sock_connect=self._default_sock_connect,
-            )
+        client_timeout = self._build_client_timeout(timeout)
 
         return await self._fetch_json(
             url,
@@ -218,15 +233,7 @@ class AioHttpClientAdapter(HttpClientPort):
             raise RuntimeError(
                 "HTTP client not initialized. Use 'async with' context manager."
             )
-        client_timeout = (
-            self._default_client_timeout
-            if timeout is None
-            else aiohttp.ClientTimeout(
-                total=timeout,
-                sock_read=self._default_sock_read,
-                sock_connect=self._default_sock_connect,
-            )
-        )
+        client_timeout = self._build_client_timeout(timeout)
         try:
             async with self._session.get(
                 url, timeout=client_timeout, headers=headers or {}
@@ -284,14 +291,7 @@ class AioHttpClientAdapter(HttpClientPort):
             )
 
         # Use provided timeout (total seconds) or adapter default ClientTimeout
-        if timeout is None:
-            client_timeout = self._default_client_timeout
-        else:
-            client_timeout = aiohttp.ClientTimeout(
-                total=timeout,
-                sock_read=self._default_sock_read,
-                sock_connect=self._default_sock_connect,
-            )
+        client_timeout = self._build_client_timeout(timeout)
 
         try:
             async with self._session.post(

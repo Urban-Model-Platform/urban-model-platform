@@ -35,7 +35,11 @@ from ump.core.interfaces.status_derivation import StatusDerivationContext
 from ump.core.managers.status_derivation_orchestrator import (
     StatusDerivationOrchestrator,
 )
-from ump.core.models.job import Job, JobStatusInfo, StatusCode
+from ump.core.models.job import (
+    Job,
+    JobStatusInfo,
+    StatusCode,
+)
 from ump.core.models.link import Link
 from ump.core.models.ogcp_exception import OGCExceptionResponse
 from ump.core.models.providers_config import ProcessConfig, ProviderConfig
@@ -181,7 +185,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -1092,6 +1096,33 @@ class JobManager:
             return {"status": 404, "body": {"detail": "Results not available"}}
         if not job.remote_job_id or not job.provider:
             return {"status": 404, "body": {"detail": "Remote job id missing"}}
+        # A *required* result store that failed (emulate-ref with an explicitly
+        # requested reference, or emulate-ref-only) is recorded by the
+        # completion observer as a machine-readable marker in ``diagnostic``.
+        # The client asked for a reference precisely so we would NOT return the
+        # (potentially huge) inline value — so surface a hard error instead of
+        # transparently proxying that value.
+        if job.diagnostic and job.diagnostic.startswith(
+            Job.RESULT_STORAGE_FAILED_MARKER
+        ):
+            logger.error(
+                f"[job:results] required result store failed job_id={job.id} "
+                f"diagnostic={job.diagnostic}"
+            )
+            raise OGCProcessException(
+                OGCExceptionResponse(
+                    type="about:blank",
+                    title="Result Storage Failed",
+                    status=502,
+                    detail=(
+                        "The result was requested as a reference but could not "
+                        "be stored, so it cannot be delivered. The inline value "
+                        "is intentionally not returned. Please retry later or "
+                        "contact the operator if the problem persists."
+                    ),
+                    instance=None,
+                )
+            )
         provider = self._providers.get_provider(job.provider)
         base = str(provider.url).rstrip("/")
         results_url = f"{base}/jobs/{job.remote_job_id}/results"

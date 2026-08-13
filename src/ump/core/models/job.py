@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import List, Literal, Optional
+from typing import ClassVar, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -111,6 +111,15 @@ class Job(BaseModel):
 
     # Internal/diagnostic fields
     diagnostic: Optional[str] = None  # capture provider error text or failure reason
+    # Sentinel prefix written into ``diagnostic`` when a *required* result store
+    # failed (transmission-mode-policy ``emulate-ref`` with an explicitly
+    # requested reference, or ``emulate-ref-only``). ``GET /jobs/{id}/results``
+    # detects this prefix and returns an error instead of silently proxying the
+    # (potentially very large) inline value the client deliberately did not want.
+    # A ClassVar (not a Pydantic field): it is shared metadata about the
+    # ``diagnostic`` field above, never per-instance state, so it stays out of
+    # the model schema and serialisation.
+    RESULT_STORAGE_FAILED_MARKER: ClassVar[str] = "result-storage-failed"
     version: int = 0  # optimistic concurrency / event sequencing
 
     # ---- Fields captured from the original execute request ----

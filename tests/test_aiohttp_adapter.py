@@ -1,4 +1,5 @@
 import asyncio
+
 import pytest
 from aioresponses import aioresponses
 
@@ -44,7 +45,12 @@ async def test_get_non_json_response_raises_ogc_exception():
     # condition when surfaced to API clients.
     url = "http://example.test/bad"
     with aioresponses() as m:
-        m.get(url, body="<html>error</html>", status=200, headers={"Content-Type": "text/html"})
+        m.get(
+            url,
+            body="<html>error</html>",
+            status=200,
+            headers={"Content-Type": "text/html"},
+        )
 
         async with AioHttpClientAdapter() as client:
             with pytest.raises(OGCProcessException) as excinfo:
@@ -89,10 +95,44 @@ async def test_post_non_json_returns_text():
     # return a dict with 'body' containing the raw text.
     url = "http://example.test/processes/echo/execution"
     with aioresponses() as m:
-        m.post(url, body="<html>ok</html>", status=202, headers={"Content-Type": "text/html"})
+        m.post(
+            url,
+            body="<html>ok</html>",
+            status=202,
+            headers={"Content-Type": "text/html"},
+        )
 
         async with AioHttpClientAdapter() as client:
             resp = await client.post(url, json={})
             assert isinstance(resp, dict)
             assert resp.get("status") == 202
             assert resp.get("body") == "<html>ok</html>"
+
+
+def test_build_client_timeout_scales_sock_read():
+    # A caller-provided timeout is the total budget for the whole request. The
+    # per-read (sock_read) budget must scale up to match so a slow-but-still-
+    # progressing remote body (e.g. a large GeoJSON serialised on the fly) is
+    # not cut off by the small default sock_read, which would surface as a
+    # premature 504. sock_connect stays at the fast default.
+    client = AioHttpClientAdapter()
+    ct = client._build_client_timeout(120.0)
+    assert ct.total == 120.0
+    assert ct.sock_read == 120.0
+    assert ct.sock_connect == client._default_sock_connect
+
+
+def test_build_client_timeout_never_shrinks_sock_read():
+    # A tiny explicit timeout must not shrink sock_read below the adapter
+    # default; the read budget is max(timeout, default).
+    client = AioHttpClientAdapter()
+    ct = client._build_client_timeout(2.0)
+    assert ct.total == 2.0
+    assert ct.sock_read == client._default_sock_read
+
+
+def test_build_client_timeout_none_returns_default():
+    # No explicit timeout falls back to the pre-built adapter default.
+    client = AioHttpClientAdapter()
+    ct = client._build_client_timeout(None)
+    assert ct is client._default_client_timeout

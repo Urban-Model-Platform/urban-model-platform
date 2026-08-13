@@ -73,6 +73,16 @@ _GEOM_TYPE_TO_LDPROXY: dict[str, str] = {
     "GeometryCollection": "GEOMETRY",
 }
 
+# Data-column names that would collide with the fixed GeoPackage columns
+# (``fid`` primary key, ``geom`` geometry) or with the ldproxy pseudo-property
+# key ``geometry``. A remote process is free to emit an attribute with one of
+# these names; if written verbatim it would clash physically in the GeoPackage
+# or overwrite a role-bearing pseudo-property in the provider entity. Such
+# columns are renamed (never dropped) by ``_sanitize_and_resolve_id``. ``id`` is
+# handled separately — it is *promoted* to the ID role when it is a valid unique
+# identifier, and only renamed when it is not.
+_RESERVED_DATA_NAMES = {"fid", "geom", "geometry"}
+
 # An output_id becomes, in order: a GeoPackage layer name (effectively a SQL
 # table name), an ldproxy provider `types` key, a `sourcePath` segment, and
 # half of a collection id (`{job_uuid}-{output_id}`, see ldproxy_entities).
@@ -125,6 +135,13 @@ class GpkgLayerSchema:
     properties: dict[str, str]
     feature_count: int
     crs_epsg: int
+    # The GeoPackage column that backs the ldproxy ``role: ID`` property, and
+    # its ldproxy type. Defaults to the synthetic ``fid`` primary key that
+    # pyogrio/GDAL always create. Promoted to a real ``id`` data column by
+    # ``_sanitize_and_resolve_id`` when that column is a unique, non-null
+    # identifier. ``properties`` never contains the id-role column.
+    id_source_path: str = "fid"
+    id_type: str = "INTEGER"
 
 
 def write_to_gpkg(
@@ -177,7 +194,10 @@ def write_to_gpkg(
 
     gdf = _ensure_crs(gdf, target_crs_epsg, layer_name)
 
-    schema = _derive_schema(gdf, target_crs_epsg)
+    gdf, id_source_path, id_type, promoted_id = _sanitize_and_resolve_id(
+        gdf, layer_name
+    )
+    schema = _derive_schema(gdf, target_crs_epsg, id_source_path, id_type, promoted_id)
 
     _write_gpkg(gdf, layer_name, output_path)
 
@@ -249,7 +269,12 @@ def write_layers_to_gpkg(
                 "An empty GeoPackage cannot be registered with ldproxy."
             )
         gdf = _ensure_crs(gdf, target_crs_epsg, output_id)
-        schemas[output_id] = _derive_schema(gdf, target_crs_epsg)
+        gdf, id_source_path, id_type, promoted_id = _sanitize_and_resolve_id(
+            gdf, output_id
+        )
+        schemas[output_id] = _derive_schema(
+            gdf, target_crs_epsg, id_source_path, id_type, promoted_id
+        )
         prepared.append((output_id, gdf))
 
     _write_gpkg_layers(prepared, output_path)
@@ -335,7 +360,119 @@ def _ensure_crs(
     return gdf.to_crs(epsg=target_epsg)
 
 
-def _derive_schema(gdf: gpd.GeoDataFrame, crs_epsg: int) -> GpkgLayerSchema:
+def _unique_name(candidate: str, existing: set[str]) -> str:
+    """Return *candidate*, or ``candidate_1``/``_2``/... until it is unused.
+
+    Guarantees the returned name is not in *existing*, so a rename can never
+    collide with a column that is already present (including another reserved
+    column that was just renamed).
+    """
+    if candidate not in existing:
+        return candidate
+    suffix = 1
+    while f"{candidate}_{suffix}" in existing:
+        suffix += 1
+    return f"{candidate}_{suffix}"
+
+
+def _find_column_ci(gdf: gpd.GeoDataFrame, name: str, skip: object) -> str | None:
+    """Return the actual column whose lower-cased name equals *name*, or None.
+
+    Case-insensitive so a remote server emitting ``ID``/``Id`` is matched too.
+    *skip* (the active geometry column) is never returned.
+    """
+    target = name.lower()
+    for col in gdf.columns:
+        if col == skip:
+            continue
+        if str(col).lower() == target:
+            return col
+    return None
+
+
+def _sanitize_and_resolve_id(
+    gdf: gpd.GeoDataFrame, layer_name: str
+) -> tuple[gpd.GeoDataFrame, str, str, str | None]:
+    """Make *gdf* safe to write and decide which column backs the ldproxy ID role.
+
+    Two independent concerns, resolved here once so every downstream consumer
+    (the GeoPackage file *and* the provider entity, both derived from the same
+    GeoDataFrame) stays automatically consistent:
+
+    1. **Reserved-name collisions (lossless rename).** A data column named
+       ``fid``/``geom``/``geometry`` would clash with the GeoPackage's fixed
+       columns or with a role-bearing pseudo-property. Such columns are renamed
+       to ``{name}_attr`` (uniquified) rather than dropped, so no attribute is
+       ever lost. The active geometry column is never touched.
+
+    2. **ID role (promote a valid identifier, else fall back).** GeoPackage
+       always provides a synthetic ``fid`` primary key. If the data also carries
+       an ``id`` column that is a *unique, non-null* identifier, it is promoted
+       to the ID role (``sourcePath: id``) — it is the client's meaningful,
+       reproducible key (GeoJSON feature-``id`` semantics). If an ``id`` column
+       exists but is **not** unique/non-null, it cannot be a valid ID: it is
+       kept as a plain attribute (renamed to ``id_attr``) and the role falls
+       back to ``fid``. When there is no ``id`` column at all, ``fid`` is used.
+
+    Returns:
+        ``(gdf, id_source_path, id_type, promoted_id_col)`` where
+        ``id_source_path`` is the GeoPackage column for the ID role,
+        ``id_type`` its ldproxy type, and ``promoted_id_col`` the data column
+        promoted to the role (so ``_derive_schema`` can exclude it from the
+        plain properties) or ``None`` when the synthetic ``fid`` is used.
+    """
+    geom_col = gdf.geometry.name
+
+    # 1. Rename reserved data columns (never the active geometry).
+    renames: dict[str, str] = {}
+    used = set(map(str, gdf.columns))
+    for col in list(gdf.columns):
+        if col == geom_col:
+            continue
+        if str(col).lower() in _RESERVED_DATA_NAMES:
+            new = _unique_name(f"{col}_attr", used)
+            renames[col] = new
+            used.add(new)
+    if renames:
+        logger.warning(
+            "[gpkg] layer '%s': renamed reserved data column(s) %s to avoid "
+            "clobbering the GeoPackage id/geometry columns.",
+            layer_name,
+            renames,
+        )
+        gdf = gdf.rename(columns=renames)
+
+    # 2. Resolve the ID role.
+    id_col = _find_column_ci(gdf, "id", skip=geom_col)
+    if id_col is not None:
+        series = gdf[id_col]
+        is_valid_id = bool(series.notna().all()) and bool(series.is_unique)
+        if is_valid_id:
+            id_type = _DTYPE_TO_LDPROXY.get(series.dtype.kind, "STRING")
+            return gdf, id_col, id_type, id_col
+
+        # Present but not a valid identifier — keep it as data, fall back to fid.
+        new = _unique_name(f"{id_col}_attr", set(map(str, gdf.columns)))
+        logger.warning(
+            "[gpkg] layer '%s': column '%s' is not a unique, non-null "
+            "identifier; keeping it as attribute '%s' and using the "
+            "GeoPackage 'fid' primary key for the id role.",
+            layer_name,
+            id_col,
+            new,
+        )
+        gdf = gdf.rename(columns={id_col: new})
+
+    return gdf, "fid", "INTEGER", None
+
+
+def _derive_schema(
+    gdf: gpd.GeoDataFrame,
+    crs_epsg: int,
+    id_source_path: str = "fid",
+    id_type: str = "INTEGER",
+    promoted_id_col: str | None = None,
+) -> GpkgLayerSchema:
     """Inspect *gdf* and return the schema needed for ldproxy provider YAML.
 
     Geometry type: determined by the unique Shapely geometry type names present
@@ -344,14 +481,20 @@ def _derive_schema(gdf: gpd.GeoDataFrame, crs_epsg: int) -> GpkgLayerSchema:
     Property types: each non-geometry column is mapped to an ldproxy type string
     via ``_DTYPE_TO_LDPROXY``.  Columns whose dtype kind is not in the map
     default to ``"STRING"`` (safe / human-readable fallback).
+
+    ``promoted_id_col`` (when set) is the data column that has been promoted to
+    the ldproxy ID role; it is excluded from ``properties`` so it is not emitted
+    twice (once as the role, once as a plain attribute).
     """
     geometry_type = _detect_geometry_type(gdf)
-    properties = _detect_property_types(gdf)
+    properties = _detect_property_types(gdf, exclude=promoted_id_col)
     return GpkgLayerSchema(
         geometry_type=geometry_type,
         properties=properties,
         feature_count=len(gdf),
         crs_epsg=crs_epsg,
+        id_source_path=id_source_path,
+        id_type=id_type,
     )
 
 
@@ -371,12 +514,21 @@ def _detect_geometry_type(gdf: gpd.GeoDataFrame) -> str:
     return "GEOMETRY"
 
 
-def _detect_property_types(gdf: gpd.GeoDataFrame) -> dict[str, str]:
-    """Map non-geometry column names to ldproxy type strings."""
+def _detect_property_types(
+    gdf: gpd.GeoDataFrame, exclude: str | None = None
+) -> dict[str, str]:
+    """Map non-geometry column names to ldproxy type strings.
+
+    The active geometry column and *exclude* (the promoted id-role column, if
+    any) are omitted — both are represented as role-bearing pseudo-properties
+    in the provider entity, not as plain data attributes.
+    """
     properties: dict[str, str] = {}
     for col in gdf.columns:
         if col == gdf.geometry.name:
             continue  # handled separately in the provider YAML
+        if exclude is not None and col == exclude:
+            continue  # promoted to the ID role — not a plain attribute
         dtype = gdf[col].dtype
         ldproxy_type = _DTYPE_TO_LDPROXY.get(dtype.kind, "STRING")
         properties[col] = ldproxy_type

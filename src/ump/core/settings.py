@@ -82,14 +82,26 @@ class UmpSettings(BaseSettings):
     # When true, JobManager verifies remote results immediately for terminal success responses
     UMP_VERIFY_REMOTE_RESULTS: bool = True
     # Timeout (seconds) for a single attempt to fetch remote /results content. Result
-    # generation (e.g. large GeoPackage/FlatGeobuf assembly) can take longer than a
-    # typical status poll, so this is intentionally higher than the HTTP adapter default.
-    UMP_RESULTS_FETCH_TIMEOUT: float = 30.0
+    # generation (e.g. large GeoPackage/FlatGeobuf assembly or serialising a large
+    # GeoJSON FeatureCollection on the fly) can take considerably longer than a
+    # typical status poll, so this is intentionally much higher than the HTTP
+    # adapter default. The HTTP adapter scales its per-read (sock_read) budget to
+    # match this value so a slow-but-progressing remote body isn't cut off early.
+    UMP_RESULTS_FETCH_TIMEOUT: float = 120.0
     # Retry policy for transient errors (timeouts, connection errors, 502/503/504)
     # encountered while proxying GET /jobs/{id}/results to the remote provider.
     UMP_RESULTS_FETCH_MAX_RETRIES: int = 3
     UMP_RESULTS_FETCH_RETRY_BASE_WAIT: float = 1.0
     UMP_RESULTS_FETCH_RETRY_MAX_WAIT: float = 10.0
+    # Retry policy for the eager result-storage fetch (ResultStorageCoordinator).
+    # Distinct from the proxy retries above: this fetch runs the instant a job is
+    # reported ``successful``, when the remote's /results endpoint may still be
+    # briefly unavailable (404 / 5xx) due to eventual consistency between the
+    # status store and result assembly. It is therefore given its own, more
+    # patient budget so a required reference store isn't abandoned prematurely.
+    UMP_STORAGE_FETCH_MAX_RETRIES: int = 5
+    UMP_STORAGE_FETCH_RETRY_BASE_WAIT: float = 1.0
+    UMP_STORAGE_FETCH_RETRY_MAX_WAIT: float = 10.0
     # If true, fetch each configured process individually via /processes/{id} instead
     # of fetching the bulk /processes list and filtering. This is slower for large
     # catalogs but ensures we get full descriptions even if the list endpoint omits
