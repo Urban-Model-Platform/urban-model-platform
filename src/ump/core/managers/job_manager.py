@@ -181,7 +181,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -310,6 +310,7 @@ class JobManager:
         from ump.core.managers.steps import (
             CreateLocalJobStep,
             DeriveStatusInfoStep,
+            EnforceTransmissionPolicyStep,
             FinalizeJobStep,
             ForwardToProviderStep,
             HandleProviderResponseStep,
@@ -322,6 +323,7 @@ class JobManager:
         return JobExecutionPipeline(
             steps=[
                 ValidateAndResolveStep(self._validator, self._providers),
+                EnforceTransmissionPolicyStep(),
                 CreateLocalJobStep(self.config),
                 PersistAcceptedStep(self._repo, self._observers),
                 ForwardToProviderStep(

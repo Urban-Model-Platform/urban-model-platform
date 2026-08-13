@@ -136,6 +136,58 @@ def _rewrite_outbound_transmission_mode(
     return new_payload
 
 
+# Mapping of policy -> the single transmissionMode UMP advertises as the *only*
+# permitted value for that policy (mirrors ProcessDescriptionProxy). A client
+# request for any other mode is rejected as a 400, per OGC API - Processes:
+# outputTransmission advertises what the process can deliver, and requesting an
+# unadvertised transmission mode is an invalid request.
+_EXCLUSIVE_TRANSMISSION_POLICY = {
+    "emulate-ref-only": "reference",
+    "value-only": "value",
+}
+
+
+def _validate_transmission_mode_against_policy(
+    outputs_spec: Optional[Dict[str, Any]], policy: Optional[str]
+) -> Optional[str]:
+    """Return an error detail string if the request violates *policy*, else None.
+
+    UMP rewrites the advertised ``outputTransmission`` per policy
+    (see ``ProcessDescriptionProxy``):
+
+      - ``emulate-ref-only`` advertises only ``reference`` — a client asking for
+        ``value`` is requesting an unadvertised mode.
+      - ``value-only`` advertises only ``value`` — a client asking for
+        ``reference`` is requesting an unadvertised mode.
+
+    Both cases are invalid requests under OGC API - Processes and must be
+    rejected with 400 rather than silently overridden. ``emulate-ref`` and
+    ``pass-through`` advertise both modes, so no request is rejected here.
+
+    A pure function with no side effects for straightforward unit testing.
+    """
+    allowed = _EXCLUSIVE_TRANSMISSION_POLICY.get(policy or "")
+    if allowed is None:
+        return None  # policy does not restrict client choice
+
+    if not isinstance(outputs_spec, dict):
+        return None  # no explicit per-output preference to validate
+
+    for output_id, spec in outputs_spec.items():
+        if not isinstance(spec, dict):
+            continue
+        requested = spec.get("transmissionMode")
+        if requested is not None and requested != allowed:
+            return (
+                f"Output '{output_id}' requested transmissionMode "
+                f"'{requested}', but this process only supports "
+                f"'{allowed}' (transmission-mode-policy={policy!r}). "
+                "See the process description's outputTransmission for the "
+                "permitted values."
+            )
+    return None
+
+
 def _ensure_self_link(job_id: str, status_info: JobStatusInfo) -> None:
     existing = status_info.links or []
     filtered = [
@@ -315,6 +367,44 @@ class ValidateAndResolveStep(PipelineStep):
         logger.debug(
             f"[step:resolve] process_id={context.process_id} provider={provider_prefix} remote_id={remote_id}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Step 1b: EnforceTransmissionPolicyStep
+# ---------------------------------------------------------------------------
+
+
+class EnforceTransmissionPolicyStep(PipelineStep):
+    """Reject execute requests that violate the process's transmission-mode policy.
+
+    Runs after ValidateAndResolveStep (which populates ``context.process_config``)
+    and before any job is created, so an invalid request never leaves a spurious
+    local job behind.
+
+    OGC API - Processes conformance: the process description's
+    ``outputTransmission`` advertises the transmission modes a process supports.
+    UMP rewrites that list per ``transmission-mode-policy`` (see
+    ``ProcessDescriptionProxy``); requesting a mode that is not advertised is an
+    invalid request and is answered with 400 Bad Request.
+
+    Halts: with 400 when the request asks for an unadvertised transmissionMode.
+    """
+
+    async def process(self, context: JobExecutionContext) -> None:
+        policy = (
+            context.process_config.transmission_mode_policy
+            if context.process_config is not None
+            else None
+        )
+        detail = _validate_transmission_mode_against_policy(
+            context.output_specs, policy
+        )
+        if detail is not None:
+            logger.info(
+                f"[step:enforce-policy] rejecting request process_id={context.process_id} "
+                f"policy={policy} detail={detail}"
+            )
+            _halt(context, 400, "Bad Request", detail)
 
 
 # ---------------------------------------------------------------------------
