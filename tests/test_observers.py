@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
+from ump.core.exceptions import OptimisticLockError
 from ump.core.interfaces.result_storage import ResultStorageError
 from ump.core.managers.observers import (
     PollingSchedulerObserver,
@@ -486,6 +487,35 @@ class TestResultStorageObserver:
         stored = await repo.get(test_job.id)
         assert "ldproxy unreachable" in stored.diagnostic
         assert stored.status != StatusCode.failed
+
+    @pytest.mark.asyncio
+    async def test_storage_failure_marker_retries_on_optimistic_lock(
+        self, test_job, success_status
+    ):
+        """Concurrent finalize update must not swallow the failure marker."""
+        repo = Mock()
+        fresh = test_job.model_copy(update={"version": test_job.version + 1})
+        repo.update = AsyncMock(
+            side_effect=[
+                OptimisticLockError("version mismatch"),
+                fresh,
+            ]
+        )
+        repo.get = AsyncMock(return_value=fresh)
+
+        observer, _, _, _ = _make_storage_observer(
+            coordinate_side_effect=ResultStorageError("ldproxy unreachable"),
+            repo=repo,
+        )
+
+        await observer.on_job_completed(test_job, success_status)
+
+        assert repo.update.await_count == 2
+        repo.get.assert_awaited_once_with(test_job.id)
+        persisted = repo.update.await_args_list[-1].args[0]
+        assert persisted.diagnostic is not None
+        assert Job.RESULT_STORAGE_FAILED_MARKER in persisted.diagnostic
+        assert "ldproxy unreachable" in persisted.diagnostic
 
     @pytest.mark.asyncio
     async def test_lifecycle_hooks_are_noops(

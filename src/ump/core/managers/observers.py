@@ -11,6 +11,7 @@ import asyncio
 import logging
 from typing import Optional, Set
 
+from ump.core.exceptions import OptimisticLockError
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.observers import JobStateObserver
@@ -21,6 +22,8 @@ from ump.core.models.providers_config import ProcessConfig
 from ump.core.services.result_storage_coordinator import ResultStorageCoordinator
 
 logger = logging.getLogger(__name__)
+
+_PERSIST_FAILURE_MAX_ATTEMPTS = 5
 
 
 class StatusHistoryObserver:
@@ -198,8 +201,9 @@ class ResultStorageObserver:
     Failure semantics — read this before changing anything:
 
     ``emulate-ref``
-        The coordinator swallows storage failures itself and falls back to
-        serving the value inline.  Nothing reaches us.
+        Storage is triggered only when the client explicitly requested
+        ``transmissionMode: reference``. A storage failure is therefore fatal
+        for delivery semantics and is raised by the coordinator.
 
     ``emulate-ref-only``
         The coordinator re-raises, because the policy promised a reference that
@@ -316,12 +320,40 @@ class ResultStorageObserver:
         reason = f"{Job.RESULT_STORAGE_FAILED_MARKER}: {exc}"
         logger.error(f"[observer:storage] {reason} job_id={job.id}")
 
-        job.diagnostic = reason
-        job.touch()
-        try:
-            await self._repo.update(job)
-        except Exception as persist_error:
-            logger.error(
-                f"[observer:storage] could not persist storage failure "
-                f"job_id={job.id} error={persist_error}"
-            )
+        current = job
+        for attempt in range(1, _PERSIST_FAILURE_MAX_ATTEMPTS + 1):
+            updated = current.model_copy(update={"diagnostic": reason})
+            updated.touch()
+            try:
+                await self._repo.update(updated)
+                return
+            except OptimisticLockError:
+                fresh = await self._repo.get(job.id)
+                if fresh is None:
+                    logger.warning(
+                        "[observer:storage] job vanished while persisting "
+                        "storage failure marker job_id=%s",
+                        job.id,
+                    )
+                    return
+                current = fresh
+                logger.debug(
+                    "[observer:storage] retry %d/%d persisting storage "
+                    "failure marker job_id=%s after concurrent modification",
+                    attempt,
+                    _PERSIST_FAILURE_MAX_ATTEMPTS,
+                    job.id,
+                )
+            except Exception as persist_error:
+                logger.error(
+                    f"[observer:storage] could not persist storage failure "
+                    f"job_id={job.id} error={persist_error}"
+                )
+                return
+
+        logger.error(
+            "[observer:storage] gave up persisting storage failure marker "
+            "job_id=%s after %d attempts",
+            job.id,
+            _PERSIST_FAILURE_MAX_ATTEMPTS,
+        )

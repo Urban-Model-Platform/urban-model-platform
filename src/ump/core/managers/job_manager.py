@@ -185,7 +185,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -1195,6 +1195,8 @@ class JobManager:
         ``providers.yaml`` mid-run) falls back to ``None``, which keeps the
         previous merge-with-remote behaviour rather than failing the request.
         """
+        if not job.process_id:
+            return None
         try:
             provider_name, _ = await self._resolve_provider(job.process_id)
             process_config = self._providers.get_process_config(
@@ -1243,6 +1245,7 @@ class JobManager:
         used throughout result storage — V-9 cleanup, V-7 fallback).
         """
         document: Dict[str, Any] = {}
+        stored_outputs = job.stored_outputs or {}
 
         if policy != "emulate-ref-only":
             try:
@@ -1259,7 +1262,7 @@ class JobManager:
                     "serving stored outputs only"
                 )
 
-        for output_id, ref in job.stored_outputs.items():
+        for output_id, ref in stored_outputs.items():
             document[output_id] = {
                 "href": ref["items_url"],
                 "rel": "item",
