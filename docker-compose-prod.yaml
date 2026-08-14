@@ -51,6 +51,14 @@ services:
       UMP_GEOSERVER_DB_HOST: geoserver-db
       UMP_GEOSERVER_CONNECTION_TIMEOUT: ${UMP_GEOSERVER_CONNECTION_TIMEOUT:-60}
       UMP_JOB_DELETE_INTERVAL: ${UMP_JOB_DELETE_INTERVAL:-240}
+      # Result-storage fetch retry budget: widen so a slow upstream /results
+      # (404 right after 'successful') is still stored as a reference.
+      UMP_STORAGE_FETCH_MAX_RETRIES: ${UMP_STORAGE_FETCH_MAX_RETRIES:-8}
+      UMP_STORAGE_FETCH_RETRY_BASE_WAIT: ${UMP_STORAGE_FETCH_RETRY_BASE_WAIT:-2.0}
+      UMP_STORAGE_FETCH_RETRY_MAX_WAIT: ${UMP_STORAGE_FETCH_RETRY_MAX_WAIT:-30.0}
+      # Per-attempt total download timeout (s); default 10s is too short for
+      # large/slowly-streamed result bodies and aborts every attempt with a 504.
+      UMP_STORAGE_FETCH_TIMEOUT: ${UMP_STORAGE_FETCH_TIMEOUT:-120.0}
     volumes:
       - ./providers.yaml:/home/pythonuser/providers.yaml
     networks:

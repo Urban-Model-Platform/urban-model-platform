@@ -102,6 +102,13 @@ class UmpSettings(BaseSettings):
     UMP_STORAGE_FETCH_MAX_RETRIES: int = 5
     UMP_STORAGE_FETCH_RETRY_BASE_WAIT: float = 1.0
     UMP_STORAGE_FETCH_RETRY_MAX_WAIT: float = 10.0
+    # Per-request timeout (seconds) for each eager result-storage fetch attempt.
+    # Distinct from the retry *budget* above: a large result body the upstream
+    # is slowly assembling/streaming can take far longer than the small default
+    # HTTP client timeout (10s), which would abort every attempt with a 504
+    # before the body ever arrives. This gives each storage fetch attempt a
+    # generous total budget, mirroring UMP_RESULTS_FETCH_TIMEOUT for the proxy.
+    UMP_STORAGE_FETCH_TIMEOUT: float = 120.0
     # If true, fetch each configured process individually via /processes/{id} instead
     # of fetching the bulk /processes list and filtering. This is slower for large
     # catalogs but ensures we get full descriptions even if the list endpoint omits

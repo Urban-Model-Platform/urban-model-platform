@@ -98,6 +98,7 @@ class ResultStorageCoordinator:
         fetch_max_attempts: int = _FETCH_MAX_ATTEMPTS,
         fetch_base_wait: float = _FETCH_BASE_WAIT,
         fetch_max_wait: float = _FETCH_MAX_WAIT,
+        fetch_timeout: Optional[float] = None,
     ) -> None:
         self._storage = storage_port
         self._http = http_client
@@ -109,6 +110,11 @@ class ResultStorageCoordinator:
         self._fetch_max_attempts = fetch_max_attempts
         self._fetch_base_wait = fetch_base_wait
         self._fetch_max_wait = fetch_max_wait
+        # Per-request timeout for each fetch attempt. None keeps the http
+        # client's own default; the composition root injects
+        # UMP_STORAGE_FETCH_TIMEOUT so a large, slowly-streamed result body is
+        # not cut off by the small default client timeout.
+        self._fetch_timeout = fetch_timeout
 
     # ------------------------------------------------------------------
     # Public API
@@ -269,7 +275,9 @@ class ResultStorageCoordinator:
         last_exc: Optional[OGCProcessException] = None
         for attempt in range(1, self._fetch_max_attempts + 1):
             try:
-                return await self._http.get_content(results_url, headers=headers)
+                return await self._http.get_content(
+                    results_url, timeout=self._fetch_timeout, headers=headers
+                )
             except OGCProcessException as exc:
                 status = getattr(exc.response, "status", None)
                 is_transient = status in _TRANSIENT_FETCH_STATUSES

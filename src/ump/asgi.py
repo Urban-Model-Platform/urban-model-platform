@@ -215,6 +215,7 @@ result_storage_coordinator = ResultStorageCoordinator(
     fetch_max_attempts=app_settings.UMP_STORAGE_FETCH_MAX_RETRIES,
     fetch_base_wait=app_settings.UMP_STORAGE_FETCH_RETRY_BASE_WAIT,
     fetch_max_wait=app_settings.UMP_STORAGE_FETCH_RETRY_MAX_WAIT,
+    fetch_timeout=app_settings.UMP_STORAGE_FETCH_TIMEOUT,
 )
 
 if app_settings.UMP_JOB_STORE == "postgres":
