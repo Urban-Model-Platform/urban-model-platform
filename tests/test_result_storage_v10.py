@@ -28,6 +28,7 @@ import pytest
 from ump.adapters.job_repository_inmemory import InMemoryJobRepository
 from ump.core.config import JobManagerConfig
 from ump.core.exceptions import OGCExceptionResponse, OGCProcessException
+from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.result_storage import (
     ResultPayload,
     ResultStorageError,
@@ -57,6 +58,7 @@ def _job(**overrides: Any) -> Job:
             status=StatusCode.successful,
             processID="test:process",
             created=datetime.now(timezone.utc),
+            progress=0,
         ),
     )
     defaults.update(overrides)
@@ -91,6 +93,7 @@ class TestApplyStoredReferences:
 
         assert updated.links == []  # job.links (the ineffective field) untouched
         assert updated.status_info is not None
+        assert updated.status_info.links is not None
         rels = {link.rel for link in updated.status_info.links}
         assert "item" in rels
         item_link = next(
@@ -124,6 +127,7 @@ class TestApplyStoredReferences:
 
         updated = _apply_stored_references(job, payloads, references)
 
+        assert updated.stored_outputs is not None
         assert set(updated.stored_outputs.keys()) == {"a", "b"}
         assert (
             updated.stored_outputs["a"]["items_url"]
@@ -150,12 +154,15 @@ class TestApplyStoredReferences:
         once = _apply_stored_references(job, payloads, references)
         twice = _apply_stored_references(once, payloads, references)
 
+        assert once.status_info is not None and once.status_info.links is not None
+        assert twice.status_info is not None and twice.status_info.links is not None
         assert len(twice.status_info.links) == len(once.status_info.links) == 1
         assert twice.stored_outputs == once.stored_outputs
 
     def test_preserves_existing_links(self):
         """A pre-existing self/results link must survive the merge."""
         job = _job()
+        assert job.status_info is not None
         job.status_info.links = [
             Link(href=f"/jobs/{JOB_ID}", rel="self", type="application/json")
         ]
@@ -174,6 +181,7 @@ class TestApplyStoredReferences:
 
         updated = _apply_stored_references(job, payloads, references)
 
+        assert updated.status_info is not None and updated.status_info.links is not None
         rels = [link.rel for link in updated.status_info.links]
         assert rels == ["self", "item"]
 
@@ -225,9 +233,12 @@ class TestDowngradeTransparency:
         coordinator = _coordinator(
             storage=storage, http_client=http_client, providers=providers
         )
-        process_config = ProcessConfig(
-            id="process",
-            **{"transmission-mode-policy": "emulate-ref", "result-storage": "ldproxy"},
+        process_config = ProcessConfig.model_validate(
+            {
+                "id": "process",
+                "transmission-mode-policy": "emulate-ref",
+                "result-storage": "ldproxy",
+            }
         )
 
         with pytest.raises(ResultStorageError):
@@ -235,6 +246,7 @@ class TestDowngradeTransparency:
 
         # No value-downgrade marker is written under Option A.
         persisted = await repo.get(JOB_ID)
+        assert persisted is not None and persisted.status_info is not None
         assert persisted.status_info.transmissionModeApplied != "value"
 
     @pytest.mark.asyncio
@@ -260,12 +272,12 @@ class TestDowngradeTransparency:
         coordinator = _coordinator(
             storage=storage, http_client=http_client, providers=providers
         )
-        process_config = ProcessConfig(
-            id="process",
-            **{
+        process_config = ProcessConfig.model_validate(
+            {
+                "id": "process",
                 "transmission-mode-policy": "emulate-ref-only",
                 "result-storage": "ldproxy",
-            },
+            }
         )
 
         with pytest.raises(ResultStorageError):
@@ -273,6 +285,7 @@ class TestDowngradeTransparency:
 
         # emulate-ref-only never marks a downgrade: value was never an option.
         persisted = await repo.get(JOB_ID)
+        assert persisted is not None and persisted.status_info is not None
         assert persisted.status_info.transmissionModeApplied is None
 
     @pytest.mark.asyncio
@@ -308,14 +321,19 @@ class TestDowngradeTransparency:
         coordinator = _coordinator(
             storage=storage, http_client=http_client, providers=providers
         )
-        process_config = ProcessConfig(
-            id="process",
-            **{"transmission-mode-policy": "emulate-ref", "result-storage": "ldproxy"},
+        process_config = ProcessConfig.model_validate(
+            {
+                "id": "process",
+                "transmission-mode-policy": "emulate-ref",
+                "result-storage": "ldproxy",
+            }
         )
 
         await coordinator.coordinate(job, process_config, repo)
 
         persisted = await repo.get(JOB_ID)
+        assert persisted is not None and persisted.status_info is not None
+        assert persisted.stored_outputs is not None
         assert persisted.status_info.transmissionModeApplied is None
         assert persisted.stored_outputs["voronoi"]["items_url"] == (
             "https://geo/collections/x/items"
@@ -386,12 +404,12 @@ class TestMixedTransmissionModes:
         coordinator = _coordinator(
             storage=storage, http_client=http_client, providers=providers
         )
-        process_config = ProcessConfig(
-            id="process",
-            **{
+        process_config = ProcessConfig.model_validate(
+            {
+                "id": "process",
                 "transmission-mode-policy": "emulate-ref",
                 "result-storage": "ldproxy",
-            },
+            }
         )
 
         await coordinator.coordinate(job, process_config, repo)
@@ -402,6 +420,8 @@ class TestMixedTransmissionModes:
         persisted = await repo.get(JOB_ID)
         # No downgrade: the value outputs never entered the batch, so the
         # reference output stored cleanly.
+        assert persisted is not None and persisted.status_info is not None
+        assert persisted.stored_outputs is not None
         assert persisted.status_info.transmissionModeApplied is None
         assert persisted.stored_outputs["voronoi_diagram"]["items_url"] == (
             "https://geo/collections/v/items"
@@ -409,12 +429,13 @@ class TestMixedTransmissionModes:
 
 
 def _job_manager(providers, http_client, repo) -> JobManager:
-    class _NoOpValidator:
+    class _NoOpValidator(ProcessIdValidatorPort):
         def validate(self, process_id_with_prefix: str) -> bool:
             return True
 
-        def extract(self, process_id_with_prefix: str):
-            return process_id_with_prefix.split(":", 1)
+        def extract(self, process_id_with_prefix: str) -> tuple[str, str]:
+            prefix, _, rest = process_id_with_prefix.partition(":")
+            return prefix, rest
 
         def create(self, provider_prefix: str, process_id: str) -> str:
             return f"{provider_prefix}:{process_id}"
@@ -525,12 +546,12 @@ class TestGetResultsDocument:
             return_value=Mock(url="https://remote.example.com")
         )
         providers.get_process_config = Mock(
-            return_value=ProcessConfig(
-                id="process",
-                **{
+            return_value=ProcessConfig.model_validate(
+                {
+                    "id": "process",
                     "transmission-mode-policy": "emulate-ref-only",
                     "result-storage": "ldproxy",
-                },
+                }
             )
         )
 
@@ -742,12 +763,12 @@ class TestRequiredStorePendingFinalizingHint:
             return_value=Mock(url="https://remote.example.com")
         )
         providers.get_process_config = Mock(
-            return_value=ProcessConfig(
-                id="process",
-                **{
+            return_value=ProcessConfig.model_validate(
+                {
+                    "id": "process",
                     "transmission-mode-policy": policy,
                     "result-storage": "ldproxy",
-                },
+                }
             )
         )
         return providers
