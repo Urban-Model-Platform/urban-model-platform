@@ -38,14 +38,20 @@ def _payload(output_id: str, n: int = 2) -> ResultPayload:
     )
 
 
-def _make_storage(tmp_path, backend=None) -> LdproxyResultStorage:
+def _make_storage(tmp_path, backend=None, **kwargs) -> LdproxyResultStorage:
     backend = backend or FilesystemEntityConfigBackend(tmp_path)
     registry = ServiceRegistry(backend, service_id="ump-results")
+    # Default the post-store publication-confirmation to a no-op in tests: no
+    # ldproxy is running, so there is nothing to probe or wait for. Individual
+    # tests that exercise the confirm/pending behaviour override these.
+    params = {"confirm_base_wait": 0.0, "confirm_max_wait": 0.0}
+    params.update(kwargs)
     return LdproxyResultStorage(
         backend=backend,
         service_registry=registry,
         root_path=tmp_path,
         base_url=BASE_URL,
+        **params,
     )
 
 
@@ -288,3 +294,73 @@ class TestEnsureDefaultProvider:
         path = tmp_path / "entities" / "instances" / "providers" / "custom-svc.yml"
         provider = yaml.safe_load(path.read_text())
         assert provider["id"] == "custom-svc"
+
+
+class TestConfirmPublication:
+    """The post-store step that works around ldproxy's provider/service reload
+    ordering: re-touch the service entity until each collection is confirmed
+    live, and flag any that never confirm as ``publication_pending``."""
+
+    @pytest.mark.asyncio
+    async def test_no_probe_marks_nothing_pending(self, tmp_path):
+        """Without an internal_url UMP cannot observe liveness, so it must not
+        alarm the client — references are returned with pending=False."""
+        storage = _make_storage(tmp_path)  # internal_url unset
+        refs = await storage.store(JOB_ID, [_payload("voronoi")])
+        assert refs[0].publication_pending is False
+
+    @pytest.mark.asyncio
+    async def test_confirms_live_after_retouch(self, tmp_path, monkeypatch):
+        """When the probe reports the collection live, no reference is flagged
+        pending and the confirm loop stops early."""
+        storage = _make_storage(
+            tmp_path,
+            internal_url="http://ldproxy:7080/ump-results",
+            confirm_max_attempts=5,
+            confirm_base_wait=0.0,
+            confirm_max_wait=0.0,
+        )
+        # Live on the very first probe.
+        monkeypatch.setattr(storage, "_probe_collection_live", lambda cid: True)
+        refs = await storage.store(JOB_ID, [_payload("voronoi")])
+        assert refs[0].publication_pending is False
+
+    @pytest.mark.asyncio
+    async def test_flags_pending_when_never_confirmed(self, tmp_path, monkeypatch):
+        """When the probe never reports live within the budget, the reference is
+        flagged pending (honest signalling) but the store still succeeds."""
+        storage = _make_storage(
+            tmp_path,
+            internal_url="http://ldproxy:7080/ump-results",
+            confirm_max_attempts=3,
+            confirm_base_wait=0.0,
+            confirm_max_wait=0.0,
+        )
+        monkeypatch.setattr(storage, "_probe_collection_live", lambda cid: False)
+        refs = await storage.store(JOB_ID, [_payload("voronoi")])
+        assert refs[0].publication_pending is True
+        # The data + entities are still fully written — a pending publication is
+        # a success, not a failure.
+        assert _gpkg_path(tmp_path).exists()
+        assert f"{JOB_ID}-voronoi" in _service(tmp_path)["collections"]
+
+    @pytest.mark.asyncio
+    async def test_pending_only_for_unconfirmed_collection(self, tmp_path, monkeypatch):
+        """With multiple outputs, only the collection the probe cannot confirm
+        is flagged pending; a confirmed sibling stays live."""
+        storage = _make_storage(
+            tmp_path,
+            internal_url="http://ldproxy:7080/ump-results",
+            confirm_max_attempts=2,
+            confirm_base_wait=0.0,
+            confirm_max_wait=0.0,
+        )
+
+        def probe(collection_id: str) -> bool:
+            return collection_id.endswith("voronoi")  # buffer never confirms
+
+        monkeypatch.setattr(storage, "_probe_collection_live", probe)
+        refs = await storage.store(JOB_ID, [_payload("voronoi"), _payload("buffer")])
+        pending = {r.collection_id: r.publication_pending for r in refs}
+        assert pending[f"{JOB_ID}-voronoi"] is False
+        assert pending[f"{JOB_ID}-buffer"] is True

@@ -79,11 +79,21 @@ class StoredReference:
         items_url:      URL of the items endpoint — the most useful link for
                         clients that want to fetch the actual features,
                         e.g. ``{collection_url}/items``.
+        publication_pending:
+                        True when the result was persisted successfully but the
+                        store has not yet *confirmed* the collection is publicly
+                        queryable (e.g. a store that hot-reloads config
+                        asynchronously and hasn't finished). The reference URLs
+                        are already final and correct; a client may just need to
+                        retry for a few moments. Defaults to False (confirmed
+                        live), so stores that publish synchronously — and the
+                        no-op store — never need to set it.
     """
 
     collection_id: str
     collection_url: str
     items_url: str
+    publication_pending: bool = False
 
 
 # ---------------------------------------------------------------------------

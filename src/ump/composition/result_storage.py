@@ -154,6 +154,7 @@ def build_result_storage_port(
         ),
         native_crs_epsg=settings.UMP_RESULTSTORE_LDPROXY_NATIVE_CRS,
         service_id=settings.UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
+        internal_url=settings.UMP_RESULTSTORE_LDPROXY_INTERNAL_URL,
     )
     return storage_port, registry
 

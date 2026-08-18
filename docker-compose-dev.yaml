@@ -37,7 +37,10 @@ services:
       UMP_API_SERVER_URL: "http://localhost:8004/"
       UMP_API_SERVER_URL_PREFIX: "/"
       UMP_API_SERVER_HOST: "0.0.0.0"
-      UMP_API_SERVER_PORT: 8004
+      # Must match the container side of the port mapping above
+      # (${WEBAPP_PORT_EXTERNAL}:8000). Uvicorn listens on this port *inside*
+      # the container; the external port (8004) is set via WEBAPP_PORT_EXTERNAL.
+      UMP_API_SERVER_PORT: 8000
       UMP_API_SERVER_WORKERS: 1
       UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: 5
       UMP_REMOTE_JOB_TTW: 900
@@ -81,6 +84,11 @@ services:
       # serves each API at the root path `/{service-id}` (the `/rest/services`
       # prefix of 3.x was removed). Adjust host/port to your deployment.
       UMP_RESULTSTORE_LDPROXY_BASE_URL: "http://localhost:7080/ump-results"
+      # Internal (container-network) URL UMP uses only to probe whether a newly
+      # stored collection is actually published, so it can re-touch the service
+      # entity until ldproxy picks up the just-loaded provider. Must NOT use
+      # localhost here — that would resolve to the UMP container itself.
+      UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: "http://ldproxy:7080/ump-results"
       UMP_RESULTSTORE_LDPROXY_SERVICE_ID: ump-results
       UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: 4326
       UMP_RESULTSTORE_CONFIG_BACKEND: filesystem

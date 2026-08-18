@@ -93,6 +93,15 @@ class JobManagerConfig(BaseModel):
         description="Maximum wait time in seconds between results-fetch retry attempts",
     )
 
+    results_finalizing_retry_after: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Seconds advertised in the Retry-After header while a successful "
+            "job's required reference-store is still finalizing"
+        ),
+    )
+
     model_config = {
         "frozen": True,  # Immutable after creation for safety
         "extra": "forbid",  # Reject unknown fields
@@ -116,6 +125,7 @@ class JobManagerConfig(BaseModel):
             results_fetch_max_retries=settings.UMP_RESULTS_FETCH_MAX_RETRIES,
             results_fetch_retry_base_wait=settings.UMP_RESULTS_FETCH_RETRY_BASE_WAIT,
             results_fetch_retry_max_wait=settings.UMP_RESULTS_FETCH_RETRY_MAX_WAIT,
+            results_finalizing_retry_after=settings.UMP_RESULTS_FINALIZING_RETRY_AFTER,
             # poll_timeout removed: now resolved per-process from provider/process config
             # inline_inputs_size_limit, forward_max_retries, forward_retry_base_wait,
             # forward_retry_max_wait all use defaults (no settings exist yet)

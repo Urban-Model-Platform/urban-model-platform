@@ -81,6 +81,15 @@ _FETCH_MAX_WAIT = 10.0
 # the result document has not materialised yet, not that it will never exist.
 _TRANSIENT_FETCH_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 
+# Appended to a job's statusInfo message when the result was stored
+# successfully but the store has not yet confirmed the collection is publicly
+# queryable. The reference links are final and correct; the client may simply
+# need to retry for a few moments while the store finishes publishing.
+_PUBLICATION_PENDING_MESSAGE = (
+    "Result stored; publication is finalizing and the reference links may take "
+    "a few moments to become queryable."
+)
+
 
 class ResultStorageCoordinator:
     """Orchestrates the full store-result lifecycle for one completed job.
@@ -770,12 +779,15 @@ def _apply_stored_references(
     new_links = list((job.status_info.links if job.status_info else None) or [])
     existing_hrefs = {link.href for link in new_links}
 
+    any_pending = False
     for payload, ref in zip(payloads, references):
         new_stored_outputs[payload.output_id] = {
             "collection_id": ref.collection_id,
             "collection_url": ref.collection_url,
             "items_url": ref.items_url,
+            "publication_pending": ref.publication_pending,
         }
+        any_pending = any_pending or ref.publication_pending
         if ref.items_url not in existing_hrefs:
             new_links.append(
                 Link(
@@ -789,7 +801,16 @@ def _apply_stored_references(
 
     updates: dict = {"stored_outputs": new_stored_outputs}
     if job.status_info is not None:
-        updates["status_info"] = job.status_info.model_copy(update={"links": new_links})
+        status_updates: dict = {"links": new_links}
+        # Honest signalling: the reference URLs are final and correct, but the
+        # store has not yet confirmed the collection is queryable. Tell the
+        # client it may need to retry for a moment rather than implying the
+        # link is immediately live.
+        if any_pending:
+            status_updates["message"] = _append_message(
+                job.status_info.message, _PUBLICATION_PENDING_MESSAGE
+            )
+        updates["status_info"] = job.status_info.model_copy(update=status_updates)
 
     return job.model_copy(update=updates)
 

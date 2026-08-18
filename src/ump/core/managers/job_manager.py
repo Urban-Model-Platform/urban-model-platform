@@ -1147,6 +1147,36 @@ class JobManager:
                 job, results_url, auth_headers, policy
             )
 
+        # Required-store still in progress: the job is successful but its eager
+        # reference storage has neither completed (stored_outputs is empty) nor
+        # failed (no failure marker — checked above). Proxying the upstream now
+        # would surface a confusing transient 404/5xx to the client (the remote
+        # /results is briefly not-ready right after 'successful'). Instead,
+        # answer with a clear "come back shortly" hint so a retry lands on the
+        # finished store — this is the window that produced the puzzling
+        # 404-then-success behaviour on a first results fetch.
+        if await self._is_storage_pending(job):
+            logger.debug(
+                f"[job:results] required store still in progress job_id={job.id}"
+                " — returning finalizing hint"
+            )
+            return {
+                "status": 503,
+                "headers": {
+                    "Retry-After": str(self.config.results_finalizing_retry_after)
+                },
+                "body": {
+                    "type": "about:blank",
+                    "title": "Results Finalizing",
+                    "status": 503,
+                    "detail": (
+                        "The job completed successfully and its result is being "
+                        "stored as a reference. This usually takes a few seconds"
+                        ". Please retry shortly."
+                    ),
+                },
+            }
+
         logger.debug(
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
         )
@@ -1209,6 +1239,34 @@ class JobManager:
                 f"job_id={job.id} process_id={job.process_id} err={exc}"
             )
             return None
+
+    async def _is_storage_pending(self, job: Job) -> bool:
+        """Return True if a *required* reference store for this job is still in
+        progress (neither completed nor failed).
+
+        Mirrors ``ResultStorageCoordinator.should_store``: storage is required
+        under ``emulate-ref-only`` (always) or under ``emulate-ref`` when the
+        client asked for ``transmissionMode: reference``. Callers only reach
+        this after establishing that ``job.stored_outputs`` is empty and no
+        storage-failure marker is set, so a required policy here means the
+        eager store is still running — the brief window that would otherwise
+        proxy a confusing transient upstream 404/5xx to the client.
+
+        Best-effort: any resolution error returns False so the caller falls
+        back to the normal proxy path rather than blocking results.
+        """
+        # Local import avoids any import-order coupling with the coordinator
+        # module; the function is a pure, side-effect-free helper.
+        from ump.core.services.result_storage_coordinator import (
+            _client_requested_reference,
+        )
+
+        policy = await self._resolve_transmission_mode_policy(job)
+        if policy == "emulate-ref-only":
+            return True
+        if policy == "emulate-ref":
+            return _client_requested_reference(job.outputs_spec)
+        return False
 
     async def _build_stored_results_document(
         self,

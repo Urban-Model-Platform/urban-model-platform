@@ -397,9 +397,15 @@ def create_app(
 
         status = resp.get("status", 200)
 
-        # Error responses from get_results use the "body" key (plain dict)
+        # Error responses from get_results use the "body" key (plain dict).
+        # Optional "headers" (e.g. Retry-After for a still-finalizing store)
+        # are forwarded verbatim when present.
         if status != 200:
-            return JSONResponse(status_code=status, content=resp.get("body", {}))
+            return JSONResponse(
+                status_code=status,
+                content=resp.get("body", {}),
+                headers=resp.get("headers"),
+            )
 
         # Successful results: forward the remote's Content-Type verbatim.
         # body_bytes is always present for status 200; the content type tells

@@ -723,3 +723,121 @@ class TestRequiredStoreFailureErrorsOnResults:
 
         assert result["status"] == 200
         assert result["body_bytes"] == b"raw-value"
+
+
+# ---------------------------------------------------------------------------
+# 6. Option A: required store still in progress -> finalizing hint, not proxy
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredStorePendingFinalizingHint:
+    """While a successful job's *required* reference store is still running
+    (stored_outputs empty, no failure marker), GET /results must return a
+    clear "come back shortly" hint with Retry-After instead of proxying the
+    not-yet-ready upstream (which produced a confusing transient 404)."""
+
+    def _providers(self, policy: str):
+        providers = Mock()
+        providers.get_provider = Mock(
+            return_value=Mock(url="https://remote.example.com")
+        )
+        providers.get_process_config = Mock(
+            return_value=ProcessConfig(
+                id="process",
+                **{
+                    "transmission-mode-policy": policy,
+                    "result-storage": "ldproxy",
+                },
+            )
+        )
+        return providers
+
+    @pytest.mark.asyncio
+    async def test_emulate_ref_only_pending_returns_503_retry_after(self):
+        job = _job(stored_outputs=None)
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        # The upstream must not be proxied while the store is still finalizing.
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            side_effect=AssertionError("upstream must not be proxied while pending")
+        )
+        manager = _job_manager(self._providers("emulate-ref-only"), http_client, repo)
+
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 503
+        assert result["headers"]["Retry-After"] == "5"
+        assert result["body"]["title"] == "Results Finalizing"
+        http_client.get_content.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_emulate_ref_reference_requested_pending_returns_503(self):
+        job = _job(
+            stored_outputs=None,
+            outputs_spec={"voronoi": {"transmissionMode": "reference"}},
+        )
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            side_effect=AssertionError("upstream must not be proxied while pending")
+        )
+        manager = _job_manager(self._providers("emulate-ref"), http_client, repo)
+
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 503
+        assert result["headers"]["Retry-After"] == "5"
+
+    @pytest.mark.asyncio
+    async def test_emulate_ref_value_requested_still_proxies(self):
+        """emulate-ref where the client asked for VALUE is not a required
+        store, so it must keep proxying (no finalizing hint)."""
+        job = _job(
+            stored_outputs=None,
+            outputs_spec={"voronoi": {"transmissionMode": "value"}},
+        )
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            return_value=(b"raw-value", "application/json")
+        )
+        manager = _job_manager(self._providers("emulate-ref"), http_client, repo)
+
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 200
+        assert result["body_bytes"] == b"raw-value"
+
+    @pytest.mark.asyncio
+    async def test_stored_outputs_present_takes_precedence_over_pending(self):
+        """Once stored_outputs is populated, the document path wins — the
+        pending hint must not fire."""
+        job = _job(
+            stored_outputs={
+                "voronoi": {
+                    "collection_id": f"{JOB_ID}-voronoi",
+                    "collection_url": "https://geo/collections/x",
+                    "items_url": "https://geo/collections/x/items",
+                }
+            },
+        )
+        repo = InMemoryJobRepository()
+        await repo.create(job)
+
+        http_client = Mock()
+        http_client.get_content = AsyncMock(
+            side_effect=AssertionError(
+                "emulate-ref-only must not fetch remote for a stored job"
+            )
+        )
+        manager = _job_manager(self._providers("emulate-ref-only"), http_client, repo)
+
+        result = await manager.get_results(JOB_ID)
+
+        assert result["status"] == 200

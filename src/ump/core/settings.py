@@ -109,6 +109,11 @@ class UmpSettings(BaseSettings):
     # before the body ever arrives. This gives each storage fetch attempt a
     # generous total budget, mirroring UMP_RESULTS_FETCH_TIMEOUT for the proxy.
     UMP_STORAGE_FETCH_TIMEOUT: float = 120.0
+    # Seconds advertised in the ``Retry-After`` header when a successful job's
+    # required reference-store is still in progress (results not yet queryable).
+    # Small enough that a client/browser retry lands quickly on the finished
+    # store, large enough to avoid a tight retry loop while eager storage runs.
+    UMP_RESULTS_FINALIZING_RETRY_AFTER: int = 5
     # If true, fetch each configured process individually via /processes/{id} instead
     # of fetching the bulk /processes list and filtering. This is slower for large
     # catalogs but ensures we get full descriptions even if the list endpoint omits
@@ -174,6 +179,15 @@ class UmpSettings(BaseSettings):
     # https://geodata.example.com/ump-results
     # Required when any process uses result-storage: ldproxy.
     UMP_RESULTSTORE_LDPROXY_BASE_URL: str | None = None
+
+    # URL ldproxy is reachable at *from inside UMP* (the container-network
+    # service name), used only for the post-store liveness probe that works
+    # around ldproxy's provider/service reload ordering. This differs from
+    # UMP_RESULTSTORE_LDPROXY_BASE_URL, which is the public/client-facing URL
+    # baked into result references and is usually NOT reachable from within the
+    # UMP container (e.g. it points at localhost for a browser). When unset,
+    # the post-store settle degrades to a single best-effort re-touch.
+    UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: str | None = None
 
     # Path to the ldproxy store root on the shared filesystem (Azure File Share
     # in production, a local directory in development).  GeoPackage files and,
