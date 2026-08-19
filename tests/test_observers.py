@@ -389,17 +389,24 @@ class TestObserverErrorIsolation:
 def _make_storage_observer(
     should_store=True,
     process_config=Mock(transmission_mode_policy="emulate-ref"),
+    coordinate_return_value=None,
     coordinate_side_effect=None,
     repo=None,
 ):
     """Build a ResultStorageObserver with fully mocked collaborators.
 
-    The observer is a pure trigger, so every collaborator is a mock: the tests
-    assert *whether* the coordinator was invoked, never what it stored.
+    The observer now also owns the deferred successful/failed transition
+    (V-11), so ``coordinate`` must return a list of ``StoredReference``-like
+    mocks (default: empty list, meaning "nothing new to store" -> success).
     """
     coordinator = Mock()
     coordinator.should_store = Mock(return_value=should_store)
-    coordinator.coordinate = AsyncMock(side_effect=coordinate_side_effect)
+    coordinator.coordinate = AsyncMock(
+        return_value=coordinate_return_value
+        if coordinate_return_value is not None
+        else [],
+        side_effect=coordinate_side_effect,
+    )
 
     providers = Mock()
     providers.get_process_config = Mock(return_value=process_config)
@@ -411,8 +418,27 @@ def _make_storage_observer(
     return observer, coordinator, providers, repository
 
 
+def _make_gated_job(test_job):
+    """A job in the V-11 'running, awaiting publication' snapshot.
+
+    Mirrors what ``JobManager._process_status_update`` persists before
+    handing off to ``ResultStorageObserver``: status is ``running`` even
+    though the remote already reported completion.
+    """
+    running_si = JobStatusInfo(
+        jobID=test_job.id,
+        status=StatusCode.running,
+        type="process",
+        processID=test_job.process_id,
+        message="Job completed; verifying that the result reference is published.",
+    )
+    gated = test_job.model_copy(update={"status": "running"})
+    gated.apply_status_info(running_si)
+    return gated
+
+
 class TestResultStorageObserver:
-    """Test the eager result-storage trigger."""
+    """Test the eager result-storage trigger and V-11 deferred transition."""
 
     @pytest.mark.asyncio
     async def test_stores_on_successful_job(self, test_job, success_status):
@@ -425,6 +451,49 @@ class TestResultStorageObserver:
         job_arg, config_arg, repo_arg = coordinator.coordinate.await_args.args
         assert job_arg is test_job
         assert repo_arg is repo
+
+    @pytest.mark.asyncio
+    async def test_gated_job_finalizes_successful_when_references_confirmed(
+        self, test_job, success_status
+    ):
+        """V-11: after coordinate() with no pending references, the job flips
+        from its persisted `running` gate snapshot to a true `successful`."""
+        repo = InMemoryJobRepository()
+        gated_job = _make_gated_job(test_job)
+        await repo.create(gated_job)
+
+        ref = Mock(publication_pending=False)
+        observer, _, _, _ = _make_storage_observer(
+            coordinate_return_value=[ref], repo=repo
+        )
+
+        await observer.on_job_completed(gated_job, success_status)
+
+        stored = await repo.get(gated_job.id)
+        assert stored.status_info.status == StatusCode.successful
+        assert any(link.rel == "results" for link in (stored.status_info.links or []))
+        assert any(link.rel == "self" for link in (stored.status_info.links or []))
+
+    @pytest.mark.asyncio
+    async def test_gated_job_finalizes_failed_when_reference_unconfirmed(
+        self, test_job, success_status
+    ):
+        """V-11: an unconfirmed reference is a hard failure, not a retry."""
+        repo = InMemoryJobRepository()
+        gated_job = _make_gated_job(test_job)
+        await repo.create(gated_job)
+
+        pending_ref = Mock(publication_pending=True)
+        observer, _, _, _ = _make_storage_observer(
+            coordinate_return_value=[pending_ref], repo=repo
+        )
+
+        await observer.on_job_completed(gated_job, success_status)
+
+        stored = await repo.get(gated_job.id)
+        assert stored.status_info.status == StatusCode.failed
+        assert stored.diagnostic is not None
+        assert Job.RESULT_STORAGE_FAILED_MARKER in stored.diagnostic
 
     @pytest.mark.asyncio
     async def test_skips_failed_job(self, test_job, failed_status):
@@ -469,12 +538,12 @@ class TestResultStorageObserver:
         coordinator.coordinate.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_storage_failure_records_diagnostic_without_failing_job(
-        self, test_job, success_status
-    ):
-        """emulate-ref-only failure is recorded; the job stays successful."""
+    async def test_storage_failure_finalizes_job_failed(self, test_job, success_status):
+        """emulate-ref-only failure (V-11): the job is finalized `failed`,
+        not left dangling in its `running` gate snapshot."""
         repo = InMemoryJobRepository()
-        await repo.create(test_job)
+        gated_job = _make_gated_job(test_job)
+        await repo.create(gated_job)
         observer, _, _, _ = _make_storage_observer(
             coordinate_side_effect=ResultStorageError("ldproxy unreachable"),
             repo=repo,
@@ -482,19 +551,20 @@ class TestResultStorageObserver:
 
         # Must not raise: JobManager swallows observer errors, so the
         # information would otherwise be lost.
-        await observer.on_job_completed(test_job, success_status)
+        await observer.on_job_completed(gated_job, success_status)
 
-        stored = await repo.get(test_job.id)
+        stored = await repo.get(gated_job.id)
         assert "ldproxy unreachable" in stored.diagnostic
-        assert stored.status != StatusCode.failed
+        assert stored.status_info.status == StatusCode.failed
 
     @pytest.mark.asyncio
     async def test_storage_failure_marker_retries_on_optimistic_lock(
         self, test_job, success_status
     ):
         """Concurrent finalize update must not swallow the failure marker."""
+        gated_job = _make_gated_job(test_job)
         repo = Mock()
-        fresh = test_job.model_copy(update={"version": test_job.version + 1})
+        fresh = gated_job.model_copy(update={"version": gated_job.version + 1})
         repo.update = AsyncMock(
             side_effect=[
                 OptimisticLockError("version mismatch"),
@@ -508,14 +578,15 @@ class TestResultStorageObserver:
             repo=repo,
         )
 
-        await observer.on_job_completed(test_job, success_status)
+        await observer.on_job_completed(gated_job, success_status)
 
         assert repo.update.await_count == 2
-        repo.get.assert_awaited_once_with(test_job.id)
+        repo.get.assert_awaited_once_with(gated_job.id)
         persisted = repo.update.await_args_list[-1].args[0]
         assert persisted.diagnostic is not None
         assert Job.RESULT_STORAGE_FAILED_MARKER in persisted.diagnostic
         assert "ldproxy unreachable" in persisted.diagnostic
+        assert persisted.status_info.status == StatusCode.failed
 
     @pytest.mark.asyncio
     async def test_lifecycle_hooks_are_noops(

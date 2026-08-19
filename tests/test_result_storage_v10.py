@@ -684,7 +684,7 @@ class TestResultsFetchRetry:
                 "https://remote.example.com/jobs/r/results", None, "job-x"
             )
 
-        assert http_client.get_content.await_count == 5
+        assert http_client.get_content.await_count == 8
 
 
 # ---------------------------------------------------------------------------
@@ -751,11 +751,20 @@ class TestRequiredStoreFailureErrorsOnResults:
 # ---------------------------------------------------------------------------
 
 
+# 6. V-11 superseded the "Results Finalizing" 503 hint: a job can no longer be
+# `successful` while its required stored reference is still being confirmed
+# live -- see ResultStorageObserver._finalize_publication and
+# JobManager._process_status_update in job_manager.py. The two scenarios that
+# used to assert a 503 here have been removed as unreachable; see
+# tests/test_observers.py::TestResultStorageObserver for the V-11 gated
+# success/failure coverage. The remaining tests below cover cases that stay
+# reachable regardless of V-11 (value-requested proxy, stored_outputs
+# precedence).
+# ---------------------------------------------------------------------------
+
+
 class TestRequiredStorePendingFinalizingHint:
-    """While a successful job's *required* reference store is still running
-    (stored_outputs empty, no failure marker), GET /results must return a
-    clear "come back shortly" hint with Retry-After instead of proxying the
-    not-yet-ready upstream (which produced a confusing transient 404)."""
+    """Remaining non-pending-hint coverage for the results proxy path."""
 
     def _providers(self, policy: str):
         providers = Mock()
@@ -772,46 +781,6 @@ class TestRequiredStorePendingFinalizingHint:
             )
         )
         return providers
-
-    @pytest.mark.asyncio
-    async def test_emulate_ref_only_pending_returns_503_retry_after(self):
-        job = _job(stored_outputs=None)
-        repo = InMemoryJobRepository()
-        await repo.create(job)
-
-        # The upstream must not be proxied while the store is still finalizing.
-        http_client = Mock()
-        http_client.get_content = AsyncMock(
-            side_effect=AssertionError("upstream must not be proxied while pending")
-        )
-        manager = _job_manager(self._providers("emulate-ref-only"), http_client, repo)
-
-        result = await manager.get_results(JOB_ID)
-
-        assert result["status"] == 503
-        assert result["headers"]["Retry-After"] == "5"
-        assert result["body"]["title"] == "Results Finalizing"
-        http_client.get_content.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_emulate_ref_reference_requested_pending_returns_503(self):
-        job = _job(
-            stored_outputs=None,
-            outputs_spec={"voronoi": {"transmissionMode": "reference"}},
-        )
-        repo = InMemoryJobRepository()
-        await repo.create(job)
-
-        http_client = Mock()
-        http_client.get_content = AsyncMock(
-            side_effect=AssertionError("upstream must not be proxied while pending")
-        )
-        manager = _job_manager(self._providers("emulate-ref"), http_client, repo)
-
-        result = await manager.get_results(JOB_ID)
-
-        assert result["status"] == 503
-        assert result["headers"]["Retry-After"] == "5"
 
     @pytest.mark.asyncio
     async def test_emulate_ref_value_requested_still_proxies(self):

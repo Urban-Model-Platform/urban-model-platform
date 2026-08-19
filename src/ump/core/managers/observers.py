@@ -9,6 +9,7 @@ This module provides production-ready observers that handle:
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Set
 
 from ump.core.exceptions import OptimisticLockError
@@ -17,6 +18,10 @@ from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.observers import JobStateObserver
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.result_storage import ResultStorageError
+from ump.core.managers.steps.execution_steps import (
+    _ensure_results_link,
+    _ensure_self_link,
+)
 from ump.core.models.job import Job, JobStatusInfo, StatusCode
 from ump.core.models.providers_config import ProcessConfig
 from ump.core.services.result_storage_coordinator import ResultStorageCoordinator
@@ -248,7 +253,24 @@ class ResultStorageObserver:
         job: Job,
         final_status_info: JobStatusInfo,
     ) -> None:
-        """Store the result if policy and client intent call for it."""
+        """Store the result if policy and client intent call for it.
+
+        V-11: when storage is required, the job's *persisted* status is still
+        ``running`` at this point — ``JobManager`` deliberately withheld the
+        ``successful`` transition (see ``_process_status_update``) and calls
+        us with the *true* final status the remote reported. We now own
+        flipping the job to its real terminal state:
+
+          - store + publication-confirm succeeds -> persist ``successful``
+            (with the self/results links V-11 also withheld).
+          - store fails, or the adapter could not confirm every reference is
+            publicly reachable within its own budget -> persist final
+            ``failed`` with a standardized message; no auto-retry.
+
+        Jobs that never required storage are unaffected: ``JobManager``
+        already persisted them as ``successful`` and this method returns
+        immediately below.
+        """
         if final_status_info.status != StatusCode.successful:
             return  # failed/dismissed jobs have nothing to store
 
@@ -265,9 +287,117 @@ class ResultStorageObserver:
 
         logger.info(f"[observer:storage] storing result job_id={job.id}")
         try:
-            await self._coordinator.coordinate(job, process_config, self._repo)
+            references = await self._coordinator.coordinate(
+                job, process_config, self._repo
+            )
         except ResultStorageError as exc:
-            await self._record_unavailable_result(job, exc)
+            # _finalize_publication sets both the diagnostic marker and the
+            # terminal `failed` status in one persisted write, superseding the
+            # old _record_unavailable_result (which only annotated diagnostic
+            # on a job that stayed `successful`, back when V-11 did not exist).
+            await self._finalize_publication(
+                job,
+                final_status_info,
+                success=False,
+                reason=str(exc),
+            )
+            return
+
+        unconfirmed = [ref for ref in (references or []) if ref.publication_pending]
+        if unconfirmed:
+            reason = (
+                f"{len(unconfirmed)} of {len(references)} stored reference(s) "
+                "could not be confirmed reachable within the allotted time."
+            )
+            logger.error(f"[observer:storage] {reason} job_id={job.id}")
+            await self._finalize_publication(
+                job, final_status_info, success=False, reason=reason
+            )
+            return
+
+        await self._finalize_publication(job, final_status_info, success=True)
+
+    async def _finalize_publication(
+        self,
+        job: Job,
+        final_status_info: JobStatusInfo,
+        success: bool,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Persist the deferred terminal transition.
+
+        Re-reads the freshest job snapshot and retries on optimistic-lock
+        conflicts, the same pattern used elsewhere in this module — the poll
+        loop may have written the ``running`` gate snapshot moments earlier and
+        could race a concurrent read.
+        """
+        current = job
+        for attempt in range(1, _PERSIST_FAILURE_MAX_ATTEMPTS + 1):
+            if current.status_info is None:
+                return
+            if success:
+                new_status_info = current.status_info.model_copy(
+                    update={
+                        "status": StatusCode.successful,
+                        "message": final_status_info.message,
+                        "finished": final_status_info.finished,
+                        "progress": final_status_info.progress,
+                    }
+                )
+                _ensure_self_link(job.id, new_status_info)
+                _ensure_results_link(job.id, new_status_info)
+                updates: dict = {"status_info": new_status_info}
+            else:
+                reason_text = reason or "Result publication failed."
+                message = f"Result reference could not be published: {reason_text}"
+                new_status_info = current.status_info.model_copy(
+                    update={
+                        "status": StatusCode.failed,
+                        "message": message,
+                        "finished": final_status_info.finished
+                        or datetime.now(timezone.utc),
+                    }
+                )
+                _ensure_self_link(job.id, new_status_info)
+                updates = {
+                    "status_info": new_status_info,
+                    "diagnostic": f"{Job.RESULT_STORAGE_FAILED_MARKER}: {reason_text}",
+                }
+
+            updated = current.model_copy(update=updates)
+            updated.status = str(new_status_info.status)
+            updated.touch()
+            try:
+                await self._repo.update(updated)
+                logger.info(
+                    f"[observer:storage] job_id={job.id} finalized "
+                    f"status={new_status_info.status}"
+                )
+                return
+            except OptimisticLockError:
+                fresh = await self._repo.get(job.id)
+                if fresh is None:
+                    logger.warning(
+                        "[observer:storage] job vanished while finalizing "
+                        "publication job_id=%s",
+                        job.id,
+                    )
+                    return
+                current = fresh
+                logger.debug(
+                    "[observer:storage] retry %d/%d finalizing publication "
+                    "job_id=%s after concurrent modification",
+                    attempt,
+                    _PERSIST_FAILURE_MAX_ATTEMPTS,
+                    job.id,
+                )
+
+        logger.error(
+            "[observer:storage] gave up finalizing publication job_id=%s "
+            "after %d attempts — job left in its last persisted state",
+            job.id,
+            _PERSIST_FAILURE_MAX_ATTEMPTS,
+        )
 
     def _resolve_process_config(self, job: Job) -> Optional[ProcessConfig]:
         """Look up the process config that carries the transmission-mode policy.
@@ -308,52 +438,3 @@ class ResultStorageObserver:
                 f"process_id={job.process_id}, skipping storage"
             )
         return process_config
-
-    async def _record_unavailable_result(
-        self, job: Job, exc: ResultStorageError
-    ) -> None:
-        """Persist why the promised reference could not be produced.
-
-        Best-effort by design: if even this write fails we log and move on,
-        because the caller cannot act on an exception raised from an observer.
-        """
-        reason = f"{Job.RESULT_STORAGE_FAILED_MARKER}: {exc}"
-        logger.error(f"[observer:storage] {reason} job_id={job.id}")
-
-        current = job
-        for attempt in range(1, _PERSIST_FAILURE_MAX_ATTEMPTS + 1):
-            updated = current.model_copy(update={"diagnostic": reason})
-            updated.touch()
-            try:
-                await self._repo.update(updated)
-                return
-            except OptimisticLockError:
-                fresh = await self._repo.get(job.id)
-                if fresh is None:
-                    logger.warning(
-                        "[observer:storage] job vanished while persisting "
-                        "storage failure marker job_id=%s",
-                        job.id,
-                    )
-                    return
-                current = fresh
-                logger.debug(
-                    "[observer:storage] retry %d/%d persisting storage "
-                    "failure marker job_id=%s after concurrent modification",
-                    attempt,
-                    _PERSIST_FAILURE_MAX_ATTEMPTS,
-                    job.id,
-                )
-            except Exception as persist_error:
-                logger.error(
-                    f"[observer:storage] could not persist storage failure "
-                    f"job_id={job.id} error={persist_error}"
-                )
-                return
-
-        logger.error(
-            "[observer:storage] gave up persisting storage failure marker "
-            "job_id=%s after %d attempts",
-            job.id,
-            _PERSIST_FAILURE_MAX_ATTEMPTS,
-        )

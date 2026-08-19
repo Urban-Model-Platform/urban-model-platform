@@ -43,12 +43,10 @@ from ump.core.interfaces.job_repository import JobRepositoryPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.remote_auth import RemoteAuthPort
 from ump.core.interfaces.result_storage import (
-    NullResultStorage,
     ResultPayload,
     ResultStorageError,
     ResultStoragePort,
     StoredReference,
-    UnsupportedResultError,
 )
 from ump.core.models.job import Job
 from ump.core.models.link import Link
@@ -150,23 +148,21 @@ class ResultStorageCoordinator:
         Anything else (``pass-through``, ``value-only``)
             Never store.  The store is either not relevant or explicitly blocked.
         """
-        policy = process_config.transmission_mode_policy
-
-        if policy == "emulate-ref-only":
-            return True
-
-        if policy == "emulate-ref":
-            return _client_requested_reference(job.outputs_spec)
-
-        return False
+        return should_store_reference(job, process_config)
 
     async def coordinate(
         self,
         job: Job,
         process_config: ProcessConfig,
         repo: JobRepositoryPort,
-    ) -> None:
+    ) -> Optional[list[StoredReference]]:
         """Run the full store-result sequence for one completed job.
+
+        Returns the ``StoredReference`` list this call persisted, or ``None``
+        when nothing was (re-)stored (already stored — idempotent skip — or no
+        storable payloads were found). V-11 uses the returned list to inspect
+        each reference's ``publication_pending`` flag and decide whether the
+        job may transition to ``successful`` yet.
 
         Steps:
           1. Guard: skip if already stored (idempotency on retry).
@@ -188,13 +184,13 @@ class ResultStorageCoordinator:
 
         if await self._storage.exists(job.id):
             logger.debug("[storage] already stored, skipping — job_id=%s", job.id)
-            return
+            return None
 
         try:
             payloads = await self._fetch_and_extract_payloads(job, process_config)
         except ResultStorageError as exc:
             self._handle_storage_failure(exc, job.id, policy, step="fetch")
-            return
+            return None
 
         if not payloads:
             logger.warning(
@@ -202,13 +198,13 @@ class ResultStorageCoordinator:
                 "check store-outputs config and output media types",
                 job.id,
             )
-            return
+            return None
 
         try:
             references = await self._storage.store(job.id, payloads)
         except ResultStorageError as exc:
             self._handle_storage_failure(exc, job.id, policy, step="store")
-            return
+            return None
 
         if references:
             await self._persist_stored_references(job, payloads, references, repo)
@@ -217,6 +213,7 @@ class ResultStorageCoordinator:
                 len(references),
                 job.id,
             )
+        return references
 
     # ------------------------------------------------------------------
     # Fetch and payload extraction
@@ -460,6 +457,31 @@ class ResultStorageCoordinator:
 # ---------------------------------------------------------------------------
 # Pure helper functions (no side effects, easy to unit-test)
 # ---------------------------------------------------------------------------
+
+
+def should_store_reference(job: Job, process_config: ProcessConfig) -> bool:
+    """Pure policy check: does this job require a stored reference?
+
+    Extracted from ``ResultStorageCoordinator.should_store`` so callers that
+    need the answer without a fully-constructed coordinator (e.g.
+    ``JobManager``'s poll loop, deciding whether to gate the ``successful``
+    transition per V-11) can reuse the exact same rule rather than
+    duplicating it.
+
+    ``emulate-ref-only``: always required.
+    ``emulate-ref``: required only if the client asked for
+    ``transmissionMode: reference`` on at least one output.
+    Anything else: never required.
+    """
+    policy = process_config.transmission_mode_policy
+
+    if policy == "emulate-ref-only":
+        return True
+
+    if policy == "emulate-ref":
+        return _client_requested_reference(job.outputs_spec)
+
+    return False
 
 
 def _client_requested_reference(outputs_spec: Optional[dict]) -> bool:

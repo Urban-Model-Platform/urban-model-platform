@@ -364,3 +364,30 @@ class TestConfirmPublication:
         pending = {r.collection_id: r.publication_pending for r in refs}
         assert pending[f"{JOB_ID}-voronoi"] is False
         assert pending[f"{JOB_ID}-buffer"] is True
+
+
+class TestLivenessUrl:
+    """V-11: StoredReference.liveness_url is built from the internal base URL
+    so the generic liveness probe works from inside the UMP container."""
+
+    @pytest.mark.asyncio
+    async def test_liveness_url_built_from_internal_base_url(self, tmp_path):
+        storage = _make_storage(
+            tmp_path, internal_url="http://ldproxy:7080/ump-results"
+        )
+        refs = await storage.store(JOB_ID, [_payload("voronoi")])
+
+        assert refs[0].liveness_url == (
+            f"http://ldproxy:7080/ump-results/collections/{JOB_ID}-voronoi"
+            "/items?limit=1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_liveness_url_none_without_internal_url(self, tmp_path):
+        """No internal URL configured -> no generic probe target; callers
+        fall back to items_url/collection_url (see result_storage_coordinator)."""
+        storage = _make_storage(tmp_path)  # internal_url unset
+
+        refs = await storage.store(JOB_ID, [_payload("voronoi")])
+
+        assert refs[0].liveness_url is None

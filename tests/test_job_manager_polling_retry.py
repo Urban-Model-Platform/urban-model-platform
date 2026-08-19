@@ -497,6 +497,107 @@ class TestProcessStatusUpdate:
         assert terminal is False
 
 
+# --- V-11: deferred `successful` transition tests ---
+
+
+class TestGatedSuccessfulTransition:
+    """V-11: a job whose policy requires a stored reference must stay
+    `running` (not `successful`) until ResultStorageObserver confirms
+    publication -- see JobManager._requires_stored_reference and
+    _process_status_update."""
+
+    @pytest.mark.asyncio
+    async def test_ungated_job_becomes_successful_immediately(
+        self, job_manager, test_job, test_repo
+    ):
+        """No process config resolvable (mock_providers has none) -> ungated,
+        unchanged legacy behaviour: `successful` is persisted directly."""
+        status_info = JobStatusInfo(
+            jobID=test_job.id,
+            status=StatusCode.successful,
+            type="process",
+            processID=test_job.process_id,
+            created=test_job.created,
+            updated=datetime.now(timezone.utc),
+            progress=100,
+        )
+
+        terminal = await job_manager._process_status_update(test_job, status_info)
+
+        assert terminal is True
+        stored = await test_repo.get(test_job.id)
+        assert stored.status_info.status == StatusCode.successful
+        assert any(
+            link.rel == "results" for link in (stored.status_info.links or [])
+        )
+
+    @pytest.mark.asyncio
+    async def test_gated_job_persists_running_and_notifies_true_completion(
+        self, test_config, mock_http_client, mock_validator, test_repo, test_job
+    ):
+        """A policy requiring a stored reference: JobManager persists
+        `running` with the awaiting-publication message, stops polling
+        (returns True), and notifies observers with the TRUE `successful`
+        status so ResultStorageObserver can store + verify."""
+        from ump.core.models.providers_config import ProcessConfig
+
+        providers = Mock()
+        providers.get_provider = Mock(return_value=Mock(url="http://provider.test/"))
+        providers.get_process_config = Mock(
+            return_value=ProcessConfig.model_validate(
+                {
+                    "id": "process",
+                    "transmission-mode-policy": "emulate-ref-only",
+                    "result-storage": "ldproxy",
+                }
+            )
+        )
+
+        observer = Mock()
+        observer.on_status_changed = AsyncMock()
+        observer.on_job_completed = AsyncMock()
+
+        manager = JobManager(
+            providers=providers,
+            http_client=mock_http_client,
+            process_id_validator=mock_validator,
+            job_repo=test_repo,
+            config=test_config,
+            observers=[observer],
+        )
+
+        status_info = JobStatusInfo(
+            jobID=test_job.id,
+            status=StatusCode.successful,
+            type="process",
+            processID=test_job.process_id,
+            created=test_job.created,
+            updated=datetime.now(timezone.utc),
+            progress=100,
+            message="Complete",
+        )
+
+        terminal = await manager._process_status_update(test_job, status_info)
+
+        # Polling stops -- the remote is done -- even though the persisted
+        # status is not yet the terminal `successful`.
+        assert terminal is True
+
+        stored = await test_repo.get(test_job.id)
+        assert stored.status_info.status == StatusCode.running
+        assert "verifying" in stored.status_info.message.lower()
+        assert not any(
+            link.rel == "results" for link in (stored.status_info.links or [])
+        )
+
+        # ResultStorageObserver is handed the TRUE final status (successful),
+        # not the gated `running` snapshot, so it knows to store + verify.
+        observer.on_job_completed.assert_awaited_once()
+        completed_job_arg, completed_status_arg = observer.on_job_completed.await_args.args
+        assert completed_status_arg.status == StatusCode.successful
+
+
+
 # --- Polling fan-out regression tests ---
 # These tests guard against the bug where every poll cycle spawned a new poll
 # loop task, exhausting the DB connection pool within seconds.

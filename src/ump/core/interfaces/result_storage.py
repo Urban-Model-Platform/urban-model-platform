@@ -88,12 +88,26 @@ class StoredReference:
                         retry for a few moments. Defaults to False (confirmed
                         live), so stores that publish synchronously — and the
                         no-op store — never need to set it.
+        liveness_url:   Optional URL the core can GET to check whether this
+                        reference is actually reachable, used by V-11 (defer
+                        ``successful`` until the reference is live). Adapters
+                        that can reach themselves over an internal, container-
+                        network URL (e.g. ldproxy via
+                        ``UMP_RESULTSTORE_LDPROXY_INTERNAL_URL``) should build
+                        this here; the core never constructs it itself and
+                        never assumes any particular URL shape (success is
+                        simply ``HTTP status < 400``). None means "no generic
+                        probe available" — the caller falls back to
+                        ``items_url``/``collection_url``, or (as ldproxy does
+                        today) may have already confirmed liveness internally
+                        via ``publication_pending``.
     """
 
     collection_id: str
     collection_url: str
     items_url: str
     publication_pending: bool = False
+    liveness_url: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

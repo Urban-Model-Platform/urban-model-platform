@@ -400,6 +400,7 @@ required when `UMP_RESULTSTORE_CONFIG_BACKEND=k8s`.
 | ~~V-8~~ | ~~Compose in `asgi.py`; inject port + coordinator + observer. **Backend factory (`filesystem`\|`k8s`) lives here** (moved out of V-5a) so it is only built once both backends exist — matches explicit-DI rule.~~ ✅ done. **Design notes:** (1) the wiring logic itself lives in a new, import-side-effect-free module `ump/composition/result_storage.py` — `ldproxy_required`, `build_entity_config_backend`, `build_result_storage_port`, `ensure_ldproxy_bootstrapped` — so it is unit-testable without touching `ump.asgi` (which starts file watchers/DB connections at import time); (2) `_validate_resultstore_settings` in `asgi.py` now calls the shared `ldproxy_required` instead of re-deriving the same check; (3) when no process configures `result-storage: ldproxy`, `build_result_storage_port` returns `(NullResultStorage(), None)` — no backend, no `ServiceRegistry`, no GDAL/geopandas import, and `_job_manager_factory` skips attaching `ResultStorageObserver` entirely; `result-storage: geoserver` is treated the same as `remote` here (legacy path, out of Feature-V scope); (4) exactly **one** `ServiceRegistry` is built per worker process at module scope in `asgi.py` and shared by every job — constructing a second one anywhere would silently reintroduce the lost-update race the registry's lock exists to prevent; a composition test asserts the adapter and registry share the same backend instance; (5) **bootstrap failure semantics settled during design review:** configuration errors (missing settings, unknown backend name) still fail startup hard via `_validate_resultstore_settings`/`build_entity_config_backend`, unchanged; but the new `ServiceRegistry.ensure_bootstrapped()` — added without duplicating the skeleton-creation logic, it reuses the existing `_read_modify_write` path with a no-op mutation — is invoked from `_job_manager_factory` as a fire-and-forget `asyncio.create_task`, and `ensure_ldproxy_bootstrapped` swallows any exception from it as a logged warning. Rationale: a reachability failure (share not yet mounted, k8s API briefly down) is transient and must never block UMP's own startup or crash the process — the registry self-heals on the first successful `register_collection` regardless. | V-2, V-6, V-7 |
 | ~~V-9~~ | ~~`delete()` + cleanup wiring (anonymous/expiry, deregister collection)~~ ✅ done. **Design notes (three open questions settled during design review):** (1) **manifest, not a port extension** — `store()` writes a small JSON sidecar (`{job_id}.manifest.json`, next to the `.gpkg`) listing the job's output ids; `delete()` reads it back to reconstruct which collection ids to deregister. Rejected alternative: adding a `read_provider_entity` method to `EntityConfigBackendPort` — that would force *both* backends to support reading and re-parsing their own YAML just for this one call. The manifest is always a plain file on the shared filesystem, exactly like the `.gpkg` itself, regardless of which `EntityConfigBackendPort` is configured; a missing/corrupt manifest is treated as "nothing to deregister" rather than an error, so `delete` stays safe to call on jobs that were never stored; (2) **generic scheduler, not ldproxy-specific** — the new `JobCleanupService` (core) and `PeriodicTaskRunner` (adapter) run for *every* deployment regardless of whether a result store is configured; when none is, `ResultStoragePort` is `NullResultStorage` and its `delete()` is a harmless no-op, so the service never needs to know or care which backend (if any) is active; (3) **two independent, separately configurable retention settings** — `UMP_JOB_DELETE_INTERVAL` (anonymous jobs, unchanged default 240 min) and the new `UMP_JOB_DELETE_INTERVAL_AUTHENTICATED` (default `None` = never auto-delete), because an anonymous job's creator has no account to revisit it later, while an authenticated user's job is part of their history and should not silently disappear unless an operator opts in. Further implementation notes: a new indexed `finished` column (Alembic migration `0004`, backfilled from the JSONB `status_info` for historical rows) lets `list_expired` filter/index directly instead of doing per-row JSONB extraction on every cleanup cycle; `JobRepositoryPort.list_expired` returns `[]` immediately if *both* cutoffs are `None` — deliberately, so a caller can never accidentally sweep the entire table; `LdproxyResultStorage.delete()` and `JobCleanupService._delete_one` are both **best-effort on the storage side** (a `ResultStorageError`, or a single failed collection deregistration, is logged and does not block the rest of cleanup or the job-record delete — an orphaned GeoPackage is a much smaller problem than a job that can never be cleaned up); `PeriodicTaskRunner` is a small, deliberately generic asyncio background-loop adapter (not named after job cleanup) so future periodic background tasks can reuse it; wired into `fastapi.py`'s `create_app(background_runners=[...])` via a new structural `BackgroundRunner` Protocol, started after job-manager setup and stopped in the lifespan `finally` block. | V-6 |
 | ~~V-10~~ | ~~Ref links in statusInfo `links` + `GET /results` always returns an OGC `document` response (per-output `value` **or** `href`, never a 302 redirect). **Also: surface the `emulate-ref` silent downgrade**~~ ✅ done. **Design notes:** (1) **bugfix, not a new feature** — `_inject_reference_links` (renamed `_apply_stored_references`) previously wrote to `job.links`, a field the API never serves; it now writes to `status_info.links` (client-visible, one `rel="item"` link per stored output) and, additively, to a new structured `job.stored_outputs: dict[output_id, {collection_id, collection_url, items_url}]` — both idempotent across a repeated observer run, keyed by href / output_id so a retry never duplicates a link or an entry; (2) **no 302** (see decision log below) — `JobManager.get_results` gained `_build_stored_results_document`, invoked only when `job.stored_outputs` is non-empty: it fetches the remote document once (best-effort — a failure still returns the stored refs, matching the V-9 best-effort philosophy), then **overlays** the stored outputs as authoritative `href` entries over any inline value the remote returned for the same output_id. Jobs that never triggered storage (`pass-through`, `value-only`, or `emulate-ref` that never downgraded) are completely unaffected — they keep the original raw-proxy passthrough; (3) **downgrade transparency, Option A** — `_handle_storage_failure` no longer swallows the `emulate-ref` fallback; it returns a bool telling `coordinate` to call `_record_downgrade`, which sets the additive `JobStatusInfo.transmissionModeApplied = "value"` plus a human-readable `message` (OGC explicitly permits additional statusInfo properties, so this stays schema-conformant); `emulate-ref-only` is unchanged — it still raises, since there the value channel was never open; (4) `StoredReference` order from `ResultStoragePort.store()` is guaranteed to match its `payloads` input 1:1 (see `LdproxyResultStorage.store`), so `zip(payloads, references)` reliably recovers each reference's `output_id` without any string-parsing of `collection_id`; (5) no schema migration — both new fields (`Job.stored_outputs`, `JobStatusInfo.transmissionModeApplied`) live in existing JSONB columns. | V-2 |
+| ✅ V-11 | **Defer the `successful` transition until the reference is live.** A job whose policy (+ client request) demands a stored reference must NOT report `successful` while its reference URL is not yet reachable. Store + verify run in a **background task**; the job stays `running` with a progressing `message` throughout, then flips to `successful` only after a generic liveness probe (GET an adapter-supplied `liveness_url`, success = HTTP status < 400) passes, or to **`failed`** (final) with a standardized error if publication cannot be confirmed within a deadline. See the design section **"V-11 — Defer `successful` until the reference is live"** below for the full rationale, sub-state model, probe, settings, and failure semantics. Removes the now-obsolete V-10 `_is_storage_pending` / `503 Results Finalizing` window. | V-7, V-10 |
 
 Steps V-3, V-4 and V-5a/c are pure/file-only and fully unit-testable against a
 temp directory with no ldproxy or Kubernetes running — that is where most of
@@ -455,6 +456,259 @@ carries the reference as a per-output `href`, so the redirect solved a problem
 that does not exist. `GET /jobs/{id}/results` therefore **always** returns a
 `document` — one code path, any number of outputs, each an inline `value` or an
 `href` link to its stored collection's `items` endpoint.
+## V-11 — Defer `successful` until the reference is live
+
+*Requested by the user 2026-08-19. Design discussed and confirmed the same day.*
+
+### The problem
+
+Today the poll loop marks a job `successful` the instant the remote reports
+`successful`, and only *then* does `ResultStorageObserver.on_job_completed`
+run the eager store (fetch → GeoPackage → provider → collection). That leaves a
+window in which `GET /jobs/{id}` already says `successful` while the promised
+`href` (the ldproxy `items` endpoint) does not yet resolve — a lie to the
+client. V-10 patched the *symptom* on the results path (`_is_storage_pending`
+answered `GET /results` with a `503 Results Finalizing` + `Retry-After`), but
+the *status* itself was still prematurely `successful`.
+
+**The fix inverts the ordering:** when a job's resolved policy (+ client request)
+requires a stored reference, the job must remain `running` until the reference
+is not only written but **verified live**, then transition to `successful`. If
+the reference cannot be confirmed within a bounded deadline, the job transitions
+to **`failed`** with a standardized error — the computation succeeded, but a
+result the contract promised as a working reference could not be published, and
+silently reporting `successful` with a dead link is worse than an honest failure.
+
+### Scope / gating (user decision, 2026-08-19)
+
+Gate purely on **`should_store`** — i.e. the resolved `transmission-mode-policy`
+(`emulate-ref` with a client-requested `reference`, or `emulate-ref-only`).
+This is exactly the condition under which a reference is produced, so it is the
+right and only trigger; no separate "is a store configured?" check is needed,
+because startup validation already forbids a ref-policy without a store (a
+ref-policy therefore *guarantees* a store exists). Legacy `result-storage:
+remote` / `geoserver` produce no eager reference and are entirely unaffected —
+those jobs keep flipping straight to `successful` as before. Jobs under
+`pass-through` / `value-only`, or `emulate-ref` where the client asked for
+`value`, are likewise untouched.
+
+### Sub-state model (OGC-conformant)
+
+OGC API Processes has no intermediate "finalizing" status, so we do not invent
+one on the wire. The job stays externally **`running`** and carries an
+**internal** sub-state (e.g. `awaiting_publication`) that never leaves the core;
+`progress` stays `< 100`. What the client sees change over time is the
+human-readable **`message`**, updated as the background task advances so a
+caller can tell *where in the pipeline* the job is (user requirement, point 1):
+
+- `"fetching result from provider"`
+- `"writing result to storage (GeoPackage)"`
+- `"registering result collection"`
+- `"verifying result publication"`
+
+Only when the probe passes does the job transition to terminal `successful`
+(with the V-10 `stored_outputs` + `links` already populated). This is strictly
+additive to `JobStatusInfo` (message text only); no new external status value.
+
+### Execution model — background task + internal sub-state (Option B)
+
+The poll tick that observes the remote `successful` does **not** run the store
+inline (that would block the poll worker for the full fetch + convert + probe
+duration, up to the fetch timeout + publication deadline, starving other jobs it
+polls). Instead it:
+
+1. derives that storage is required (`should_store`),
+2. sets the job to internal `awaiting_publication` (external `running`, initial
+   message), and
+3. hands off to a **background asyncio task** that owns the whole
+   store-and-verify sequence and the final `successful`/`failed` transition.
+
+This mirrors the existing polling design (`_schedule_poll` already runs polling
+as background tasks) and keeps the poll loop's hot path clean. Hexagonally, the
+core only orchestrates *state transitions* through ports
+(`ResultStoragePort`, `HttpClientPort`); the actual store/probe I/O stays behind
+those ports — no GeoPackage/ldproxy/k8s concept leaks into the core.
+
+### Liveness probe — a generic status check of an adapter-supplied URL
+
+After the store reports success, the background task verifies the reference is
+actually reachable. The **key design rule (user decision, 2026-08-19):** the
+core must **not** know any store-specific path (`/items`, `?limit=1`, …). Such
+knowledge belongs to the adapter, exactly like "how to store" does. So:
+
+- **The adapter supplies the probe URL.** `StoredReference` gains an optional
+  `liveness_url: str | None`. The `LdproxyResultStorage` adapter — which already
+  constructs the public `items_url` — additionally builds `liveness_url` from
+  the **internal** base URL it is injected with
+  (`UMP_RESULTSTORE_LDPROXY_INTERNAL_URL`), e.g.
+  `{internal_base}/collections/{collection_id}/items?limit=1`. This is not new
+  knowledge the core has to discover: it is the same information the adapter
+  already assembles for the reference links, only pointed at the in-network
+  address and handed back on the returned object.
+- **Why the internal base lives on the adapter, not the core.** The adapter is
+  constructed at the composition root with both base URLs injected (public → for
+  `items_url`/client links, internal → for `liveness_url`). Explicit DI, matching
+  the project rule. The core then knows *both* base URLs = none: it only ever
+  receives a finished `StoredReference`.
+- **The core's probe is fully generic:** `GET liveness_url`, success =
+  **HTTP status < 400**. No body parsing, no `FeatureCollection` check, no
+  `/items` assumption — path- and format-independent, so a future store whose
+  references are not `/items`-shaped works unchanged.
+- **Fallback.** When `liveness_url is None`, the core probes the reference URL
+  it already has (`items_url` / `collection_url`). A simpler future adapter that
+  has no dedicated health URL therefore still gets a generic reachability check
+  without teaching the core anything about paths.
+
+**Where does the URL come from when the reference was produced by the *remote*
+server, not UMP? (user question, 2026-08-19).** It doesn't — and it doesn't need
+to. A reference that arrives ready-made from the remote provider is the
+`pass-through` case, where UMP stores nothing: there is **no** storage adapter,
+**no** `StoredReference`, and `should_store` is **False**, so V-11 never engages
+for it. Such jobs flip straight to `successful` as before. This is deliberate:
+UMP did not perform that publication and does not own the remote's URL scheme,
+so it is neither able nor entitled to fail a job because a *foreign* server's
+link is not yet (or not from inside UMP's network) reachable. The invariant is
+clean: **wherever V-11 runs there is always a UMP storage adapter that supplies
+`liveness_url`; wherever no adapter exists, V-11 does not run.**
+
+**Internal URL as a probe prerequisite.** Because the probe needs an address
+reachable *from inside the UMP container*, `UMP_RESULTSTORE_LDPROXY_INTERNAL_URL`
+is required — but (user decision, 2026-08-19) **only when ldproxy is active**,
+gated on the existing `ldproxy_required` check
+(`ump/composition/result_storage.py`), the same condition already used for
+`UMP_RESULTSTORE_LDPROXY_BASE_URL` / `_ROOTPATH`. When no process configures
+`result-storage: ldproxy`, the setting stays optional and nothing about the
+legacy path changes. (`UMP_RESULTSTORE_LDPROXY_BASE_URL` is the public,
+browser-facing URL baked into client links and is usually not reachable from
+within UMP — hence the separate internal URL for the probe.)
+
+### Publication deadline + backoff (a setting, user decision on point 3)
+
+The probe retries with exponential backoff until it passes **or** a single
+configurable **publication deadline** elapses. Modelled as a real operator
+setting rather than a code constant, because the realistic wait differs by
+deployment (this is the one place where the k8s-vs-Docker difference is
+material, unlike the internal `_FETCH_*` tuning constants):
+
+- **Docker / filesystem backend:** ldproxy hot-reloads within seconds → a ~30 s
+  deadline is ample.
+- **Kubernetes / ConfigMap backend:** kubelet ConfigMap propagation can take up
+  to ~60 s before ldproxy even sees the new collection → default the deadline
+  higher (e.g. ~120 s).
+
+Proposed: `UMP_RESULTSTORE_PUBLICATION_TIMEOUT` (seconds, the deadline) with a
+sensible default, plus a small backoff base reused/renamed from the existing
+storage-fetch backoff constants. During the whole window the job stays `running`
+with the "verifying result publication" message.
+
+### Failure semantics — final `failed` with a standardized message
+
+If the store fails, or the probe never passes before the deadline, the job
+transitions to **terminal `failed`** (user decision on points 4 + 6). This is
+**final — no auto-retry** after `failed` (the backoff retries *within* the
+deadline are the only reattempts). The failure carries a **standardized OGC
+error / message**, e.g.:
+
+> *"Result computed successfully but its result collection could not be
+> published (reference not queryable within the publication timeout)."*
+
+This unifies what were previously two divergent behaviours:
+- the old `emulate-ref-only` handling (job left `successful` + `diagnostic`
+  marker) is replaced by this honest `failed`;
+- the old V-10 `_is_storage_pending` / `503 Results Finalizing` results-path
+  window becomes **obsolete and is removed** (user decision on point 7): once
+  the status is only `successful` when the link is live, `GET /results` no
+  longer needs a "come back shortly" branch. `UMP_RESULTS_FINALIZING_RETRY_AFTER`
+  and `_is_storage_pending` are deleted along with it.
+
+### Interaction with the existing `emulate-ref` downgrade (V-10)
+
+V-10's `transmissionModeApplied = "value"` downgrade only applies to *storable-
+but-value-allowed* fallbacks (e.g. an `UnsupportedResultError` under
+`emulate-ref` where the client permits value). That path is unchanged: it still
+resolves to `successful` with the inline value, because a working result *was*
+delivered. V-11 governs the different case where a reference *is* required and
+the reference channel itself fails — there the answer is `failed`, not a silent
+value downgrade. The two are complementary: downgrade = "value was acceptable
+and delivered"; V-11 failure = "a working reference was required and could not
+be produced".
+
+### Open implementation questions — resolved during coding
+
+1. **Where the sub-state lives.** Resolved as **message-only**, no new
+   persisted field on `Job`. The gate is entirely expressed through
+   `status_info.status` staying `running` plus a fixed progressing
+   `message` (`_AWAITING_PUBLICATION_MESSAGE` in `job_manager.py`). No JSONB
+   schema change was needed; `ResultStorageObserver.on_job_completed` still
+   receives the *true* final status (`successful`/`failed`) as a plain
+   function argument from `JobManager._process_status_update`, so no
+   additional state needs to survive between the gate and the finalize step
+   within a single poll-loop iteration.
+2. **Restart recovery.** Not a new failure mode: a job gated by V-11 is,
+   from the repository's point of view, simply `running`. If UMP restarts
+   before `ResultStorageObserver` finishes, the job stays `running` exactly
+   like any other in-flight job that lost its poll loop — normal poll-loop
+   restart/reconciliation (Feature IX) drives it again on the next poll,
+   which re-derives `successful` from the remote and re-enters the same
+   gate. No bespoke sweep was required.
+3. **Naming of the probe/deadline settings.** No new settings were
+   introduced. The liveness check reuses the existing, adapter-owned
+   publication-confirmation loop (`LdproxyResultStorage._confirm_publication`,
+   `UMP_RESULTSTORE_LDPROXY_INTERNAL_URL`) that V-6 already built for exactly
+   this purpose; `ResultStorageCoordinator.coordinate()` now returns the
+   `StoredReference` list so the observer can inspect each
+   `publication_pending` flag once, after `store()` has already exhausted its
+   own backoff budget. A separate deadline/backoff setting would have
+   duplicated that budget for no operational benefit.
+4. **`StoredReference.liveness_url` shape.** Implemented as
+   `Optional[str] = None` (see `ump/core/interfaces/result_storage.py`).
+   `LdproxyResultStorage._reference_for` builds it as
+   `{internal_url}/collections/{collection_id}/items?limit=1` when
+   `UMP_RESULTSTORE_LDPROXY_INTERNAL_URL` is configured, `None` otherwise.
+   In practice the field is exposed for adapters that want a cheap, generic
+   `GET`-and-check-status probe; the ldproxy adapter itself already performs
+   a richer confirmation internally (`_confirm_publication`) and surfaces the
+   result via `publication_pending`, which is what V-11's gate consumes.
+
+### Implementation summary (2026-07-25)
+
+V-11 is implemented as follows:
+
+- `JobManager._process_status_update` (job_manager.py): when the remote
+  reports `successful`, checks `_requires_stored_reference(job)` (a thin
+  wrapper around the new pure function
+  `result_storage_coordinator.should_store_reference`). If required, the
+  *persisted* status is downgraded to `running` with the
+  `_AWAITING_PUBLICATION_MESSAGE` appended, no `results`/self links are added
+  yet, and the poll loop stops (`terminal_reached = True`) — but observers are
+  notified with the **true** final `status_info` (still `successful`), so
+  `ResultStorageObserver` knows the remote is actually done.
+- `ResultStorageObserver.on_job_completed` (observers.py): unchanged trigger
+  conditions (`should_store`), but now owns the terminal transition via the
+  new `_finalize_publication` helper: on a clean `coordinate()` result with no
+  `publication_pending` references, it persists `successful` (adding the
+  self/results links V-11 withheld); on a `ResultStorageError` or any
+  `publication_pending` reference, it persists final `failed` with the
+  `Job.RESULT_STORAGE_FAILED_MARKER` diagnostic and a standardized message.
+  Both paths retry on `OptimisticLockError` like the rest of this module.
+- `ResultStorageCoordinator.coordinate()` (result_storage_coordinator.py) now
+  returns the `StoredReference` list (or `None`) instead of `None`
+  unconditionally, so the observer can inspect `publication_pending` per
+  output without re-deriving it.
+- `StoredReference.liveness_url` (result_storage.py) and
+  `LdproxyResultStorage._reference_for` (ldproxy_result_storage.py) as
+  described in question 4 above.
+- Removed: `JobManager._is_storage_pending`, the `503 Results Finalizing`
+  branch in `get_results`, and `JobManagerConfig.results_finalizing_retry_after`
+  (config.py) — all superseded by the gate, since a client can no longer
+  observe `successful` before the reference is live.
+- Tests: `tests/test_observers.py::TestResultStorageObserver` (gated
+  success/failure finalization), `tests/test_job_manager_polling_retry.py::
+  TestGatedSuccessfulTransition` (gate persists `running` + notifies true
+  status), `tests/test_result_storage_v6.py::TestLivenessUrl` (adapter builds
+  `liveness_url`), and the obsolete `TestRequiredStorePendingFinalizingHint`
+  503 scenarios were removed from `tests/test_result_storage_v10.py` as
+  unreachable under V-11.
 
 ## Decisions (confirmed by user 2026-07-24)
 

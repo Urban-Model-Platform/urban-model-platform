@@ -93,15 +93,6 @@ class JobManagerConfig(BaseModel):
         description="Maximum wait time in seconds between results-fetch retry attempts",
     )
 
-    results_finalizing_retry_after: int = Field(
-        default=5,
-        ge=1,
-        description=(
-            "Seconds advertised in the Retry-After header while a successful "
-            "job's required reference-store is still finalizing"
-        ),
-    )
-
     model_config = {
         "frozen": True,  # Immutable after creation for safety
         "extra": "forbid",  # Reject unknown fields

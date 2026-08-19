@@ -47,6 +47,24 @@ from ump.core.settings import logger
 
 REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
 
+# V-11: appended to a gated job's statusInfo message while its required
+# result reference is being stored and its liveness confirmed. The job stays
+# `running` externally throughout, so this is the only client-visible signal
+# that something is still happening beyond normal execution.
+_AWAITING_PUBLICATION_MESSAGE = (
+    "Job completed; verifying that the result reference is published and "
+    "reachable before reporting success."
+)
+
+
+def _append_gate_message(existing: Optional[str]) -> str:
+    """Append the awaiting-publication note to an existing message."""
+    if not existing:
+        return _AWAITING_PUBLICATION_MESSAGE
+    if _AWAITING_PUBLICATION_MESSAGE in existing:
+        return existing
+    return f"{existing} {_AWAITING_PUBLICATION_MESSAGE}"
+
 
 # -------------------------------------------
 # Pipeline primitives
@@ -1010,13 +1028,33 @@ class JobManager:
 
         # Ensure local links
         self._ensure_self_link(job.id, status_info)
-        if status_info.status == StatusCode.successful:
-            self._ensure_results_link(job.id, status_info)
 
         # Capture old status for observers
         old_status = (
             JobStatusInfo(**job.status_info.model_dump()) if job.status_info else None
         )
+
+        # V-11: defer the `successful` transition until the stored reference
+        # is confirmed live. If this job's policy (+ client request) requires
+        # a stored reference, persist `running` with a progressing message
+        # instead of `successful` -- but still hand the TRUE final status to
+        # observers below, so ResultStorageObserver can store, verify, and
+        # itself own the eventual successful/failed transition (see
+        # `ResultStorageObserver._finalize_publication`). Jobs that don't
+        # require storage are unaffected and take the normal path.
+        final_status_info = status_info
+        gated = False
+        if status_info.status == StatusCode.successful:
+            if await self._requires_stored_reference(job):
+                gated = True
+                status_info = status_info.model_copy(
+                    update={
+                        "status": StatusCode.running,
+                        "message": _append_gate_message(status_info.message),
+                    }
+                )
+            else:
+                self._ensure_results_link(job.id, status_info)
 
         # Apply and persist — retry once on optimistic lock conflict.
         # Conflicts only occur when two instances poll the same job simultaneously
@@ -1046,6 +1084,15 @@ class JobManager:
         old_code = old_status.status if old_status else None
         if old_code != status_info.status:
             await self._notify_status_changed(job, old_status, status_info)
+
+        if gated:
+            # The remote already reported a terminal outcome; stop polling and
+            # hand off to the completion observers with the TRUE final status
+            # so ResultStorageObserver can store + verify and itself persist
+            # the eventual successful/failed transition. The job record we
+            # just persisted stays `running` in the meantime.
+            await self._notify_job_completed(job, final_status_info)
+            return True
 
         # Check if terminal
         if job.is_in_terminal_state():
@@ -1147,35 +1194,13 @@ class JobManager:
                 job, results_url, auth_headers, policy
             )
 
-        # Required-store still in progress: the job is successful but its eager
-        # reference storage has neither completed (stored_outputs is empty) nor
-        # failed (no failure marker — checked above). Proxying the upstream now
-        # would surface a confusing transient 404/5xx to the client (the remote
-        # /results is briefly not-ready right after 'successful'). Instead,
-        # answer with a clear "come back shortly" hint so a retry lands on the
-        # finished store — this is the window that produced the puzzling
-        # 404-then-success behaviour on a first results fetch.
-        if await self._is_storage_pending(job):
-            logger.debug(
-                f"[job:results] required store still in progress job_id={job.id}"
-                " — returning finalizing hint"
-            )
-            return {
-                "status": 503,
-                "headers": {
-                    "Retry-After": str(self.config.results_finalizing_retry_after)
-                },
-                "body": {
-                    "type": "about:blank",
-                    "title": "Results Finalizing",
-                    "status": 503,
-                    "detail": (
-                        "The job completed successfully and its result is being "
-                        "stored as a reference. This usually takes a few seconds"
-                        ". Please retry shortly."
-                    ),
-                },
-            }
+        # Required-store still in progress: unreachable under V-11 -- a job
+        # only reports `successful` (checked above) after
+        # ResultStorageObserver has confirmed the stored reference is live, so
+        # `stored_outputs` is always populated by the time a client can
+        # observe `successful`. Kept documented here (rather than silently
+        # removed) because this is the historical location of the old
+        # "Results Finalizing" 503 window that V-11 eliminates.
 
         logger.debug(
             f"[job:results] proxy fetch results_url={results_url} job_id={job.id}"
@@ -1240,33 +1265,38 @@ class JobManager:
             )
             return None
 
-    async def _is_storage_pending(self, job: Job) -> bool:
-        """Return True if a *required* reference store for this job is still in
-        progress (neither completed nor failed).
+    async def _requires_stored_reference(self, job: Job) -> bool:
+        """V-11: does this job's policy (+ client request) require a stored
+        reference to be live before it may report `successful`?
 
-        Mirrors ``ResultStorageCoordinator.should_store``: storage is required
-        under ``emulate-ref-only`` (always) or under ``emulate-ref`` when the
-        client asked for ``transmissionMode: reference``. Callers only reach
-        this after establishing that ``job.stored_outputs`` is empty and no
-        storage-failure marker is set, so a required policy here means the
-        eager store is still running — the brief window that would otherwise
-        proxy a confusing transient upstream 404/5xx to the client.
-
-        Best-effort: any resolution error returns False so the caller falls
-        back to the normal proxy path rather than blocking results.
+        Delegates the actual policy rule to
+        ``result_storage_coordinator.should_store_reference`` so there is a
+        single source of truth shared with ``ResultStorageCoordinator.should_store``.
+        Best-effort: any resolution error (e.g. provider removed from
+        providers.yaml mid-run) returns False so the job is not stuck waiting
+        on a policy that can no longer be resolved.
         """
-        # Local import avoids any import-order coupling with the coordinator
-        # module; the function is a pure, side-effect-free helper.
+        if not job.process_id:
+            return False
+        try:
+            provider_name, _ = await self._resolve_provider(job.process_id)
+            process_config = self._providers.get_process_config(
+                provider_name, job.process_id
+            )
+        except Exception as exc:
+            logger.debug(
+                f"[job:poll] could not resolve process config for gating "
+                f"job_id={job.id} process_id={job.process_id} err={exc}"
+            )
+            return False
+        if process_config is None:
+            return False
+
         from ump.core.services.result_storage_coordinator import (
-            _client_requested_reference,
+            should_store_reference,
         )
 
-        policy = await self._resolve_transmission_mode_policy(job)
-        if policy == "emulate-ref-only":
-            return True
-        if policy == "emulate-ref":
-            return _client_requested_reference(job.outputs_spec)
-        return False
+        return should_store_reference(job, process_config)
 
     async def _build_stored_results_document(
         self,

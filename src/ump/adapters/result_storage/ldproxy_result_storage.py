@@ -327,11 +327,23 @@ class LdproxyResultStorage(ResultStoragePort):
         self, collection_id: str, publication_pending: bool = False
     ) -> StoredReference:
         collection_url = f"{self._base_url}/collections/{collection_id}"
+        # liveness_url (V-11): built from the *internal* base URL so the probe
+        # works from inside the UMP container, where the public base_url is
+        # typically unreachable (e.g. it points at localhost for a browser).
+        # None when no internal URL is configured — callers then fall back to
+        # items_url, or rely on this adapter's own ``publication_pending``
+        # signal (which already reflects an internal probe when available).
+        liveness_url = (
+            f"{self._internal_url}/collections/{collection_id}/items?limit=1"
+            if self._internal_url
+            else None
+        )
         return StoredReference(
             collection_id=collection_id,
             collection_url=collection_url,
             items_url=f"{collection_url}/items",
             publication_pending=publication_pending,
+            liveness_url=liveness_url,
         )
 
     # ------------------------------------------------------------------
@@ -460,7 +472,7 @@ class LdproxyResultStorage(ResultStoragePort):
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
                 return 200 <= resp.status < 300
-        except (urllib.error.URLError, OSError, ValueError):
+        except urllib.error.URLError, OSError, ValueError:
             return False
 
     async def _rollback(
