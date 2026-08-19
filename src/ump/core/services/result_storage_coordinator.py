@@ -63,19 +63,24 @@ logger = logging.getLogger(__name__)
 # first.
 _PERSIST_MAX_ATTEMPTS = 5
 
-# Default storage-fetch retry budget. These are the fallback values used when a
-# ResultStorageCoordinator is constructed without explicit overrides; the
-# composition root injects the operator-tunable UMP_STORAGE_FETCH_* settings
-# instead. The remote model server can report a job ``successful`` a moment
+# Default storage-fetch retry budget and per-attempt timeout. These are internal
+# tuning values with sensible defaults that operators are not expected to change,
+# so they live here next to the code that uses them rather than as global
+# settings. The remote model server can report a job ``successful`` a moment
 # before its ``/results`` endpoint is actually queryable (eventual consistency
 # between the job-status store and the result assembly). A GET issued the
 # instant we see ``successful`` therefore sometimes returns 404 (or a transient
 # 5xx / timeout). Because storage runs eagerly on completion, we retry the fetch
 # a bounded number of times with exponential backoff before giving up, so a few
 # seconds' lag on the remote side no longer silently fails a required store.
-_FETCH_MAX_ATTEMPTS = 5
-_FETCH_BASE_WAIT = 1.0
-_FETCH_MAX_WAIT = 10.0
+# _FETCH_TIMEOUT is the per-attempt budget: a large result body the upstream is
+# slowly assembling/streaming can take far longer than the small default HTTP
+# client timeout, which would otherwise abort every attempt before the body
+# arrives. Constructor kwargs still allow overrides (e.g. in tests).
+_FETCH_MAX_ATTEMPTS = 8
+_FETCH_BASE_WAIT = 2.0
+_FETCH_MAX_WAIT = 30.0
+_FETCH_TIMEOUT = 300.0
 # HTTP statuses that mean "not ready yet / try again" rather than a permanent
 # failure. 404 is included deliberately: right after ``successful`` it signals
 # the result document has not materialised yet, not that it will never exist.
@@ -107,22 +112,20 @@ class ResultStorageCoordinator:
         fetch_max_attempts: int = _FETCH_MAX_ATTEMPTS,
         fetch_base_wait: float = _FETCH_BASE_WAIT,
         fetch_max_wait: float = _FETCH_MAX_WAIT,
-        fetch_timeout: Optional[float] = None,
+        fetch_timeout: Optional[float] = _FETCH_TIMEOUT,
     ) -> None:
         self._storage = storage_port
         self._http = http_client
         self._providers = providers
         self._remote_auth = remote_auth
-        # Storage-fetch retry budget. Injected at the composition root from
-        # settings (UMP_STORAGE_FETCH_*), with the module constants as defaults
-        # so existing callers/tests keep the historical behaviour unchanged.
+        # Storage-fetch retry budget. Defaults come from the module constants
+        # above; callers/tests may override via constructor kwargs.
         self._fetch_max_attempts = fetch_max_attempts
         self._fetch_base_wait = fetch_base_wait
         self._fetch_max_wait = fetch_max_wait
-        # Per-request timeout for each fetch attempt. None keeps the http
-        # client's own default; the composition root injects
-        # UMP_STORAGE_FETCH_TIMEOUT so a large, slowly-streamed result body is
-        # not cut off by the small default client timeout.
+        # Per-request timeout for each fetch attempt. Defaults to _FETCH_TIMEOUT
+        # so a large, slowly-streamed result body is not cut off by the small
+        # default HTTP client timeout; pass None to defer to the client default.
         self._fetch_timeout = fetch_timeout
 
     # ------------------------------------------------------------------

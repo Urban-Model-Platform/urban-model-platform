@@ -46,17 +46,6 @@ services:
       UMP_REMOTE_JOB_TTW: 900
       UMP_JOB_STORE: "postgres"
       UMP_JOB_DELETE_INTERVAL: 240
-      # Result-storage fetch retry budget: some upstream servers report a job
-      # 'successful' before their /results endpoint is queryable, answering 404
-      # for a while. Widen the budget so a slow upstream still gets stored as a
-      # reference instead of failing. Budget ≈ sum of min(base*2^(n-1), max_wait).
-      UMP_STORAGE_FETCH_MAX_RETRIES: 8
-      UMP_STORAGE_FETCH_RETRY_BASE_WAIT: 2.0
-      UMP_STORAGE_FETCH_RETRY_MAX_WAIT: 30.0
-      # Per-attempt total timeout (s) for downloading the result body. The HTTP
-      # client default (10s) is too short for large/slowly-streamed results and
-      # aborts every attempt with a 504. Give each attempt a generous budget.
-      UMP_STORAGE_FETCH_TIMEOUT: 300.0
       #
       UMP_DATABASE_URL: postgresql+asyncpg://ump:ump@ump-db:5432/ump
       UMP_DATABASE_NAME: ump

@@ -212,10 +212,9 @@ result_storage_coordinator = ResultStorageCoordinator(
     http_client=http_client,
     providers=providers_port,
     remote_auth=remote_auth,
-    fetch_max_attempts=app_settings.UMP_STORAGE_FETCH_MAX_RETRIES,
-    fetch_base_wait=app_settings.UMP_STORAGE_FETCH_RETRY_BASE_WAIT,
-    fetch_max_wait=app_settings.UMP_STORAGE_FETCH_RETRY_MAX_WAIT,
-    fetch_timeout=app_settings.UMP_STORAGE_FETCH_TIMEOUT,
+    # Storage-fetch retry budget and per-attempt timeout are internal tuning
+    # values with sensible defaults defined in ResultStorageCoordinator; they
+    # are intentionally not exposed as operator settings.
 )
 
 if app_settings.UMP_JOB_STORE == "postgres":

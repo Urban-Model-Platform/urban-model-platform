@@ -125,7 +125,9 @@ class JobManagerConfig(BaseModel):
             results_fetch_max_retries=settings.UMP_RESULTS_FETCH_MAX_RETRIES,
             results_fetch_retry_base_wait=settings.UMP_RESULTS_FETCH_RETRY_BASE_WAIT,
             results_fetch_retry_max_wait=settings.UMP_RESULTS_FETCH_RETRY_MAX_WAIT,
-            results_finalizing_retry_after=settings.UMP_RESULTS_FINALIZING_RETRY_AFTER,
+            # results_finalizing_retry_after intentionally omitted: it is an
+            # internal tuning value that uses the field default (see above) and
+            # is not exposed as an operator setting.
             # poll_timeout removed: now resolved per-process from provider/process config
             # inline_inputs_size_limit, forward_max_retries, forward_retry_base_wait,
             # forward_retry_max_wait all use defaults (no settings exist yet)
