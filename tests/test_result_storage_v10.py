@@ -71,9 +71,12 @@ def _job(**overrides: Any) -> Job:
 
 
 class TestApplyStoredReferences:
-    def test_writes_to_status_info_links_not_job_links(self):
-        """The core bugfix: the client-visible field must be populated."""
+    def test_stored_outputs_populated_but_status_info_links_untouched(self):
+        """Result reference hrefs must stay OUT of statusInfo.links — they are
+        only exposed via GET /jobs/{id}/results (see stored_outputs below).
+        job.links (the ineffective internal field) is also untouched."""
         job = _job()
+        assert job.status_info is not None
         payloads = [
             ResultPayload(
                 output_id="voronoi", body_bytes=b"{}", media_type="application/geo+json"
@@ -93,14 +96,10 @@ class TestApplyStoredReferences:
 
         assert updated.links == []  # job.links (the ineffective field) untouched
         assert updated.status_info is not None
-        assert updated.status_info.links is not None
-        rels = {link.rel for link in updated.status_info.links}
-        assert "item" in rels
-        item_link = next(
-            link for link in updated.status_info.links if link.rel == "item"
-        )
-        assert item_link.href == references[0].items_url
-        assert item_link.type == "application/geo+json"
+        # No new links of any kind: statusInfo carries lifecycle links only.
+        assert (updated.status_info.links or []) == (job.status_info.links or [])
+        assert updated.stored_outputs is not None
+        assert updated.stored_outputs["voronoi"]["items_url"] == references[0].items_url
 
     def test_populates_stored_outputs_keyed_by_output_id(self):
         job = _job()
@@ -136,7 +135,7 @@ class TestApplyStoredReferences:
         assert updated.stored_outputs["b"]["collection_id"] == f"{JOB_ID}-b"
 
     def test_idempotent_on_repeated_application(self):
-        """Re-running (e.g. an observer retry) must not duplicate links."""
+        """Re-running (e.g. an observer retry) must not duplicate stored_outputs."""
         job = _job()
         payloads = [
             ResultPayload(
@@ -154,13 +153,11 @@ class TestApplyStoredReferences:
         once = _apply_stored_references(job, payloads, references)
         twice = _apply_stored_references(once, payloads, references)
 
-        assert once.status_info is not None and once.status_info.links is not None
-        assert twice.status_info is not None and twice.status_info.links is not None
-        assert len(twice.status_info.links) == len(once.status_info.links) == 1
         assert twice.stored_outputs == once.stored_outputs
 
-    def test_preserves_existing_links(self):
-        """A pre-existing self/results link must survive the merge."""
+    def test_preserves_existing_links_and_does_not_add_item_links(self):
+        """A pre-existing self/results link must survive the merge, and no
+        item link is ever added — statusInfo.links stays untouched."""
         job = _job()
         assert job.status_info is not None
         job.status_info.links = [
@@ -183,7 +180,7 @@ class TestApplyStoredReferences:
 
         assert updated.status_info is not None and updated.status_info.links is not None
         rels = [link.rel for link in updated.status_info.links]
-        assert rels == ["self", "item"]
+        assert rels == ["self"]
 
 
 # ---------------------------------------------------------------------------

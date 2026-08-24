@@ -527,9 +527,7 @@ class TestGatedSuccessfulTransition:
         assert terminal is True
         stored = await test_repo.get(test_job.id)
         assert stored.status_info.status == StatusCode.successful
-        assert any(
-            link.rel == "results" for link in (stored.status_info.links or [])
-        )
+        assert any(link.rel == "results" for link in (stored.status_info.links or []))
 
     @pytest.mark.asyncio
     async def test_gated_job_persists_running_and_notifies_true_completion(
@@ -585,7 +583,7 @@ class TestGatedSuccessfulTransition:
 
         stored = await test_repo.get(test_job.id)
         assert stored.status_info.status == StatusCode.running
-        assert "verifying" in stored.status_info.message.lower()
+        assert "publication" in stored.status_info.message.lower()
         assert not any(
             link.rel == "results" for link in (stored.status_info.links or [])
         )
@@ -593,9 +591,10 @@ class TestGatedSuccessfulTransition:
         # ResultStorageObserver is handed the TRUE final status (successful),
         # not the gated `running` snapshot, so it knows to store + verify.
         observer.on_job_completed.assert_awaited_once()
-        completed_job_arg, completed_status_arg = observer.on_job_completed.await_args.args
+        completed_job_arg, completed_status_arg = (
+            observer.on_job_completed.await_args.args
+        )
         assert completed_status_arg.status == StatusCode.successful
-
 
 
 # --- Polling fan-out regression tests ---

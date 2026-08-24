@@ -331,6 +331,8 @@ class ResultStorageObserver:
         loop may have written the ``running`` gate snapshot moments earlier and
         could race a concurrent read.
         """
+        from ump.core.managers.job_manager import _PUBLICATION_COMPLETE_MESSAGE
+
         current = job
         for attempt in range(1, _PERSIST_FAILURE_MAX_ATTEMPTS + 1):
             if current.status_info is None:
@@ -339,7 +341,7 @@ class ResultStorageObserver:
                 new_status_info = current.status_info.model_copy(
                     update={
                         "status": StatusCode.successful,
-                        "message": final_status_info.message,
+                        "message": _PUBLICATION_COMPLETE_MESSAGE,
                         "finished": final_status_info.finished,
                         "progress": final_status_info.progress,
                     }

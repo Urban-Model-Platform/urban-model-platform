@@ -51,19 +51,8 @@ REQUIRED_STATUS_FIELDS = {"jobID", "status", "type"}
 # result reference is being stored and its liveness confirmed. The job stays
 # `running` externally throughout, so this is the only client-visible signal
 # that something is still happening beyond normal execution.
-_AWAITING_PUBLICATION_MESSAGE = (
-    "Job completed; verifying that the result reference is published and "
-    "reachable before reporting success."
-)
-
-
-def _append_gate_message(existing: Optional[str]) -> str:
-    """Append the awaiting-publication note to an existing message."""
-    if not existing:
-        return _AWAITING_PUBLICATION_MESSAGE
-    if _AWAITING_PUBLICATION_MESSAGE in existing:
-        return existing
-    return f"{existing} {_AWAITING_PUBLICATION_MESSAGE}"
+_PUBLICATION_IN_PROGRESS_MESSAGE = "Result publication in progress"
+_PUBLICATION_COMPLETE_MESSAGE = "Result available and published"
 
 
 # -------------------------------------------
@@ -203,7 +192,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except json.JSONDecodeError, UnicodeDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -1050,7 +1039,7 @@ class JobManager:
                 status_info = status_info.model_copy(
                     update={
                         "status": StatusCode.running,
-                        "message": _append_gate_message(status_info.message),
+                        "message": _PUBLICATION_IN_PROGRESS_MESSAGE,
                     }
                 )
             else:

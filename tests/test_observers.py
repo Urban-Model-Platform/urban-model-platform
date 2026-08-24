@@ -430,7 +430,7 @@ def _make_gated_job(test_job):
         status=StatusCode.running,
         type="process",
         processID=test_job.process_id,
-        message="Job completed; verifying that the result reference is published.",
+        message="Result publication in progress",
     )
     gated = test_job.model_copy(update={"status": "running"})
     gated.apply_status_info(running_si)
@@ -471,6 +471,7 @@ class TestResultStorageObserver:
 
         stored = await repo.get(gated_job.id)
         assert stored.status_info.status == StatusCode.successful
+        assert stored.status_info.message == "Result available and published"
         assert any(link.rel == "results" for link in (stored.status_info.links or []))
         assert any(link.rel == "self" for link in (stored.status_info.links or []))
 
