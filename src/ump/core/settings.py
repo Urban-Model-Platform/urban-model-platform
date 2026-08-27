@@ -208,6 +208,25 @@ class UmpSettings(BaseSettings):
     # Prefix for per-job provider ConfigMap names (suffix is the job UUID).
     UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX: str = "ump-ldproxy-provider-"
 
+    # ── Result value cache ────────────────────────────────────────────────────
+    # Short-lived, per-replica cache for the *inline* value outputs of a job.
+    # Under the 'emulate-ref' transmission policy, /results otherwise re-fetches
+    # the complete remote result document on every call just to recover the few
+    # small value outputs — the large reference output is discarded and replaced
+    # by a stored href anyway.  Caching those values at job completion removes
+    # that repeated upstream round-trip.
+    #
+    # TTL semantics: the lifetime starts when the entry is written; reads do NOT
+    # extend it.  An entry therefore lives at most this long, which keeps the
+    # retention window predictable.  0 disables the cache entirely (every read
+    # falls back to the remote fetch, i.e. the pre-cache behaviour).
+    UMP_RESULTCACHE_TTL_SECONDS: int = 3600
+
+    # Upper bound (bytes, measured as serialised JSON) for a single cache entry.
+    # Larger payloads are silently declined so a pathological result cannot blow
+    # the pod's memory limit; /results then transparently falls back to fetching.
+    UMP_RESULTCACHE_MAX_ITEM_BYTES: int = 5 * 1024 * 1024
+
     def print_settings(self, logger: LoggingPort):
         """Prints the settings for debugging purposes"""
         logger.info("UMP Settings:")

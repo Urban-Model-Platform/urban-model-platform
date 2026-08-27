@@ -31,6 +31,10 @@ from ump.core.interfaces.poll_lock import PollLockPort
 from ump.core.interfaces.process_id_validator import ProcessIdValidatorPort
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.result_storage import ResultStoragePort
+from ump.core.interfaces.result_value_cache import (
+    NullResultValueCache,
+    ResultValueCachePort,
+)
 from ump.core.interfaces.status_derivation import StatusDerivationContext
 from ump.core.managers.status_derivation_orchestrator import (
     StatusDerivationOrchestrator,
@@ -192,7 +196,7 @@ def _parse_json_document(
         return None
     try:
         parsed = json.loads(body_bytes.decode("utf-8"))
-    except json.JSONDecodeError, UnicodeDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None
 
@@ -222,6 +226,7 @@ class JobManager:
         observers: Optional[
             list[JobStateObserver]
         ] = None,  # Observer pattern for state transitions
+        value_cache: Optional[ResultValueCachePort] = None,
     ) -> None:
         self._providers = providers
         self._http = http_client
@@ -239,6 +244,10 @@ class JobManager:
         self._remote_auth = remote_auth
         self._poll_lock = poll_lock
         self._observers = observers or []
+        # Read side of the result value cache. Defaults to the null adapter so
+        # every existing caller (and every test) keeps the pre-cache behaviour
+        # of always fetching from upstream without having to opt out.
+        self._value_cache = value_cache or NullResultValueCache()
 
         # Initialize status derivation orchestrator
         self._status_orchestrator = StatusDerivationOrchestrator(http_client)
@@ -1320,24 +1329,36 @@ class JobManager:
         return the outputs we do have rather than fail a request that has
         real, storable data to offer (mirrors the best-effort philosophy
         used throughout result storage — V-9 cleanup, V-7 fallback).
+
+        That fetch is also the reason this method used to be slow: the whole
+        remote document — including the large output that is immediately
+        overwritten by an href below — was re-downloaded on *every* call just
+        to recover a few small inline values. Those values are cached at job
+        completion, so a cache hit skips the fetch entirely. A miss (expired,
+        oversized, different replica, restart) is not an error: we simply fall
+        back to the fetch, which is exactly the previous behaviour.
         """
         document: Dict[str, Any] = {}
         stored_outputs = job.stored_outputs or {}
 
         if policy != "emulate-ref-only":
-            try:
-                body_bytes, content_type = await self._fetch_results_once(
-                    results_url, auth_headers, job
-                )
-                remote_document = _parse_json_document(body_bytes, content_type)
-                if remote_document:
-                    document.update(remote_document)
-            except Exception as exc:
-                logger.warning(
-                    f"[job:results] remote fetch failed while building stored "
-                    f"document job_id={job.id} err={exc} — "
-                    "serving stored outputs only"
-                )
+            cached_values = await self._value_cache.get(job.id)
+            if cached_values is not None:
+                document.update(cached_values)
+            else:
+                try:
+                    body_bytes, content_type = await self._fetch_results_once(
+                        results_url, auth_headers, job
+                    )
+                    remote_document = _parse_json_document(body_bytes, content_type)
+                    if remote_document:
+                        document.update(remote_document)
+                except Exception as exc:
+                    logger.warning(
+                        f"[job:results] remote fetch failed while building stored "
+                        f"document job_id={job.id} err={exc} — "
+                        "serving stored outputs only"
+                    )
 
         for output_id, ref in stored_outputs.items():
             document[output_id] = {

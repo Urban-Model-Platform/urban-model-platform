@@ -48,6 +48,10 @@ from ump.core.interfaces.result_storage import (
     ResultStoragePort,
     StoredReference,
 )
+from ump.core.interfaces.result_value_cache import (
+    NullResultValueCache,
+    ResultValueCachePort,
+)
 from ump.core.models.job import Job
 from ump.core.models.providers_config import ProcessConfig
 
@@ -105,11 +109,16 @@ class ResultStorageCoordinator:
         fetch_base_wait: float = _FETCH_BASE_WAIT,
         fetch_max_wait: float = _FETCH_MAX_WAIT,
         fetch_timeout: Optional[float] = _FETCH_TIMEOUT,
+        value_cache: Optional[ResultValueCachePort] = None,
     ) -> None:
         self._storage = storage_port
         self._http = http_client
         self._providers = providers
         self._remote_auth = remote_auth
+        # Write side of the result value cache. The coordinator already holds
+        # the freshly fetched result document, so populating the cache here
+        # costs no extra upstream request. Defaults to the null adapter.
+        self._value_cache = value_cache or NullResultValueCache()
         # Storage-fetch retry budget. Defaults come from the module constants
         # above; callers/tests may override via constructor kwargs.
         self._fetch_max_attempts = fetch_max_attempts
@@ -248,12 +257,89 @@ class ResultStorageCoordinator:
             store_outputs_config=process_config.store_outputs,
         )
 
+        # Populate the value cache while the document is already in hand. This
+        # is the only moment where we hold the remote result without having
+        # paid for an extra request, which is precisely what the cache exists
+        # to avoid on the /results read path.
+        await self._cache_value_outputs(
+            job=job,
+            policy=process_config.transmission_mode_policy,
+            body_bytes=body_bytes,
+            content_type=content_type,
+            store_output_ids=store_output_ids,
+        )
+
         return _extract_payloads(
             body_bytes=body_bytes,
             content_type=content_type,
             outputs_spec=job.outputs_spec,
             store_outputs_config=store_output_ids,
         )
+
+    async def _cache_value_outputs(
+        self,
+        job: Job,
+        policy: str,
+        body_bytes: bytes,
+        content_type: str,
+        store_output_ids: Optional[list[str]],
+    ) -> None:
+        """Cache the outputs that stay inline, so /results need not re-fetch.
+
+        Only two policies can reach this point at all: ``pass-through`` and
+        ``value-only`` never store, so ``should_store_reference`` returns False
+        for them and ``ResultStorageObserver`` returns before calling the
+        coordinator. The check below therefore does not exclude "everything
+        except one" — it discriminates between the only two candidates left.
+
+        Of those two, only ``emulate-ref`` benefits. Under ``emulate-ref-only``
+        every output becomes a reference and the read path never contacts the
+        remote, so an entry there would be written but never read.
+
+        Phrasing the guard as ``!= "emulate-ref"`` rather than
+        ``== "emulate-ref-only"`` keeps the safe default: a future policy that
+        also stores would not silently slip into the cache path before anyone
+        has verified that caching is correct for it.
+
+        The cached value is the *complement* of the stored outputs: the stored
+        ones are replaced by references on read anyway, and they are exactly the
+        large payloads we must not hold in memory.
+
+        Deliberately conservative — this is an optimisation, never a
+        correctness requirement, so every case we are not certain about is
+        simply skipped and the read path falls back to fetching:
+
+        - non-document responses (raw single output): there is no inline
+          remainder to speak of;
+        - dot-notation store ids: a stored output nested inside a top-level key
+          means that key is only partially a reference, and splitting it
+          correctly is not worth the risk of caching stale or oversized data;
+        - ``store_output_ids is None`` (auto-detect): every top-level key gets
+          stored, so the complement is empty by definition.
+        """
+        if policy != "emulate-ref":
+            return
+        if not store_output_ids:
+            return
+        if any("." in output_id for output_id in store_output_ids):
+            return
+        if (content_type or "").split(";")[0].strip().lower() != "application/json":
+            return
+
+        try:
+            document = json.loads(body_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(document, dict) or _is_geojson_document(document):
+            return
+
+        stored = set(store_output_ids)
+        values = {key: val for key, val in document.items() if key not in stored}
+        if not values:
+            return
+
+        # The port contract guarantees put() never raises, so no guard here.
+        await self._value_cache.put(job.id, values)
 
     async def _fetch_results_with_retry(
         self,

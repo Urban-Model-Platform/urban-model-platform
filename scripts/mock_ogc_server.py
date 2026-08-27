@@ -442,7 +442,7 @@ async def _run_random_geo(job_id: str, inputs: Dict[str, Any]) -> None:
 
     try:
         count = int(inputs.get("count", 5))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         count = 5
     count = max(1, min(count, 100))
 
@@ -459,7 +459,11 @@ async def _run_random_geo(job_id: str, inputs: Dict[str, Any]) -> None:
         ],
     }
     # Document response: top-level key is the output id, value is inline GeoJSON.
-    _results[job_id] = {"result": feature_collection}
+    # `point_count` is a second, always-inline output not declared in the
+    # process description — it exists purely so an emulate-ref request that
+    # stores `result` as a reference still has an inline remainder, exercising
+    # the UMP-side result value cache end to end.
+    _results[job_id] = {"result": feature_collection, "point_count": count}
     _jobs[job_id]["status"] = "successful"
     _jobs[job_id]["status_info"] = _make_status(
         job_id,
@@ -520,7 +524,7 @@ async def _run_random_fgb(job_id: str, inputs: Dict[str, Any]) -> None:
 
     try:
         count = int(inputs.get("count", 5))
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         count = 5
     count = max(1, min(count, 100))
 

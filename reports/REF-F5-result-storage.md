@@ -724,3 +724,36 @@ V-11 is implemented as follows:
 Remaining self-imposed check before coding: confirm the exact ldproxy field
 names for the target ldproxy version against the two attached documented
 examples as each entity file is generated.
+
+## Kubernetes validation + chart gap (2026-08-24)
+
+Validated the full result-storage flow end-to-end on a local minikube cluster
+(throwaway setup under `minikube-test/`, gitignored). ump-api, a dedicated
+`ump-results` ldproxy (4.6.1, `store.mode: RW` + `watch`), a `random-fgb`
+modelserver and postgres, all sharing one RWX PVC.
+
+**Outcome — works:** an async `random-fgb` job reached `successful`; ump-api
+wrote `resources/features/{job}.gpkg` (+ `.manifest.json`) and the
+`entities/instances/{providers,services}/*.yml` to the shared volume; ldproxy
+hot-loaded them and published the collection live
+(`.../collections/{job}-result/items` → 500 Point features, correct HH bbox);
+`GET /jobs/{job}/results` returned the ref link. The eager-store trigger and
+`transmission-mode-policy: emulate-ref-only` behaved exactly as designed.
+
+**⚠️ Chart gap for the real (AKS) rollout.** The published chart
+`urban-model-platform:0.11.4` (gitlab.opencode.de, used by the deployment repo)
+does **not** yet expose result storage. To deploy this feature to AKS the chart
+needs:
+
+1. **`UMP_RESULTSTORE_*` env** on the ump-api Deployment, driven by a
+   `resultStore` values block — at minimum `CONFIG_BACKEND`, `ROOT_PATH`,
+   `BASE_URL`, `INTERNAL_URL`, `SERVICE_ID`, `NATIVE_CRS`.
+2. **`extraVolumes` / `extraVolumeMounts`** so the store root can be mounted
+   (shared RWX PVC for the `filesystem` backend; both ump-api and the RO
+   ldproxy instance mount it).
+
+Both were prototyped in `minikube-test/chart/` (templates
+`configmap-settings.yaml` + `deployment.yaml`, plus `values.yaml` defaults) and
+should be upstreamed into the 0.11.x chart before the AKS deployment. On AKS
+(working kube-proxy/DNS) the minikube-only `hostAliases` workaround is not
+needed — normal Service names resolve.

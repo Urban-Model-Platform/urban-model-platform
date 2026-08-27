@@ -26,6 +26,7 @@ from ump.adapters.poll_lock_noop import NoOpPollLock
 from ump.adapters.process_description_proxy import PolicyBasedProcessDescriptionProxy
 from ump.adapters.provider_config_file_adapter import ProviderConfigFileAdapter
 from ump.adapters.remote_auth_adapter import RemoteAuthAdapter
+from ump.adapters.result_storage.inmemory_value_cache import InMemoryResultValueCache
 from ump.adapters.retry_tenacity import TenacityRetryAdapter
 from ump.adapters.site_info_static_adapter import StaticSiteInfoAdapter
 from ump.adapters.web.fastapi import create_app
@@ -36,6 +37,10 @@ from ump.composition.result_storage import (
 )
 from ump.core.config import JobManagerConfig
 from ump.core.interfaces.job_repository import JobRepositoryPort
+from ump.core.interfaces.result_value_cache import (
+    NullResultValueCache,
+    ResultValueCachePort,
+)
 from ump.core.logging_config import configure_logging
 from ump.core.managers.job_manager import JobManager
 from ump.core.managers.observers import (
@@ -151,6 +156,7 @@ def _job_manager_factory(client, process_manager):
         remote_auth=remote_auth,
         poll_lock=poll_lock,
         result_storage_port=result_storage_port,
+        value_cache=result_value_cache,
         observers=[],
     )
     jm._observers = [
@@ -207,11 +213,26 @@ jwt_auth = JwtAuthAdapter(app_settings)
 result_storage_port, result_storage_registry = build_result_storage_port(
     app_settings, providers_port
 )
+
+# Result value cache: written by the coordinator when a job completes, read by
+# the JobManager on /results. Both must share the SAME instance — two separate
+# instances would be a cache that never hits. A TTL of 0 disables caching, in
+# which case the null adapter keeps the code path free of conditionals.
+result_value_cache: ResultValueCachePort = (
+    InMemoryResultValueCache(
+        ttl_seconds=app_settings.UMP_RESULTCACHE_TTL_SECONDS,
+        max_item_bytes=app_settings.UMP_RESULTCACHE_MAX_ITEM_BYTES,
+    )
+    if app_settings.UMP_RESULTCACHE_TTL_SECONDS > 0
+    else NullResultValueCache()
+)
+
 result_storage_coordinator = ResultStorageCoordinator(
     storage_port=result_storage_port,
     http_client=http_client,
     providers=providers_port,
     remote_auth=remote_auth,
+    value_cache=result_value_cache,
     # Storage-fetch retry budget and per-attempt timeout are internal tuning
     # values with sensible defaults defined in ResultStorageCoordinator; they
     # are intentionally not exposed as operator settings.
