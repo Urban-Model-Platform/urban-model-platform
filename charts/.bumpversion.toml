@@ -1,5 +1,5 @@
 [tool.bumpversion]
-current_version = "0.11.4"
+current_version = "0.12.0"
 commit = true
 tag = true
 tag_name = "chart-v{new_version}"
