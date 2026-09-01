@@ -5,7 +5,7 @@ fullnameOverride: ""
 image:
   repository: lgvanalytics.azurecr.io/urban-model-platform
   pullPolicy: IfNotPresent
-  tag: "2.0.0"
+  tag: "3.0.0alpha"
   pullSecrets:
     - name: secret
 
@@ -51,32 +51,51 @@ resources:
 
 service:
   type: ClusterIP
-  port: 5000 # port under which the svc answers
-  targetPort: 5000 # port the container itself uses
+  port: 8000 # port under which the svc answers
+  targetPort: 8000 # port the container itself uses
 
 config:
   logLevel: "DEBUG"
   providersFilePath: "./providers.yaml"
   providersFileMountPath: /app
-  apiServerUrl: "http://localhost:5000"
-  apiServerUrlPrefix: "/api"
+  apiServerUrl: "http://localhost:8000"
+  apiServerUrlPrefix: "/"
   apiServerWorkers: "4"
+  apiServerPort: "8000"
   remoteJobStatusRequestInterval: "5"
-  serverWorkerTimeout: "30" # Timeout for server workers, should be higher than all request to remote servers, to avoid server 500 errors
-  geoserverConnectionTimeout: "60"
   jobDeleteInterval: "240"
+  jobStore: "memory"
+  rewriteRemoteLinks: "true"
+  verifyRemoteResults: "true"
+  perProcessFetch: "false"
+  supportedApiVersions: "1.0"
+  readinessPath: "/"
+  siteTitle: "Urban Model Platform"
+  siteDescription: "An OGC API Processes gateway for urban models."
+  siteContact: "maintainers@example.org"
+
+auth:
+  enabled: "false"
+  publicProcesses: "false"
+  jwtRolesClaims: "realm_access.roles"
+  jwksCacheTtlSeconds: "3600"
+  jwksUrl: ""
+  jwtIssuer: ""
+  jwtAudience: ""
+  existingSecret:
+    name: ""
 
 postgresConnection:
+  enabled: false
+  databaseUrl: ""
+  # existing secret must use canonical cnpg secret keys:
+  # dbname
+  # user
+  # password
+  # host
+  # port
   existingSecret:
     name: postgres-credentials
-
-keycloakConnection:
-  existingSecret: 
-    name: ""
-
-geoserverConnection:
-  existingSecret: 
-    name: ""
 
 # If configMap for providers is already existing and should not be overwritten, set this to true. Default: false
 providers:
@@ -145,3 +164,61 @@ securityContext:
   readOnlyRootFilesystem: true
 
 affinity: {}
+
+# ── Feature V: Result storage (ldproxy) ──────────────────────────────────────
+# When enabled, the settings ConfigMap emits the UMP_RESULTSTORE_* variables so
+# UMP can publish job results as OGC API Features collections via a dedicated
+# ldproxy instance. Disabled by default: deployments that do not use result
+# storage render exactly as before.
+resultStore:
+  enabled: false
+  # 'filesystem': UMP writes the GeoPackage *and* the ldproxy provider/service
+  #   entity YAMLs onto a shared RWX volume that ldproxy also mounts.
+  # 'k8s': entity configs are created/patched as Kubernetes ConfigMaps instead
+  #   (requires RBAC permissions for the ump-api ServiceAccount).
+  configBackend: "filesystem"
+  # Store root inside the container. Must match the mountPath of the shared
+  # volume declared in extraVolumeMounts below, and the ldproxy store root.
+  rootPath: "/data/ump-results"
+  # Public, client-facing base URL baked into the result references returned by
+  # /jobs/{id}/results. Must end in the serviceId segment.
+  baseUrl: ""
+  # Cluster-internal URL used only for the post-store liveness probe. Optional:
+  # when unset, the post-store settle degrades to a single best-effort re-touch.
+  internalUrl: ""
+  # Logical id of the shared ldproxy service publishing all stored results.
+  # Must match the final path segment of baseUrl.
+  serviceId: "ump-results"
+  # EPSG code for generated ldproxy provider entities. OGC GeoJSON is WGS84.
+  nativeCrs: 4326
+  # Only evaluated when configBackend is "k8s".
+  k8s:
+    namespace: ""            # defaults to the release namespace
+    serviceConfigMap: "ump-ldproxy-service"
+    providerCmPrefix: "ump-ldproxy-provider-"
+
+# ── Result value cache ───────────────────────────────────────────────────────
+# Short-lived, per-replica cache for the inline value outputs of a job. Under
+# the 'emulate-ref' transmission policy /results would otherwise re-fetch the
+# complete remote result document on every call just to recover a few small
+# values. Defaults mirror the application defaults in ump.core.settings.
+resultCache:
+  # Lifetime starts when the entry is written; reads do not extend it.
+  # 0 disables the cache entirely (every read falls back to a remote fetch).
+  ttlSeconds: 3600
+  # Upper bound (bytes, serialised JSON) for a single cache entry. Larger
+  # payloads are declined so a pathological result cannot exhaust the pod's
+  # memory limit; /results then transparently falls back to fetching.
+  maxItemBytes: 5242880
+
+# Extra volumes / mounts appended to the ump-api pod. Used to attach the shared
+# result store PVC when resultStore.enabled is true, e.g.:
+#   extraVolumes:
+#     - name: results-store
+#       persistentVolumeClaim:
+#         claimName: pvc-ump-results
+#   extraVolumeMounts:
+#     - name: results-store
+#       mountPath: /data/ump-results
+extraVolumes: []
+extraVolumeMounts: []

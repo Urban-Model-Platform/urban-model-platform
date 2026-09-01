@@ -49,22 +49,30 @@ spec:
               mountPath: /tmp
             - name: providers-volume
               mountPath: {{ .Values.config.providersFileMountPath | quote }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "ump.fullname" . }}-settings
-            # if keycloak/geoserver secrets are not referenced, they will be created
-            {{- if not .Values.keycloakConnection.existingSecret.name }}
+            # if auth secret is not referenced, it will be created
+            {{- if not .Values.auth.existingSecret.name }}
             - secretRef:
-                name: {{ include "ump.fullname" . }}-keycloak-connection
-            {{- end }}
-            {{- if not .Values.geoserverConnection.existingSecret.name }}
-            - secretRef:
-                name: {{ include "ump.fullname" . }}-geoserver-connection
+                name: {{ include "ump.fullname" . }}-oidc-connection
             {{- end }}
           env:
-            - name: FLASK_APP
-              value: ump.main
+            {{- if .Values.allowedOrigins }}
+            - name: UMP_CORS_ORIGINS
+              value: {{ $hosts := list }}{{- range .Values.allowedOrigins -}}{{- $hosts = concat $hosts .hosts -}}{{- end }}{{ $hosts | toJson | quote }}
+            {{- end }}
+            {{- if .Values.postgresConnection.enabled }}
             # postgres connection
+            - name: UMP_JOB_STORE
+              value: "postgres"
+            {{- if .Values.postgresConnection.databaseUrl }}
+            - name: UMP_DATABASE_URL
+              value: {{ .Values.postgresConnection.databaseUrl | quote }}
+            {{- end }}
             {{- if .Values.postgresConnection.existingSecret.name }}
             - name: UMP_DATABASE_NAME
               valueFrom:
@@ -91,70 +99,28 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.postgresConnection.existingSecret.name }}
                   key: password
-            # keycloak connection
             {{- end }}
-            {{- if .Values.keycloakConnection.existingSecret.name }}
-            - name: UMP_KEYCLOAK_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.keycloakConnection.existingSecret.name }}
-                  key: user
-            - name: UMP_KEYCLOAK_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.keycloakConnection.existingSecret.name }}
-                  key: password
-            - name: UMP_KEYCLOAK_REALM
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.keycloakConnection.existingSecret.name }}
-                  key: realm
-            - name: UMP_KEYCLOAK_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.keycloakConnection.existingSecret.name }}
-                  key: url
-            - name: UMP_KEYCLOAK_CLIENT_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.keycloakConnection.existingSecret.name }}
-                  key: clientId
             {{- end }}
-            {{- if .Values.geoserverConnection.existingSecret.name }}
-            - name: UMP_GEOSERVER_URL
+            {{- if .Values.auth.existingSecret.name }}
+            - name: UMP_JWKS_URL
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: url
-            - name: UMP_GEOSERVER_DB_HOST
+                  name: {{ .Values.auth.existingSecret.name }}
+                  key: UMP_JWKS_URL
+            - name: UMP_JWT_ISSUER
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: dbHost
-            - name: UMP_GEOSERVER_DB_PORT
+                  name: {{ .Values.auth.existingSecret.name }}
+                  key: UMP_JWT_ISSUER
+            - name: UMP_JWT_AUDIENCE
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: dbPort
-            - name: UMP_GEOSERVER_WORKSPACE_NAME
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: workspaceName
-            - name: UMP_GEOSERVER_USER
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: user
-            - name: UMP_GEOSERVER_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.geoserverConnection.existingSecret.name }}
-                  key: password
-          {{- end }}
+                  name: {{ .Values.auth.existingSecret.name }}
+                  key: UMP_JWT_AUDIENCE
+            {{- end }}
           readinessProbe:
             httpGet:
-              path: {{ .Values.config.apiServerUrlPrefix }}/health/ready
+              path: {{ .Values.config.readinessPath }}
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
@@ -168,11 +134,8 @@ spec:
           {{- else }}
             name: {{ .Values.providers.existingConfigMap.name }}
           {{- end }}
-        {{- if not .Values.keycloakConnection.existingSecret.name }}
-        - name: keycloak-config
-          secret:
-            secretName: {{ include "ump.fullname" . -}}-keycloak-connection
-            defaultMode: 0400
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

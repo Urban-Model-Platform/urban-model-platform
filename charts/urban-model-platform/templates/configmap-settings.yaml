@@ -9,7 +9,47 @@ data:
   UMP_PROVIDERS_FILE: {{ .Values.config.providersFilePath | quote }}
   UMP_API_SERVER_URL: {{ .Values.config.apiServerUrl | quote }}
   UMP_API_SERVER_URL_PREFIX: {{ .Values.config.apiServerUrlPrefix | quote }}
+  UMP_API_SERVER_PORT: {{ .Values.config.apiServerPort | quote }}
   UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL: {{ .Values.config.remoteJobStatusRequestInterval | quote }}
   UMP_JOB_DELETE_INTERVAL: {{ .Values.config.jobDeleteInterval | quote }}
   UMP_API_SERVER_WORKERS: {{ .Values.config.apiServerWorkers | quote }}
-  UMP_SERVER_TIMEOUT: {{ .Values.config.serverWorkerTimeout | quote }}
+  UMP_JOB_STORE: {{ .Values.config.jobStore | quote }}
+  UMP_REWRITE_REMOTE_LINKS: {{ .Values.config.rewriteRemoteLinks | quote }}
+  UMP_VERIFY_REMOTE_RESULTS: {{ .Values.config.verifyRemoteResults | quote }}
+  UMP_PER_PROCESS_FETCH: {{ .Values.config.perProcessFetch | quote }}
+  UMP_SUPPORTED_API_VERSIONS: {{ .Values.config.supportedApiVersions | quote }}
+  UMP_SITE_TITLE: {{ .Values.config.siteTitle | quote }}
+  UMP_SITE_DESCRIPTION: {{ .Values.config.siteDescription | quote }}
+  UMP_SITE_CONTACT: {{ .Values.config.siteContact | quote }}
+  UMP_AUTH_ENABLED: {{ .Values.auth.enabled | quote }}
+  UMP_PUBLIC_PROCESSES: {{ .Values.auth.publicProcesses | quote }}
+  UMP_JWT_ROLES_CLAIMS: {{ .Values.auth.jwtRolesClaims | quote }}
+  UMP_JWKS_CACHE_TTL_SECONDS: {{ .Values.auth.jwksCacheTtlSeconds | quote }}
+  {{- with .Values.resultStore }}
+  {{- if .enabled }}
+  # ── Feature V: Result storage (ldproxy) ──────────────────────────────
+  {{- $backend := .configBackend | default "filesystem" }}
+  {{- if not (has $backend (list "filesystem" "k8s")) }}
+  {{- fail (printf "resultStore.configBackend must be either \"filesystem\" or \"k8s\", got %q" $backend) }}
+  {{- end }}
+  UMP_RESULTSTORE_CONFIG_BACKEND: {{ $backend | quote }}
+  UMP_RESULTSTORE_LDPROXY_ROOTPATH: {{ required "resultStore.rootPath is required when resultStore.enabled is true" .rootPath | quote }}
+  UMP_RESULTSTORE_LDPROXY_BASE_URL: {{ required "resultStore.baseUrl is required when resultStore.enabled is true" .baseUrl | quote }}
+  {{- with .internalUrl }}
+  UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: {{ . | quote }}
+  {{- end }}
+  UMP_RESULTSTORE_LDPROXY_SERVICE_ID: {{ required "resultStore.serviceId is required when resultStore.enabled is true" .serviceId | quote }}
+  UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: {{ .nativeCrs | default 4326 | int64 | quote }}
+  {{- if eq $backend "k8s" }}
+  {{- $k8s := .k8s | default dict }}
+  UMP_RESULTSTORE_K8S_NAMESPACE: {{ $k8s.namespace | default $.Release.Namespace | quote }}
+  UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP: {{ $k8s.serviceConfigMap | default "ump-ldproxy-service" | quote }}
+  UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX: {{ $k8s.providerCmPrefix | default "ump-ldproxy-provider-" | quote }}
+  {{- end }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.resultCache }}
+  # ── Result value cache ───────────────────────────────────────────────
+  UMP_RESULTCACHE_TTL_SECONDS: {{ .ttlSeconds | default 3600 | int64 | quote }}
+  UMP_RESULTCACHE_MAX_ITEM_BYTES: {{ .maxItemBytes | default 5242880 | int64 | quote }}
+  {{- end }}
