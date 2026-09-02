@@ -55,9 +55,10 @@ logger = logging.getLogger(__name__)
 
 # etcd rejects any object larger than ~1 MiB.  We guard well below that so the
 # error names the real cause instead of the API server rejecting an opaque
-# "request entity too large" at an arbitrary moment.  A provider entity is
-# ~2 KB, so this still allows several hundred concurrently published results —
-# the operational bound this design deliberately accepts (see REF-F5 V-13).
+# "request entity too large" at an arbitrary moment.  A provider entity measured
+# 929 bytes, so this allows ~968 concurrently published results.  That is a cap
+# on what is *published at once*, not on lifetime throughput: V-9 retention
+# cleanup removes each key again (see REF-F5 V-13).
 _MAX_CONFIGMAP_BYTES = 900_000
 
 # The shared providers ConfigMap is contended by every completing job.  A retry
