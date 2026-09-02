@@ -21,7 +21,12 @@ ENV POETRY_NO_INTERACTION=1 \
 COPY pyproject.toml ./
 COPY alembic.ini ./
 #poetry.lock
-RUN poetry lock && poetry install --without=dev --no-root
+# The `k8s` extra pulls in the Kubernetes client, which is required only when
+# UMP_RESULTSTORE_CONFIG_BACKEND=k8s (result storage writes ldproxy entity
+# YAMLs as ConfigMaps instead of files).  It is installed unconditionally so
+# one image can serve both backends — the module is imported lazily, so a
+# deployment on the filesystem backend never loads it.
+RUN poetry lock && poetry install --without=dev --no-root --extras k8s
 
 # maybe needed for psycopg2
 # RUN apt update \

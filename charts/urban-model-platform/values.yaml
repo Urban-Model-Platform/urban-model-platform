@@ -178,8 +178,17 @@ resultStore:
   #   (requires RBAC permissions for the ump-api ServiceAccount).
   configBackend: "filesystem"
   # Store root inside the container. Must match the mountPath of the shared
-  # volume declared in extraVolumeMounts below, and the ldproxy store root.
+  # volume declared by resultStore.persistence (or custom extraVolumeMounts),
+  # and the ldproxy store root.
   rootPath: "/data/ump-results"
+  # The two directories UMP writes into, both on the result-store PVC mounted
+  # at rootPath. Leave empty to use the ldproxy-compatible defaults shown here.
+  # ldproxy mounts the same PVC at its store root and picks the data up from
+  # exactly these locations, so only relocate them together with ldproxy.
+  #   gpkgPath     -> per-job GeoPackages + manifests
+  #   entitiesPath -> ldproxy provider/service entity YAMLs (filesystem backend)
+  gpkgPath: ""      # default: {rootPath}/resources/features
+  entitiesPath: ""  # default: {rootPath}/entities/instances
   # Public, client-facing base URL baked into the result references returned by
   # /jobs/{id}/results. Must end in the serviceId segment.
   baseUrl: ""
@@ -192,10 +201,56 @@ resultStore:
   # EPSG code for generated ldproxy provider entities. OGC GeoJSON is WGS84.
   nativeCrs: 4326
   # Only evaluated when configBackend is "k8s".
+  #
+  # Neither ConfigMap is created by this chart, deliberately:
+  #   * an absent service ConfigMap is how UMP detects "not bootstrapped yet"
+  #     and writes the initial skeleton;
+  #   * both are mutated by UMP at runtime, so letting Helm own them would
+  #     reset every published result on the next `helm upgrade`.
+  # The ldproxy pod must therefore mount them with `optional: true`.
   k8s:
     namespace: ""            # defaults to the release namespace
     serviceConfigMap: "ump-ldproxy-service"
-    providerCmPrefix: "ump-ldproxy-provider-"
+    # ONE ConfigMap for all provider entities, one data key per job. Not one per
+    # job: a pod resolves its volumes by name at admission time, so a ConfigMap
+    # created later never appears in a running ldproxy - only new keys in an
+    # already-mounted ConfigMap propagate.
+    providerConfigMap: "ump-ldproxy-providers"
+    # Role + RoleBinding granting the ump-api ServiceAccount the ability to
+    # read and mutate exactly those two ConfigMaps (no wildcard on configmaps).
+    rbac:
+      create: true
+
+  # Persistent storage for ldproxy result data written below rootPath
+  # (GeoPackages and, with configBackend=filesystem, ldproxy entity YAMLs).
+  persistence:
+    enabled: false
+    # Use an already existing PVC instead of creating one.
+    existingClaim: ""
+    # New PVC settings (used when existingClaim is empty).
+    size: 20Gi
+    accessModes:
+      - ReadWriteMany
+    storageClassName: ""
+    volumeName: ""
+    annotations: {}
+    labels: {}
+
+    # Optional static PersistentVolume created by this chart.
+    # Leave disabled when your cluster provides dynamic provisioning.
+    pv:
+      enabled: false
+      name: ""
+      capacity: 20Gi
+      accessModes:
+        - ReadWriteMany
+      storageClassName: ""
+      reclaimPolicy: Retain
+      annotations: {}
+      labels: {}
+      # Simple local-path option for dev clusters (minikube/kind).
+      # Do not use hostPath for production clusters.
+      hostPath: ""
 
 # ── Result value cache ───────────────────────────────────────────────────────
 # Short-lived, per-replica cache for the inline value outputs of a job. Under

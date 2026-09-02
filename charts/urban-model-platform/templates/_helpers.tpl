@@ -83,3 +83,14 @@ Validate if hostname has a value when tls is enabled
 {{- fail "tls.gateway.hostName is required when TLS is enabled" -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Create the name of the result store PVC to use
+*/}}
+{{- define "ump.resultStorePvcName" -}}
+{{- if .Values.resultStore.persistence.existingClaim }}
+{{- .Values.resultStore.persistence.existingClaim }}
+{{- else }}
+{{- printf "%s-results-store" (include "ump.fullname" .) }}
+{{- end }}
+{{- end }}

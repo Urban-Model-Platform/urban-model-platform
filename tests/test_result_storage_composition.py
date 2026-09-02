@@ -20,6 +20,7 @@ from ump.composition.result_storage import (
     build_result_storage_port,
     ensure_ldproxy_bootstrapped,
     ldproxy_required,
+    resolve_confirm_budget,
 )
 from ump.core.interfaces.result_storage import NullResultStorage
 from ump.core.settings import UmpSettings
@@ -95,6 +96,35 @@ class TestBuildEntityConfigBackend:
         settings = _settings(UMP_RESULTSTORE_CONFIG_BACKEND="carrier-pigeon")
         with pytest.raises(ValueError, match="carrier-pigeon"):
             build_entity_config_backend(settings)
+
+
+# --- resolve_confirm_budget ------------------------------------------------
+
+
+class TestResolveConfirmBudget:
+    """The one operational difference between the two backends (V-13e).
+
+    With the k8s backend an entity reaches ldproxy's disk only when the kubelet
+    resyncs the mounted ConfigMap (~60 s), so a budget tuned for the filesystem
+    watcher's seconds-scale reload would have V-11's gate fail every job while
+    its collection is merely still in transit.
+    """
+
+    def test_k8s_budget_covers_kubelet_propagation(self):
+        fs = resolve_confirm_budget(
+            _settings(UMP_RESULTSTORE_CONFIG_BACKEND="filesystem")
+        )
+        k8s = resolve_confirm_budget(_settings(UMP_RESULTSTORE_CONFIG_BACKEND="k8s"))
+        assert _worst_case_seconds(k8s) > 120
+        assert _worst_case_seconds(k8s) > _worst_case_seconds(fs)
+
+
+def _worst_case_seconds(budget) -> float:
+    """Upper bound on how long the adapter will keep confirming."""
+    return sum(
+        min(budget.base_wait * 2**attempt, budget.max_wait)
+        for attempt in range(budget.max_attempts)
+    )
 
 
 # --- build_result_storage_port --------------------------------------------

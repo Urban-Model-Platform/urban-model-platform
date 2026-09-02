@@ -18,7 +18,7 @@ from ump.adapters.result_storage.entity_config_fs import (
 
 @pytest.fixture
 def backend(tmp_path):
-    return FilesystemEntityConfigBackend(tmp_path)
+    return FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
 
 
 # ---------------------------------------------------------------------------

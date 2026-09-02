@@ -79,7 +79,7 @@ class LdproxyResultStorage(ResultStoragePort):
         self,
         backend: EntityConfigBackendPort,
         service_registry: ServiceRegistry,
-        root_path: str | Path,
+        gpkg_path: str | Path,
         base_url: str,
         native_crs_epsg: int = 4326,
         service_id: str = "ump-results",
@@ -90,7 +90,11 @@ class LdproxyResultStorage(ResultStoragePort):
     ) -> None:
         self._backend = backend
         self._registry = service_registry
-        self._root = Path(root_path)
+        # Directory that holds every {job}.gpkg and {job}.manifest.json. It is
+        # the ldproxy store's `resources/features` by default (that is where
+        # ldproxy resolves a provider's `database:` from), but it is injected
+        # as a finished path so this adapter never derives store layout itself.
+        self._gpkg_dir = Path(gpkg_path)
         # Normalise once so URL construction never produces a double slash.
         self._base_url = base_url.rstrip("/")
         self._native_crs = native_crs_epsg
@@ -265,7 +269,7 @@ class LdproxyResultStorage(ResultStoragePort):
         never registered as a collection, so it stays invisible under
         ``/collections``.
         """
-        seed_path = self._root / "resources" / "features" / DEFAULT_PROVIDER_DATABASE
+        seed_path = self._gpkg_dir / DEFAULT_PROVIDER_DATABASE
         seed_path.parent.mkdir(parents=True, exist_ok=True)
         if not seed_path.exists():
             await asyncio.to_thread(write_seed_gpkg, seed_path, self._native_crs)
@@ -289,12 +293,12 @@ class LdproxyResultStorage(ResultStoragePort):
     def _gpkg_path(self, job_id: str) -> Path:
         # ldproxy resolves the provider's `database: {job_id}.gpkg` relative to
         # its `resources/features/` directory, so the file must live here.
-        return self._root / "resources" / "features" / f"{job_id}.gpkg"
+        return self._gpkg_dir / f"{job_id}.gpkg"
 
     def _manifest_path(self, job_id: str) -> Path:
         # Kept next to the GeoPackage — same directory, same always-on-the-
         # filesystem guarantee, regardless of the configured entity backend.
-        return self._root / "resources" / "features" / f"{job_id}.manifest.json"
+        return self._gpkg_dir / f"{job_id}.manifest.json"
 
     def _write_manifest(self, job_id: str, output_ids: list[str]) -> None:
         path = self._manifest_path(job_id)

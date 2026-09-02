@@ -1,0 +1,31 @@
+{{- with .Values.resultStore }}
+{{- if and .enabled .persistence.enabled (not .persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "ump.resultStorePvcName" $ }}
+  labels:
+    {{- include "ump.labels" $ | nindent 4 }}
+    {{- with .persistence.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- range .persistence.accessModes }}
+    - {{ . | quote }}
+    {{- end }}
+  resources:
+    requests:
+      storage: {{ .persistence.size | quote }}
+  {{- with .persistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .persistence.volumeName }}
+  volumeName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -39,7 +39,7 @@ def _payload(output_id: str, n: int = 2) -> ResultPayload:
 
 
 def _make_storage(tmp_path, backend=None, **kwargs) -> LdproxyResultStorage:
-    backend = backend or FilesystemEntityConfigBackend(tmp_path)
+    backend = backend or FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
     registry = ServiceRegistry(backend, service_id="ump-results")
     # Default the post-store publication-confirmation to a no-op in tests: no
     # ldproxy is running, so there is nothing to probe or wait for. Individual
@@ -49,7 +49,7 @@ def _make_storage(tmp_path, backend=None, **kwargs) -> LdproxyResultStorage:
     return LdproxyResultStorage(
         backend=backend,
         service_registry=registry,
-        root_path=tmp_path,
+        gpkg_path=tmp_path / "resources" / "features",
         base_url=BASE_URL,
         **params,
     )
@@ -280,12 +280,12 @@ class TestEnsureDefaultProvider:
 
     @pytest.mark.asyncio
     async def test_respects_custom_service_id(self, tmp_path):
-        backend = FilesystemEntityConfigBackend(tmp_path)
+        backend = FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
         registry = ServiceRegistry(backend, service_id="custom-svc")
         storage = LdproxyResultStorage(
             backend=backend,
             service_registry=registry,
-            root_path=tmp_path,
+            gpkg_path=tmp_path / "resources" / "features",
             base_url=BASE_URL,
             service_id="custom-svc",
         )

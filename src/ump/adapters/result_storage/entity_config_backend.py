@@ -27,8 +27,9 @@ lost.  Rather than bolt an external lock onto every environment, we let each
 backend use the concurrency primitive it already has:
 
   * Kubernetes gives every ConfigMap a ``resourceVersion``;
-  * the filesystem backend derives a cheap version token from the file's
-    modification time.
+  * the filesystem backend derives a version token from a hash of the file's
+    content (a modification time can be too coarse to distinguish rapid
+    successive writes).
 
 Both express the same contract through ``read_service_entity`` /
 ``write_service_entity``: read returns the current ``(text, version)``; write

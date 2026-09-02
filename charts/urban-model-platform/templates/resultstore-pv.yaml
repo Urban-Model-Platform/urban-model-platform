@@ -1,0 +1,35 @@
+{{- with .Values.resultStore }}
+{{- if and .enabled .persistence.enabled .persistence.pv.enabled }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .persistence.pv.name | default (printf "%s-results-store" (include "ump.fullname" $)) }}
+  labels:
+    {{- include "ump.labels" $ | nindent 4 }}
+    {{- with .persistence.pv.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .persistence.pv.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  capacity:
+    storage: {{ .persistence.pv.capacity | quote }}
+  accessModes:
+    {{- range .persistence.pv.accessModes }}
+    - {{ . | quote }}
+    {{- end }}
+  persistentVolumeReclaimPolicy: {{ .persistence.pv.reclaimPolicy | quote }}
+  {{- with .persistence.pv.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .persistence.pv.hostPath }}
+  hostPath:
+    path: {{ . | quote }}
+    type: DirectoryOrCreate
+  {{- else }}
+  {{- fail "resultStore.persistence.pv.hostPath must be set when resultStore.persistence.pv.enabled is true" }}
+  {{- end }}
+{{- end }}
+{{- end }}

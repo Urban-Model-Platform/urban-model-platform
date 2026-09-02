@@ -32,7 +32,8 @@ discussion this codifies):
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import NamedTuple, Optional
 
 from ump.adapters.result_storage.entity_config_backend import EntityConfigBackendPort
 from ump.adapters.result_storage.entity_config_fs import FilesystemEntityConfigBackend
@@ -43,6 +44,14 @@ from ump.core.interfaces.result_storage import NullResultStorage, ResultStorageP
 from ump.core.settings import UmpSettings
 
 logger = logging.getLogger(__name__)
+
+
+class ConfirmBudget(NamedTuple):
+    """How long to keep re-checking that a stored collection went live."""
+
+    max_attempts: int
+    base_wait: float
+    max_wait: float
 
 
 def _require(value: Optional[str], setting_name: str) -> str:
@@ -62,6 +71,37 @@ def _require(value: Optional[str], setting_name: str) -> str:
             f"{setting_name} must be set when result-storage: ldproxy is in use."
         )
     return value
+
+
+def resolve_gpkg_path(settings: UmpSettings) -> str:
+    """Directory the per-job GeoPackages (+ manifests) are written to.
+
+    Defaults to ``{ROOTPATH}/resources/features`` because that is where
+    ldproxy resolves a provider's ``database: {job}.gpkg`` from.  Operators can
+    override it, but it must stay inside the store root the ldproxy instance
+    mounts, or ldproxy cannot open the data.
+    """
+    if settings.UMP_RESULTSTORE_GPKG_PATH:
+        return settings.UMP_RESULTSTORE_GPKG_PATH
+    root = _require(
+        settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH, "UMP_RESULTSTORE_LDPROXY_ROOTPATH"
+    )
+    return str(Path(root) / "resources" / "features")
+
+
+def resolve_entities_path(settings: UmpSettings) -> str:
+    """Directory the ldproxy entity YAMLs are written to (filesystem backend).
+
+    ``providers/`` and ``services/`` are created underneath it.  Defaults to
+    ``{ROOTPATH}/entities/instances``, the layout ldproxy scans.  Irrelevant
+    under the ``k8s`` backend, where entities are ConfigMaps.
+    """
+    if settings.UMP_RESULTSTORE_ENTITIES_PATH:
+        return settings.UMP_RESULTSTORE_ENTITIES_PATH
+    root = _require(
+        settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH, "UMP_RESULTSTORE_LDPROXY_ROOTPATH"
+    )
+    return str(Path(root) / "entities" / "instances")
 
 
 def ldproxy_required(providers: ProvidersPort) -> bool:
@@ -91,11 +131,7 @@ def build_entity_config_backend(settings: UmpSettings) -> EntityConfigBackendPor
     backend_name = settings.UMP_RESULTSTORE_CONFIG_BACKEND
 
     if backend_name == "filesystem":
-        root_path = _require(
-            settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH,
-            "UMP_RESULTSTORE_LDPROXY_ROOTPATH",
-        )
-        return FilesystemEntityConfigBackend(root_path)
+        return FilesystemEntityConfigBackend(resolve_entities_path(settings))
 
     if backend_name == "k8s":
         # Imported lazily inside the module itself (see entity_config_k8s
@@ -111,13 +147,36 @@ def build_entity_config_backend(settings: UmpSettings) -> EntityConfigBackendPor
         return K8sConfigMapEntityConfigBackend(
             namespace=namespace,
             service_configmap=settings.UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP,
-            provider_cm_prefix=settings.UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX,
+            provider_configmap=settings.UMP_RESULTSTORE_K8S_PROVIDER_CONFIGMAP,
         )
 
     raise ValueError(
         f"Unknown UMP_RESULTSTORE_CONFIG_BACKEND={backend_name!r}; "
         "expected 'filesystem' or 'k8s'."
     )
+
+
+# How long ``LdproxyResultStorage`` keeps re-touching the service entity until
+# it can confirm a collection is live.  This is the one place where the two
+# backends differ *operationally* rather than structurally, so the composition
+# root — which is the only layer that knows which backend was selected — sets
+# it; the adapter itself stays backend-agnostic and just consumes the budget.
+#
+# filesystem: ldproxy's store watcher reloads within seconds  -> ~25 s is ample.
+# k8s:        the kubelet only syncs mounted ConfigMaps about once a minute, so
+#             the entity does not even reach ldproxy's disk for up to ~60 s;
+#             the budget must cover that plus the reload, or every job would be
+#             failed by V-11's gate while its collection is merely still in
+#             transit.
+_CONFIRM_BUDGETS = {
+    "filesystem": ConfirmBudget(max_attempts=6, base_wait=1.5, max_wait=8.0),
+    "k8s": ConfirmBudget(max_attempts=12, base_wait=2.0, max_wait=30.0),
+}
+
+
+def resolve_confirm_budget(settings: UmpSettings) -> ConfirmBudget:
+    """Publication-confirmation budget appropriate for the selected backend."""
+    return _CONFIRM_BUDGETS[settings.UMP_RESULTSTORE_CONFIG_BACKEND]
 
 
 def build_result_storage_port(
@@ -141,13 +200,11 @@ def build_result_storage_port(
         backend=backend,
         service_id=settings.UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
     )
+    budget = resolve_confirm_budget(settings)
     storage_port = LdproxyResultStorage(
         backend=backend,
         service_registry=registry,
-        root_path=_require(
-            settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH,
-            "UMP_RESULTSTORE_LDPROXY_ROOTPATH",
-        ),
+        gpkg_path=resolve_gpkg_path(settings),
         base_url=_require(
             settings.UMP_RESULTSTORE_LDPROXY_BASE_URL,
             "UMP_RESULTSTORE_LDPROXY_BASE_URL",
@@ -155,6 +212,9 @@ def build_result_storage_port(
         native_crs_epsg=settings.UMP_RESULTSTORE_LDPROXY_NATIVE_CRS,
         service_id=settings.UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
         internal_url=settings.UMP_RESULTSTORE_LDPROXY_INTERNAL_URL,
+        confirm_max_attempts=budget.max_attempts,
+        confirm_base_wait=budget.base_wait,
+        confirm_max_wait=budget.max_wait,
     )
     return storage_port, registry
 

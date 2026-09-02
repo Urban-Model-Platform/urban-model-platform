@@ -1,10 +1,10 @@
 """Filesystem implementation of ``EntityConfigBackendPort`` (dev / Docker).
 
-Writes ldproxy entity YAML as ordinary files under the mounted store root,
-following the authoritative layout::
+Writes ldproxy entity YAML as ordinary files under the injected entities
+directory (by default the store's ``entities/instances``)::
 
-    {root}/entities/instances/providers/{provider_id}.yml
-    {root}/entities/instances/services/{service_id}.yml
+    {entities}/providers/{provider_id}.yml
+    {entities}/services/{service_id}.yml
 
 Every write goes through ``atomic_write_text`` (temp file + ``os.replace``) so
 ldproxy — which watches the store — never observes a half-written file.
@@ -33,10 +33,13 @@ from ump.adapters.result_storage.entity_config_backend import (
 
 
 class FilesystemEntityConfigBackend(EntityConfigBackendPort):
-    """Persist entity YAML as files under ``root_path``."""
+    """Persist entity YAML as files under ``entities_path``."""
 
-    def __init__(self, root_path: str | Path) -> None:
-        self._root = Path(root_path)
+    def __init__(self, entities_path: str | Path) -> None:
+        # Directory that directly contains `providers/` and `services/`. It is
+        # the ldproxy store's `entities/instances` by default, but arrives here
+        # as a finished path so this backend never derives store layout itself.
+        self._entities_dir = Path(entities_path)
 
     # -- Provider entity ----------------------------------------------------
 
@@ -70,12 +73,10 @@ class FilesystemEntityConfigBackend(EntityConfigBackendPort):
     # -- Internal helpers ---------------------------------------------------
 
     def _provider_path(self, provider_id: str) -> Path:
-        base = self._root / "entities" / "instances" / "providers"
-        return base / f"{provider_id}.yml"
+        return self._entities_dir / "providers" / f"{provider_id}.yml"
 
     def _service_path(self, service_id: str) -> Path:
-        base = self._root / "entities" / "instances" / "services"
-        return base / f"{service_id}.yml"
+        return self._entities_dir / "services" / f"{service_id}.yml"
 
     def _check_version(self, path: Path, expected_version: str | None) -> None:
         """Raise ConfigConflict if the on-disk version differs from expected.

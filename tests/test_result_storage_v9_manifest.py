@@ -34,12 +34,12 @@ def _payload(output_id: str, n: int = 2) -> ResultPayload:
 
 
 def _make_storage(tmp_path, backend=None) -> LdproxyResultStorage:
-    backend = backend or FilesystemEntityConfigBackend(tmp_path)
+    backend = backend or FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
     registry = ServiceRegistry(backend, service_id="ump-results")
     return LdproxyResultStorage(
         backend=backend,
         service_registry=registry,
-        root_path=tmp_path,
+        gpkg_path=tmp_path / "resources" / "features",
         base_url=BASE_URL,
     )
 
@@ -114,12 +114,12 @@ class TestDeleteBestEffort:
     async def test_deregister_failure_does_not_block_gpkg_and_provider_cleanup(
         self, tmp_path
     ):
-        backend = FilesystemEntityConfigBackend(tmp_path)
+        backend = FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
         failing_registry = _FailingDeregisterRegistry(backend, service_id="ump-results")
         storage = LdproxyResultStorage(
             backend=backend,
             service_registry=failing_registry,
-            root_path=tmp_path,
+            gpkg_path=tmp_path / "resources" / "features",
             base_url=BASE_URL,
         )
         await storage.store(JOB_ID, [_payload("voronoi")])

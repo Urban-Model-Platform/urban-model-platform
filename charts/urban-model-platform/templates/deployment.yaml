@@ -49,6 +49,10 @@ spec:
               mountPath: /tmp
             - name: providers-volume
               mountPath: {{ .Values.config.providersFileMountPath | quote }}
+            {{- if and .Values.resultStore.enabled .Values.resultStore.persistence.enabled }}
+            - name: results-store
+              mountPath: {{ required "resultStore.rootPath is required when resultStore.enabled is true" .Values.resultStore.rootPath | quote }}
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -134,6 +138,11 @@ spec:
           {{- else }}
             name: {{ .Values.providers.existingConfigMap.name }}
           {{- end }}
+        {{- if and .Values.resultStore.enabled .Values.resultStore.persistence.enabled }}
+        - name: results-store
+          persistentVolumeClaim:
+            claimName: {{ include "ump.resultStorePvcName" . }}
+        {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

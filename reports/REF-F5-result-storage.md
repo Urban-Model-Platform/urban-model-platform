@@ -288,10 +288,12 @@ unless the result declares otherwise. Documented assumption.
     `K8sConfigMapEntityConfigBackend`, which uses the official
     `kubernetes` Python client (in-cluster `ServiceAccount` credentials).
 
-    *Per-job provider entity*: each job gets its own ConfigMap named
-    `ump-ldproxy-provider-{job_uuid}` with a single data key
-    `{job_uuid}.yml`. Create-or-replace is idempotent and has no
-    concurrency conflict (one writer, one key).
+    *Provider entities* (since V-13): **one** shared ConfigMap named
+    `ump-ldproxy-providers` with one data key `{job_uuid}.yml` per job.
+    Adding/removing a job is a read-modify-write of that object, serialised by
+    an in-process lock and the API server's `resourceVersion` CAS. (Before
+    V-13 this was one ConfigMap *per job*, which the kubelet can never deliver
+    to a running pod — see V-13.)
 
     *Shared service entity* (`ump-results.yml`): stored in one ConfigMap
     named `ump-ldproxy-service`. Adding/removing a collection requires a
@@ -307,16 +309,28 @@ unless the result declares otherwise. Documented assumption.
     `delete` on `configmaps` in the ldproxy namespace. Document as a
     required Helm values addition.
 
-    *Volume mount — how ldproxy sees the ConfigMaps as files:* two viable
-    approaches, both avoid a sidecar:
+    *Volume mount — how ldproxy sees the ConfigMaps as files:* two approaches
+    were considered here, both assuming no sidecar is needed. That assumption
+    did not survive the cluster test — see *As built* under V-13: the kubelet
+    exposes ConfigMap keys as symlinks, which ldproxy's store scanner skips, so
+    an initContainer plus a projection sidecar are required after all.
 
     - **Directory volume mount** (preferred): mount the ConfigMap as a plain
       `volume` / `volumeMount` in the ldproxy pod without `subPath` (i.e.
       mount the entire ConfigMap as a directory). The kubelet sync loop
       (default every 60 s, tunable via `--sync-frequency`) automatically
       propagates updates to mounted files and also picks up new keys added
-      to an existing ConfigMap. A new provider ConfigMap created by UMP is
-      therefore picked up without any pod restart.
+      to an existing ConfigMap.
+
+      > **⚠️ Correction (2026-09-02) — see V-13.** An earlier revision
+      > concluded from this that "a new provider ConfigMap created by UMP is
+      > picked up without any pod restart". That does **not** follow: a pod's
+      > volumes are resolved by *name* at admission, so a ConfigMap **object**
+      > created at runtime never appears in a running pod — only new *keys in
+      > an already-mounted* ConfigMap do. Since this backend currently writes
+      > one ConfigMap **per job**, it cannot deliver per-job providers to
+      > ldproxy at all. V-13 fixes this by collapsing all providers into a
+      > single shared ConfigMap, one key per job.
 
     - **Pre-deployed static projected volume with pre-filled YAML literal**:
       deploy a skeleton ConfigMap for the service entity and one per
@@ -327,9 +341,12 @@ unless the result declares otherwise. Documented assumption.
       simultaneous stored results to the number of pre-allocated slots. Only
       viable if the result set is bounded and known in advance.
 
-    Recommended: **directory volume mount**. The kubelet propagation delay
-    (up to ~60 s) between ConfigMap write and ldproxy seeing the file is
-    acceptable given that result storage is a background post-completion step.
+    Recommended: **directory volume mount, combined with the single shared
+    providers ConfigMap from V-13** — the mount style alone is not sufficient,
+    the one-object-per-job layout has to go with it. The kubelet propagation
+    delay (up to ~60 s) between ConfigMap write and ldproxy seeing the file is
+    acceptable given that result storage is a background post-completion step,
+    but V-11's publication-confirmation budget must account for it.
     Document as a Kubernetes deployment prerequisite.
 
 ## Security (result access)
@@ -363,8 +380,10 @@ Settings (`src/ump/core/settings.py`):
   ConfigMaps. Required when backend is `k8s`.
 - `UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP` — name of the shared service
   ConfigMap, default `"ump-ldproxy-service"`.
-- `UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX` — name prefix for per-job provider
-  ConfigMaps, default `"ump-ldproxy-provider-"`.
+- `UMP_RESULTSTORE_K8S_PROVIDER_CONFIGMAP` — name of the **single** ConfigMap
+  holding every job's provider entity (one data key per job), default
+  `"ump-ldproxy-providers"`. Replaced the former `_PROVIDER_CM_PREFIX` in
+  V-13; see there for why one-object-per-job could never be delivered.
 
 Startup validation (Feature VIII rules, enforced at config load):
 - `emulate-ref` / `emulate-ref-only` without a configured store → **error**.
@@ -757,3 +776,208 @@ Both were prototyped in `minikube-test/chart/` (templates
 should be upstreamed into the 0.11.x chart before the AKS deployment. On AKS
 (working kube-proxy/DNS) the minikube-only `hostAliases` workaround is not
 needed — normal Service names resolve.
+
+## ✅ V-13 — Make the `k8s` backend deliverable: one shared providers ConfigMap
+
+*Requested by the user 2026-09-02. Implemented the same day.*
+
+### Why the current `k8s` backend cannot work
+
+The delivery mechanism is sound and already proven in this repo: a ConfigMap
+mounted as a **directory** appears to the pod as ordinary files, one file per
+`data` key, and the kubelet keeps that directory in sync — including **keys
+added after the pod started**. `ump-results-ldproxy` already consumes its
+`cfg.yml` exactly this way.
+
+The problem is not the mechanism but *how the current backend uses it*.
+`K8sConfigMapEntityConfigBackend` writes **one ConfigMap object per job**
+(`ump-ldproxy-provider-{job_uuid}`). A pod's volumes are resolved **by name at
+admission time**, so a ConfigMap *object* created later can never appear in a
+running pod. Only new **keys inside an already-mounted ConfigMap** propagate.
+
+**The fix follows directly:** stop creating one ConfigMap per job. Keep **one**
+providers ConfigMap and make each job a **key** inside it. Every job then
+becomes the case that *does* propagate.
+
+```
+ConfigMap ump-ldproxy-providers        mounted at entities/instances/providers/
+  data:
+    {job-a}.yml: |  <provider entity>  ->  entities/instances/providers/{job-a}.yml
+    {job-b}.yml: |  <provider entity>  ->  entities/instances/providers/{job-b}.yml
+
+ConfigMap ump-ldproxy-service          mounted at entities/instances/services/
+  data:
+    ump-results.yml: | <service entity> -> entities/instances/services/ump-results.yml
+```
+
+This is also why "all providers in one place" only works via ConfigMap keys and
+*not* by concatenating entities into a single YAML file: ldproxy requires one
+entity **per file**, and the key→file mapping is what preserves that.
+
+> **One planning assumption turned out to be wrong**, and it was load-bearing:
+> ldproxy *can* tell a ConfigMap mount from real files. The kubelet writes keys
+> into a timestamped directory and exposes each one as a **symlink**
+> (`ump-results.yml -> ..data/ump-results.yml`) to make updates atomic, and
+> ldproxy's store scanner does not follow those symlinks. Pointed at a mount
+> directly it starts without a single error, logs nothing about entities, and
+> answers **404** for every collection — the most expensive failure mode there
+> is, because everything upstream looks healthy. Isolated by mounting identical
+> ConfigMaps twice: directly (nothing loaded) and via `cp -L` (all entities
+> `AVAILABLE`). The delivery mechanism survives, but it needs the projection
+> described in *As built* below — the ConfigMaps are the **transport**, the PVC
+> holds the **state**.
+
+### As built (verified on a real cluster, 2026-09-02)
+
+The PVC is the store root — the same layout the filesystem backend uses. An
+initContainer projects the ConfigMap keys onto it with `cp -L` before ldproxy's
+first scan, and a sidecar repeats that every 5 s, copying only when content
+actually differs so the store watcher fires once per publication rather than on
+every tick. Two details are load-bearing:
+
+* **temp-file + `mv`**, mirroring the filesystem backend's `os.replace`. A plain
+  `cp` is not atomic, so ldproxy's watcher could read a half-written YAML and
+  reject the entity — a real hazard once several replicas' sidecars write the
+  same RWX volume.
+* **never delete while the source is empty.** An empty ConfigMap mount is
+  ambiguous: "all jobs deleted" *or* "ConfigMap gone / RBAC revoked / not
+  bootstrapped yet" (`optional: true` mounts an empty directory in every one of
+  those cases). Only one reading is recoverable, so deletion is skipped while
+  the source is empty. Stale entities are harmless — their collection is no
+  longer listed in the service entity.
+
+Because the state lives on the PVC, ldproxy restarts from it alone, needing
+neither the k8s API nor the sidecar.
+
+| # | Test | Result |
+|---|---|---|
+| 1 | Baseline publication | `numberMatched: 50` |
+| 2 | **Restart with both ConfigMaps deleted** | serves from PVC — 50 |
+| 3 | Guard under empty source | entities intact, warn logged once |
+| 4 | ConfigMaps restored | reconciled, no damage |
+| 5 | Key added to a *running* ldproxy | `AVAILABLE`, no restart, ~60 s |
+| 6 | Key removed | file removed from store |
+
+Tests 3 and 6 are the pair that matters — either alone would be worthless;
+together they prove the guard distinguishes a missing source from a real
+deletion. The ~60 s in test 5 is the kubelet's sync period, not the sidecar's,
+and is exactly what the enlarged `k8s` confirmation budget absorbs.
+See `minikube-test/manifests/31-ldproxy-results-k8s-backend.yaml`.
+
+> **Storage note.** ConfigMaps live in **etcd**, never on the PVC. Both backends
+> need the RWX PVC regardless, because GeoPackages can never be ConfigMap
+> content — so `k8s` does not replace the shared volume, it adds a second
+> mechanism alongside it.
+
+
+### The concurrency consequence — and why no queue is needed
+
+Today a provider entity has exactly **one writer** (its own job), which is why
+`write_provider_entity` carries no version token. Collapsing all providers into
+one object **removes that property**: every completing job now read-modify-
+writes the same ConfigMap, reintroducing the lost-update hazard that
+`ServiceRegistry` already solves for the service entity.
+
+A queue (a single serialising worker) would work but is the wrong tool here:
+it adds a component that must itself be HA, becomes a throughput bottleneck,
+and would have to survive restarts to avoid losing registrations. The contended
+resource already offers **atomic compare-and-swap** via `resourceVersion` — so
+the established two-layer model is both simpler and strictly more available:
+
+1. **`asyncio.Lock`** — serialises coroutines *within* one pod, so the common
+   case costs zero retries.
+2. **`resourceVersion` CAS** — the API server rejects a stale write with 409;
+   the writer re-reads, re-applies its mutation, and retries with bounded
+   backoff + jitter.
+
+This is exactly the mechanism in [service_registry.py](src/ump/adapters/result_storage/service_registry.py#L1-L23),
+so V-13 introduces **no new concurrency concept** — it extends an existing,
+tested one to a second resource.
+
+### Architectural placement (hexagonal)
+
+**The port does not change.** `write_provider_entity(provider_id, yaml_text)`
+stays idempotent and version-free, because "one ConfigMap per job" vs. "one key
+per job" is a *persistence detail* — precisely what `EntityConfigBackendPort`
+exists to hide. The read-modify-write retry loop lives **inside the k8s
+adapter**. Nothing in the core, the coordinator, `LdproxyResultStorage`, or the
+filesystem backend is touched.
+
+Two adapter-internal pieces:
+
+- **`_ConfigMapMutator`** (new, private to the k8s adapter) — generic
+  "read → mutate `data` dict → replace with `resourceVersion` → retry on 409".
+  Both the providers ConfigMap and the service ConfigMap use it, so the retry
+  policy exists once.
+- **`K8sConfigMapEntityConfigBackend`** — `write_provider_entity` /
+  `delete_provider_entity` become a key upsert / key removal through that
+  mutator, plus an in-process `asyncio.Lock` mirroring `ServiceRegistry`'s
+  layer 1.
+
+### Hard limits this design must enforce
+
+| Limit | Consequence | Mitigation |
+|---|---|---|
+| **etcd object ≈ 1 MiB** | caps the *total* of all concurrently published providers — measured at 929 B per entity, the 900 000 B guard allows ~968 | check the serialised size before write; raise a distinct `ResultStorageError` naming the cap instead of letting the API reject it opaquely |
+| **Whole object rewritten per job** | write cost grows linearly with stored jobs | V-9 cleanup already removes expired jobs' keys; document the cap as an operational bound |
+| **Kubelet sync ≈ 60 s** | a collection is not queryable immediately after store | V-11's `_confirm_publication` budget must be raised for this backend (currently tuned for the filesystem watcher's seconds-scale reload) |
+
+### Implementation steps
+
+| # | Step | Notes |
+|---|---|---|
+| ~~V-13a~~ | ~~Add `UMP_RESULTSTORE_K8S_PROVIDER_CONFIGMAP` (default `ump-ldproxy-providers`)~~ ✅ done. `_PROVIDER_CM_PREFIX` was **removed**, not deprecated: it names a layout that provably cannot work, so leaving it configurable would only preserve a way to misconfigure the deployment. | |
+| ~~V-13b~~ | ~~Extract `_ConfigMapMutator` (read → mutate → CAS → bounded retry + jitter)~~ ✅ done. Both ConfigMaps share it, but only the providers object uses `mutate()`; the service entity uses `write()`, which deliberately does **not** retry — its version token is part of the port contract, so `ConfigConflict` must reach `ServiceRegistry`, which owns that retry. A 404 on write is now also mapped to `ConfigConflict` (the object was deleted between read and write — a conflict, not an outage). | |
+| ~~V-13c~~ | ~~Rewrite provider methods as key upsert/removal via the mutator + lock~~ ✅ done. **Deviation from the plan: `threading.Lock`, not `asyncio.Lock`.** `EntityConfigBackendPort` is synchronous and `LdproxyResultStorage` calls it through `asyncio.to_thread`, so contending writers are genuine OS threads — an asyncio primitive would have protected nothing. (`ServiceRegistry` is async and correctly keeps its `asyncio.Lock`.) Port signature unchanged, as planned. | |
+| ~~V-13d~~ | ~~Size guard against the etcd limit, with an explicit error~~ ✅ done at 900 000 bytes, measured on the **whole object** (not the single entity), because that is what etcd enforces; the error names the cap and points at the two ways out (shorter retention, or the filesystem backend). | |
+| ~~V-13e~~ | ~~Raise the publication-confirmation budget when backend is `k8s`~~ ✅ done — but in the **composition root**, not the adapter (`resolve_confirm_budget`). The budget was already constructor-injected, and the composition root is the only layer that knows which backend was chosen, so the adapter stays backend-agnostic. filesystem ≈ 25 s, k8s ≈ 240 s. | |
+| ~~V-13f~~ | ~~Chart: mounts + RBAC~~ ✅ done, with one addition the plan missed: **the chart must not create either ConfigMap.** An absent service ConfigMap is UMP's "not bootstrapped yet" signal, and Helm owning objects UMP mutates would reset every published result on the next `helm upgrade`. The ldproxy pod therefore mounts both with `optional: true`. RBAC is `resourceNames`-scoped to the two objects (only `create` must stay collection-wide — the API server evaluates authorization before the object name exists). See `templates/resultstore-rbac.yaml` and `minikube-test/manifests/31-ldproxy-results-k8s-backend.yaml`. | |
+| ~~V-13g~~ | ~~Concurrency, size-guard and idempotency tests~~ ✅ done (`tests/test_result_storage_v5b.py`, 23 tests). Two notes: (1) the cross-replica lost-update proof is **deterministic** — a 409 is injected while another replica slips its key in, because real thread interleaving against an in-memory fake is too coarse to reliably produce a conflict, and a timing-dependent assertion would have been flaky rather than rigorous; (2) the tests **found a bug**: `delete_provider_entity` created an empty ConfigMap on a fresh cluster, because the no-op short-circuit additionally required the object to already exist. | |
+
+### Discovered during implementation
+
+**The mutation must be idempotent, not merely correct once.** `_ConfigMapMutator`
+re-runs the caller's mutation against the *freshly read* document on every retry
+(rather than re-sending the document it first computed). That is the whole
+difference between a CAS that resolves conflicts and one that merely detects
+them: a writer that re-sent its stale document would silently drop the key
+another replica added in between — the exact lost update this design exists to
+prevent. It is what the deterministic conflict test pins.
+
+**A no-op write is not free.** Every write of the shared providers ConfigMap
+costs a kubelet resync for the ldproxy pod, so re-storing an unchanged job
+must not bump `resourceVersion`. `mutate()` short-circuits when the mutation
+leaves the data map unchanged, which also makes V-9's unconditional cleanup
+cost a single GET.
+
+### When this is worth doing
+
+V-13's only real gain is **multi-replica ump-api**: the API server becomes a
+cluster-wide serialisation point, which the filesystem backend's in-process
+lock cannot provide. Everything else gets harder — ~60 s publication latency,
+RBAC, an initContainer plus sidecar on the ldproxy side, and two delivery
+mechanisms (PVC *and* ConfigMaps) instead of one.
+
+Both backends are now validated end-to-end on a real cluster, `k8s` via the six
+tests above plus 23 unit tests (cross-replica lost-update and size-guard proofs)
+and `helm template`/`helm lint` for both variants. For a single-replica
+deployment the `filesystem` backend on the shared RWX PVC remains the better
+choice: it needs none of the above and has no capacity ceiling.
+
+**Operational caveat for `k8s`.** The providers ConfigMap is self-limiting only
+because retention cleanup removes each key — verified chain:
+`PeriodicTaskRunner._loop` → `JobCleanupService.run_once` → `_delete_one` →
+`LdproxyResultStorage.delete` → `delete_provider_entity`, which drops the key
+unconditionally, even when deregistering the collection failed first (the
+cleanup service is that port method's only caller). But
+`UMP_JOB_DELETE_INTERVAL_AUTHENTICATED` defaults to `None`, so jobs of
+authenticated users are never auto-deleted and their entities never removed —
+on a mostly-authenticated deployment the ConfigMap then grows monotonically
+towards the hard cap. Operators choosing `configBackend: k8s` should set that
+interval deliberately rather than leave it at the default.
+
+**Not in the chart, by design.** ldproxy has its own lifecycle — it outlives UMP
+upgrades and is often shared — so the ump-api chart does not deploy it. The
+price is that the projection above (initContainer, sidecar, `store.watch: true`)
+becomes operator knowledge, and the failure mode when it is missing is a silent
+404. Manifest 31 is the reference implementation.

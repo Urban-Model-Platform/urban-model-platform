@@ -34,6 +34,10 @@ data:
   {{- end }}
   UMP_RESULTSTORE_CONFIG_BACKEND: {{ $backend | quote }}
   UMP_RESULTSTORE_LDPROXY_ROOTPATH: {{ required "resultStore.rootPath is required when resultStore.enabled is true" .rootPath | quote }}
+  # Both directories live on the shared result-store PVC mounted at rootPath,
+  # laid out exactly as the ldproxy instance expects to find them.
+  UMP_RESULTSTORE_GPKG_PATH: {{ .gpkgPath | default (printf "%s/resources/features" .rootPath) | quote }}
+  UMP_RESULTSTORE_ENTITIES_PATH: {{ .entitiesPath | default (printf "%s/entities/instances" .rootPath) | quote }}
   UMP_RESULTSTORE_LDPROXY_BASE_URL: {{ required "resultStore.baseUrl is required when resultStore.enabled is true" .baseUrl | quote }}
   {{- with .internalUrl }}
   UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: {{ . | quote }}
@@ -44,7 +48,10 @@ data:
   {{- $k8s := .k8s | default dict }}
   UMP_RESULTSTORE_K8S_NAMESPACE: {{ $k8s.namespace | default $.Release.Namespace | quote }}
   UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP: {{ $k8s.serviceConfigMap | default "ump-ldproxy-service" | quote }}
-  UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX: {{ $k8s.providerCmPrefix | default "ump-ldproxy-provider-" | quote }}
+  # ONE ConfigMap holds every job's provider entity, one data key per job: a pod
+  # resolves volumes by name at admission, so a ConfigMap created per job could
+  # never reach a running ldproxy — only new keys in a mounted one propagate.
+  UMP_RESULTSTORE_K8S_PROVIDER_CONFIGMAP: {{ $k8s.providerConfigMap | default "ump-ldproxy-providers" | quote }}
   {{- end }}
   {{- end }}
   {{- end }}

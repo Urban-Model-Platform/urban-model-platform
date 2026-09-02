@@ -178,11 +178,28 @@ class UmpSettings(BaseSettings):
     # the post-store settle degrades to a single best-effort re-touch.
     UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: str | None = None
 
-    # Path to the ldproxy store root on the shared filesystem (Azure File Share
-    # in production, a local directory in development).  GeoPackage files and,
-    # when the filesystem backend is used, entity YAML files are written here.
-    # Required when any process uses result-storage: ldproxy.
+    # Root of the ldproxy store on the shared filesystem (Azure File Share in
+    # production, a local directory in development).
+    #
+    # Nothing is written to this path directly — it is the *mount point* of the
+    # shared volume and the base the two directories below default to, so it
+    # must be identical to the store root the ldproxy instance reads (its
+    # --data-dir in 4.x).  Required when any process uses result-storage:
+    # ldproxy, unless both directories below are set explicitly.
     UMP_RESULTSTORE_LDPROXY_ROOTPATH: str | None = None
+
+    # Directory holding the per-job GeoPackages and their manifest sidecars.
+    # ldproxy resolves a provider's `database: {job}.gpkg` relative to its own
+    # `resources/features/`, so the default is exactly that — overriding it
+    # with a path outside the store root will make ldproxy fail to open the
+    # data.  Defaults to `{ROOTPATH}/resources/features`.
+    UMP_RESULTSTORE_GPKG_PATH: str | None = None
+
+    # Directory holding the ldproxy entity YAMLs, with `providers/` and
+    # `services/` underneath it.  Only used by the 'filesystem' config backend;
+    # under the 'k8s' backend the entities are ConfigMaps and this is ignored.
+    # Defaults to `{ROOTPATH}/entities/instances`.
+    UMP_RESULTSTORE_ENTITIES_PATH: str | None = None
 
     # EPSG code for the default native CRS used in generated ldproxy provider
     # entities.  OGC GeoJSON is WGS84 by RFC 7946, so 4326 is the right default.
@@ -196,7 +213,7 @@ class UmpSettings(BaseSettings):
     UMP_RESULTSTORE_LDPROXY_SERVICE_ID: str = "ump-results"
 
     # Where entity YAML files (ldproxy provider + service configs) are written.
-    # 'filesystem': write directly to UMP_RESULTSTORE_LDPROXY_ROOTPATH (dev/Docker).
+    # 'filesystem': write files under UMP_RESULTSTORE_ENTITIES_PATH (dev/Docker).
     # 'k8s': create/patch Kubernetes ConfigMaps via the k8s API (production).
     UMP_RESULTSTORE_CONFIG_BACKEND: str = "filesystem"
 
@@ -205,8 +222,12 @@ class UmpSettings(BaseSettings):
     UMP_RESULTSTORE_K8S_NAMESPACE: str | None = None
     # Name of the ConfigMap holding the shared ump-results service entity.
     UMP_RESULTSTORE_K8S_SERVICE_CONFIGMAP: str = "ump-ldproxy-service"
-    # Prefix for per-job provider ConfigMap names (suffix is the job UUID).
-    UMP_RESULTSTORE_K8S_PROVIDER_CM_PREFIX: str = "ump-ldproxy-provider-"
+    # Name of the *single* ConfigMap holding every job's provider entity, one
+    # data key `{job}.yml` per job.  It must be one shared object rather than
+    # one per job: a pod resolves its volumes by name at admission time, so a
+    # ConfigMap created after ldproxy started could never appear in it — only
+    # new keys inside an already-mounted ConfigMap propagate (see V-13).
+    UMP_RESULTSTORE_K8S_PROVIDER_CONFIGMAP: str = "ump-ldproxy-providers"
 
     # ── Result value cache ────────────────────────────────────────────────────
     # Short-lived, per-replica cache for the *inline* value outputs of a job.

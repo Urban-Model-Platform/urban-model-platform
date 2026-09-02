@@ -75,7 +75,12 @@ def _validate_resultstore_settings() -> None:
     missing: list[str] = []
     if not app_settings.UMP_RESULTSTORE_LDPROXY_BASE_URL:
         missing.append("UMP_RESULTSTORE_LDPROXY_BASE_URL")
-    if not app_settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH:
+    if not app_settings.UMP_RESULTSTORE_LDPROXY_ROOTPATH and not (
+        app_settings.UMP_RESULTSTORE_GPKG_PATH
+        and app_settings.UMP_RESULTSTORE_ENTITIES_PATH
+    ):
+        # ROOTPATH is the shared-volume mount point both store directories are
+        # derived from; it is only dispensable if both are set explicitly.
         missing.append("UMP_RESULTSTORE_LDPROXY_ROOTPATH")
     if app_settings.UMP_RESULTSTORE_CONFIG_BACKEND == "k8s":
         if not app_settings.UMP_RESULTSTORE_K8S_NAMESPACE:

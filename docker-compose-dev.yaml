@@ -69,6 +69,10 @@ services:
       # ── Feature V: result storage (ldproxy) ──────────────────────────────
       # Store root shared with the ldproxy service (see ldproxy_store volume).
       UMP_RESULTSTORE_LDPROXY_ROOTPATH: /data/ldproxy-store
+      # The two directories UMP writes into, both under the shared store root.
+      # These are the defaults; shown explicitly here for discoverability.
+      UMP_RESULTSTORE_GPKG_PATH: /data/ldproxy-store/resources/features
+      UMP_RESULTSTORE_ENTITIES_PATH: /data/ldproxy-store/entities/instances
       # Public base URL clients use to fetch stored collections. ldproxy 4.x
       # serves each API at the root path `/{service-id}` (the `/rest/services`
       # prefix of 3.x was removed). Adjust host/port to your deployment.

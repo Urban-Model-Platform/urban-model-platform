@@ -148,7 +148,7 @@ class TestConcurrencyAgainstRealBackend:
         # concurrent asyncio tasks — this is the actual existence proof that
         # the lock + ConfigConflict retry loop prevent the lost-update hazard
         # instead of just asserting it in isolation.
-        backend = FilesystemEntityConfigBackend(tmp_path)
+        backend = FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
         registry = ServiceRegistry(backend, service_id=SERVICE_ID)
 
         async def register(i: int) -> None:
