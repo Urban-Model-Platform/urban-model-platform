@@ -176,3 +176,4 @@ scratch/*
 .github/workflows/copilot-instructions.md
 # Local throwaway minikube test setup (not part of the product)
 /minikube-test/
+*.tgz
