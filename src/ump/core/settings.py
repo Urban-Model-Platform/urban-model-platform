@@ -48,20 +48,6 @@ class UmpSettings(BaseSettings):
     UMP_DATABASE_PORT: int = 5432
     UMP_DATABASE_USER: str = "postgres"
     UMP_DATABASE_PASSWORD: SecretStr = SecretStr("postgres")
-    # ---- to be overhauled -----
-    # UMP_GEOSERVER_URL: HttpUrl | None = HttpUrl("http://geoserver:8080/geoserver")
-    # UMP_GEOSERVER_DB_HOST: str = "postgis"
-    # UMP_GEOSERVER_DB_PORT: int = 5432
-    # UMP_GEOSERVER_DB_NAME: str = "ump"
-    # UMP_GEOSERVER_DB_USER: str = "ump"
-    # UMP_GEOSERVER_DB_PASSWORD: SecretStr = SecretStr("ump")
-    # Internal Geoserver datastore configuration (used by Geoserver container for internal datastores)
-    # UMP_GEOSERVER_INTERNAL_DB_HOST: str = "geoserver-db"
-    # UMP_GEOSERVER_INTERNAL_DB_PORT: int = 5432
-    # UMP_GEOSERVER_WORKSPACE_NAME: str = "UMP"
-    # UMP_GEOSERVER_USER: str = "geoserver"
-    # UMP_GEOSERVER_PASSWORD: SecretStr = SecretStr("geoserver")
-    # UMP_GEOSERVER_CONNECTION_TIMEOUT: int = 60  # seconds
     # ---------------------------
     # Retention period (minutes) after which a *finished* job is eligible for
     # cleanup (V-9). Applies to anonymous jobs (user_id IS NULL) — unchanged
