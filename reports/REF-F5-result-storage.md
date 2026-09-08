@@ -981,3 +981,120 @@ upgrades and is often shared — so the ump-api chart does not deploy it. The
 price is that the projection above (initContainer, sidecar, `store.watch: true`)
 becomes operator knowledge, and the failure mode when it is missing is a silent
 404. Manifest 31 is the reference implementation.
+
+## ⚠️ Known gap (2026-09-07) — enabling `ldproxy` on a process is not hot-reloadable, and fails silently if attempted
+
+Found during a deployment-readiness audit, not yet fixed.
+
+`providers.yaml` is hot-reloaded at runtime (`ProviderConfigFileAdapter`'s file
+watcher), but *which* result-storage backend is wired — `NullResultStorage`
+versus `LdproxyResultStorage`, and whether a `ServiceRegistry` even exists — is
+decided exactly once, at process startup, by `ldproxy_required(providers_port)`
+in `ump/asgi.py`. If UMP starts with no process configured for
+`result-storage: ldproxy`, `result_storage_port` stays `NullResultStorage` for
+that worker's entire lifetime, no matter what `providers.yaml` says afterwards.
+
+Flipping a process to `result-storage: ldproxy` after startup is not caught by
+any guard: `ResultStorageCoordinator.should_store()` decides purely from
+`transmission_mode_policy` + client intent, independent of which storage port
+is actually wired, so it still returns `True`. `NullResultStorage.store()` is a
+silent no-op returning `[]`, so `coordinate()` reports nothing failed, and the
+job is finalized `successful` with `stored_outputs` empty — the client silently
+gets the inline value instead of the reference it was promised. No error, no
+diagnostic, nothing an operator would notice.
+
+Intended (but undocumented until now) order of operations: enable
+`resultStore` at the UMP/chart level (which requires a restart to actually
+build the ldproxy backend) *before* pointing any process at
+`result-storage: ldproxy`. Doing it the other way round, or changing it live
+without a restart, currently degrades silently instead of failing loudly.
+Possible future fix: a guard in `should_store`/`coordinate` that raises when
+`should_store_reference` is `True` but the wired port is `NullResultStorage`,
+turning the silent downgrade into an honest V-11 `failed` — not implemented.
+
+**Are `transmission-mode-policy` / `response-mode-policy` coupled the same way?**
+No — checked, and they are structurally different from the gap above.
+`ProcessConfig.check_policy_consistency` (hard) and `.policy_warnings()` (soft)
+run on every model construction, and `ProviderConfigFileAdapter.load_providers()`
+calls `policy_warnings()` again after every hot reload, not just at startup —
+confirmed in `src/ump/adapters/provider_config_file_adapter.py`. At runtime,
+`ResultStorageCoordinator.should_store()` reads the current `process_config`
+fresh on every job completion, so changing `transmission-mode-policy` live
+already takes effect immediately with no restart. Unlike `ldproxy_required()`,
+nothing about these two fields is decided once and cached for the worker's
+lifetime.
+
+That said, the existing warning ("result-storage is configured but will never
+be used because transmission-mode-policy does not activate the store") does
+**not** cover the gap above — it fires for the opposite misconfiguration
+(policy left inactive while a store is configured). In the actual gap scenario
+the operator sets `transmission-mode-policy: emulate-ref` correctly (matching
+their intent), so no warning fires; the failure is silent precisely because
+policy and port-wiring are checked by two completely independent mechanisms
+that happen to agree in the common case (both configured together, at
+startup) and silently disagree in the hot-reload case.
+
+**Open point — replace implicit activation with an explicit setting.** Today
+"is ldproxy active at all" is derived implicitly, twice, from unrelated
+signals: the Helm chart only *renders* `UMP_RESULTSTORE_*` when
+`resultStore.enabled` is true (a chart-only conditional, invisible to UMP),
+while UMP itself re-derives the same yes/no via `ldproxy_required()` scanning
+`providers.yaml` content at startup. Neither one is the actual source of
+truth for the other, which is exactly how the gap above can occur. A cleaner
+design: add an explicit `UMP_RESULTSTORE_ENABLED: bool = False` setting that
+is the single, static, restart-bound switch for whether the real
+`LdproxyResultStorage` + `ServiceRegistry` are constructed at all —
+independent of which (if any) processes currently reference `ldproxy` in
+`providers.yaml`. The chart would set it 1:1 from `resultStore.enabled`
+instead of relying on the presence/absence of rendered env vars as an
+implicit signal. Once the backend's existence no longer depends on scanning
+provider content, `result-storage: ldproxy` on a process becomes a pure,
+already-hot-reloadable policy switch (see above) with no silent-downgrade
+risk — closing this gap and enabling true hot activation/deactivation per
+process as a side effect, without any hot-swapping of the storage port or
+`ServiceRegistry` object itself. Not implemented; noted here for a future
+pass.
+
+## ⚠️ Operational note (2026-09-08) — GeoPackage writes fail on SMB-mounted Azure Files (`azurefile-csi`)
+
+Found in a real AKS deployment: `ensure_ldproxy_bootstrapped` logged
+`"could not bootstrap the shared ldproxy service entity at startup ...:
+Failed to start transaction"` and **neither** ldproxy ConfigMap was created.
+
+**Root cause.** `ensure_default_provider` (`ldproxy_result_storage.py`) writes
+the seed GeoPackage *before* the provider entity and before
+`ServiceRegistry.ensure_bootstrapped()` — all three run inside the single
+`try/except` in `ensure_ldproxy_bootstrapped`, so a failure in the first step
+(the gpkg write) skips the rest entirely, which is why both ConfigMaps were
+missing. The seed write goes through `geopandas`/`pyogrio` → GDAL's SQLite-
+based GPKG driver, which issues a `BEGIN` transaction requiring POSIX file
+locking. "Failed to start transaction" is that driver's own error when the
+underlying filesystem cannot provide it — SQLite explicitly documents that it
+is not reliable over network filesystems. The deployment's
+`resultStore.persistence.storageClassName` was `azurefile-csi` (SMB/CIFS by
+default), which does not support the locking semantics SQLite needs — the
+same GDAL/SQLite write path every real `store()` call uses, so this is not
+limited to the startup bootstrap.
+
+**Options considered:** switch the Azure Files share to NFS protocol; move to
+Azure NetApp Files or a self-hosted NFSv4 server with a working lock manager;
+or disable CIFS byte-range locking on the mount (`nobrl`), accepting that
+lock() calls then succeed locally without being enforced by the server.
+
+**Decision: `nobrl` chosen for production, for now.** Added to the PV's
+`spec.mountOptions` (`kubectl edit pv`, since `mountOptions` is a normal,
+editable PV field even for a dynamically-provisioned volume), followed by a
+rollout restart so the volume remounts with the option. Verified with
+`mount | grep resultstore` and a manual `geopandas.to_file(..., driver="GPKG")`
+write test in a debug pod.
+
+**Known residual risk, accepted.** Per-job `.gpkg` files have exactly one
+writer each, so `nobrl`'s loss of server-side enforcement is not a concern
+there. The one real race window is `ensure_default_provider`'s
+`if not seed_path.exists(): write_seed_gpkg(...)` check — two UMP replicas
+starting at the same time could both see it missing and write concurrently.
+Mitigated operationally by pre-creating the seed GeoPackage once, out of
+band, before scaling to more than one replica, so that branch is never taken
+concurrently. Switching to NFS/ANF (removing the need for `nobrl` entirely)
+remains the more robust option for a future revisit; not pursued for now
+given the added infrastructure cost and setup complexity.
