@@ -225,6 +225,11 @@ resultStore:
   # (GeoPackages and, with configBackend=filesystem, ldproxy entity YAMLs).
   persistence:
     enabled: false
+    # Physical container path the PVC is mounted at. Defaults to resultStore.rootPath.
+    # Override when the shared fileshare's root must appear at a subdirectory of
+    # rootPath instead (e.g. to match a deeper mount constraint on the ldproxy side)
+    # while gpkgPath/entitiesPath keep deriving from rootPath as usual.
+    mountPath: ""
     # Use an already existing PVC instead of creating one.
     existingClaim: ""
     # New PVC settings (used when existingClaim is empty).

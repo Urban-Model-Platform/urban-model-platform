@@ -51,7 +51,7 @@ spec:
               mountPath: {{ .Values.config.providersFileMountPath | quote }}
             {{- if and .Values.resultStore.enabled .Values.resultStore.persistence.enabled }}
             - name: results-store
-              mountPath: {{ required "resultStore.rootPath is required when resultStore.enabled is true" .Values.resultStore.rootPath | quote }}
+              mountPath: {{ .Values.resultStore.persistence.mountPath | default (required "resultStore.rootPath is required when resultStore.enabled is true" .Values.resultStore.rootPath) | quote }}
             {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
