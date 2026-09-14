@@ -195,6 +195,13 @@ resultStore:
   # Cluster-internal URL used only for the post-store liveness probe. Optional:
   # when unset, the post-store settle degrades to a single best-effort re-touch.
   internalUrl: ""
+  # Base URL of the Service fronting the xtractl reload sidecar in the ldproxy
+  # pod(s), e.g. http://<release>-reload-headless.<namespace>.svc.cluster.local:7082
+  # Optional: when unset, UMP relies solely on ldproxy's own store watcher,
+  # which does not fire reliably over SMB/CIFS-backed volumes. Must be a
+  # headless Service (clusterIP: None) if ldproxy runs more than one replica —
+  # a normal Service only reaches one replica per reload.
+  reloadUrl: ""
   # Logical id of the shared ldproxy service publishing all stored results.
   # Must match the final path segment of baseUrl.
   serviceId: "ump-results"

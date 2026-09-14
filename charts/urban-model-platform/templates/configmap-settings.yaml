@@ -42,6 +42,9 @@ data:
   {{- with .internalUrl }}
   UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: {{ . | quote }}
   {{- end }}
+  {{- with .reloadUrl }}
+  UMP_RESULTSTORE_LDPROXY_RELOAD_URL: {{ . | quote }}
+  {{- end }}
   UMP_RESULTSTORE_LDPROXY_SERVICE_ID: {{ required "resultStore.serviceId is required when resultStore.enabled is true" .serviceId | quote }}
   UMP_RESULTSTORE_LDPROXY_NATIVE_CRS: {{ .nativeCrs | default 4326 | int64 | quote }}
   {{- if eq $backend "k8s" }}
