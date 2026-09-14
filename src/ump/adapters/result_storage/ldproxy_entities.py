@@ -239,6 +239,7 @@ def build_service_skeleton(service_id: str = "ump-results") -> dict:
                 "additionalCrs": [
                     {"code": 4326, "forceAxisOrder": "NONE"},
                     {"code": 3857, "forceAxisOrder": "NONE"},
+                    {"code": 25832, "forceAxisOrder": "NONE"},
                 ],
             },
         ],
