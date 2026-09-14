@@ -212,6 +212,7 @@ def build_result_storage_port(
         native_crs_epsg=settings.UMP_RESULTSTORE_LDPROXY_NATIVE_CRS,
         service_id=settings.UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
         internal_url=settings.UMP_RESULTSTORE_LDPROXY_INTERNAL_URL,
+        reload_url=settings.UMP_RESULTSTORE_LDPROXY_RELOAD_URL,
         confirm_max_attempts=budget.max_attempts,
         confirm_base_wait=budget.base_wait,
         confirm_max_wait=budget.max_wait,

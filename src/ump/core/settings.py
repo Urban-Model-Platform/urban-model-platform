@@ -164,6 +164,24 @@ class UmpSettings(BaseSettings):
     # the post-store settle degrades to a single best-effort re-touch.
     UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: str | None = None
 
+    # Base URL of the headless Kubernetes Service fronting the xtractl reload
+    # sidecar in every ldproxy pod, e.g.
+    # http://<release>-reload-headless.<namespace>.svc.cluster.local:7082
+    # Optional. ldproxy's inotify-based store watcher does not reliably fire
+    # over SMB/CIFS-backed volumes (see REF-F5-result-storage.md, 2026-09-14),
+    # so when set, UMP resolves this host to every backing pod IP (a headless
+    # Service has one A record per replica, not a single load-balanced IP) and
+    # POSTs to each after storing a job's results, actively triggering the
+    # reload that the store watcher alone cannot be relied on to produce. When
+    # unset, this step is skipped and only the existing re-touch/probe
+    # confirmation logic runs.
+    #
+    # Must be a headless Service (clusterIP: None) if ldproxy runs more than
+    # one replica: a normal ClusterIP Service resolves to a single virtual IP,
+    # so only one replica would get reloaded per job. A normal Service works
+    # fine for a single-replica deployment.
+    UMP_RESULTSTORE_LDPROXY_RELOAD_URL: str | None = None
+
     # Root of the ldproxy store on the shared filesystem (Azure File Share in
     # production, a local directory in development).
     #

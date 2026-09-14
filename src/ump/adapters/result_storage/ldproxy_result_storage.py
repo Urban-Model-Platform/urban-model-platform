@@ -45,7 +45,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -84,6 +86,7 @@ class LdproxyResultStorage(ResultStoragePort):
         native_crs_epsg: int = 4326,
         service_id: str = "ump-results",
         internal_url: str | None = None,
+        reload_url: str | None = None,
         confirm_max_attempts: int = 6,
         confirm_base_wait: float = 1.5,
         confirm_max_wait: float = 8.0,
@@ -106,6 +109,15 @@ class LdproxyResultStorage(ResultStoragePort):
         # typically NOT reachable from within the UMP container. When unset,
         # confirmation degrades to a single best-effort re-touch (no probe).
         self._internal_url = internal_url.rstrip("/") if internal_url else None
+        # Base URL of the headless Service fronting the xtractl reload sidecar
+        # in every ldproxy pod (see REF-F5-result-storage.md, 2026-09-14).
+        # When set, ``store`` resolves this host to every backing pod IP and
+        # actively triggers a reload on each, instead of relying solely on
+        # ldproxy's store watcher (unreliable on SMB/CIFS volumes). Kept
+        # separate from ``internal_url``: that one is a single ClusterIP
+        # service used for read-only probing, this one is a headless Service
+        # whose whole point is resolving to *every* pod, not one.
+        self._reload_url = reload_url.rstrip("/") if reload_url else None
         # Post-store publication-confirmation budget. ldproxy watches the store
         # and reloads the *service* and *provider* entities independently.
         # Because ``store`` writes the provider a few milliseconds before the
@@ -172,6 +184,12 @@ class LdproxyResultStorage(ResultStoragePort):
             # and no orphan survives for a later retry to trip over.
             await self._rollback(job_id, gpkg_path, registered)
             raise
+
+        # Actively trigger a reload on every ldproxy replica before falling
+        # back to the re-touch/probe dance below. Best-effort: a failure here
+        # must not fail the store, since _confirm_publication is still the
+        # authority on whether publication actually succeeded.
+        await self._trigger_reload(job_id)
 
         # Confirm ldproxy actually published each collection before reporting
         # success. ldproxy hot-reloads provider and service entities
@@ -478,6 +496,92 @@ class LdproxyResultStorage(ResultStoragePort):
                 return 200 <= resp.status < 300
         except (urllib.error.URLError, OSError, ValueError):
             return False
+
+    async def _trigger_reload(self, job_id: str) -> None:
+        """POST to every pod behind the reload headless Service, best-effort.
+
+        A headless Service (``clusterIP: None``) has no single virtual IP —
+        DNS returns one A record per backing pod, and a normal HTTP client
+        would only ever reach whichever address the resolver puts first. A
+        reload is per-pod in-memory state, so every replica must be hit or
+        some would keep serving a stale entity set. This resolves the
+        configured host to all of its addresses and fans the trigger out to
+        each individually, mirroring the ``dig +short A ... | xargs curl``
+        pattern this reload mechanism was designed around.
+
+        No-op when ``UMP_RESULTSTORE_LDPROXY_RELOAD_URL`` is unset (the
+        default): ldproxy's own store watcher is relied on instead, as before.
+        Never raises — this is a best-effort nudge, not a required step; a
+        transient DNS or connection failure just leaves the existing
+        re-touch/probe confirmation as the fallback.
+        """
+        if self._reload_url is None:
+            return
+        await asyncio.to_thread(self._trigger_reload_blocking, job_id)
+
+    def _trigger_reload_blocking(self, job_id: str) -> None:
+        parsed = urllib.parse.urlsplit(self._reload_url)
+        host = parsed.hostname
+        port = parsed.port or 80
+        if not host:
+            logger.warning(
+                "[ldproxy] reload: UMP_RESULTSTORE_LDPROXY_RELOAD_URL=%r has no "
+                "host; skipping reload trigger for job_id=%s",
+                self._reload_url,
+                job_id,
+            )
+            return
+
+        try:
+            addrinfo = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        except OSError as dns_error:
+            logger.warning(
+                "[ldproxy] reload: could not resolve %s for job_id=%s: %s",
+                host,
+                job_id,
+                dns_error,
+            )
+            return
+
+        # One A/AAAA record per backing pod for a headless Service; dedupe
+        # since getaddrinfo can repeat the same address across families/socktypes.
+        # A normal ClusterIP Service also resolves here (to its one virtual
+        # IP), so this degrades to "reload one pod, picked by kube-proxy" —
+        # correct only when ldproxy runs a single replica. Logged at debug
+        # rather than warning since a single-IP result is the expected,
+        # non-misconfigured case for most deployments.
+        ips = {info[4][0] for info in addrinfo}
+        logger.debug(
+            "[ldproxy] reload: resolved %s to %d address(es) for job_id=%s",
+            host,
+            len(ips),
+            job_id,
+        )
+
+        failures = 0
+        for ip in ips:
+            url = f"{parsed.scheme}://{ip}:{port}/"
+            request = urllib.request.Request(url, method="POST")  # noqa: S310
+            try:
+                with urllib.request.urlopen(request, timeout=5):  # noqa: S310
+                    pass
+            except (urllib.error.URLError, OSError, ValueError) as reload_error:
+                failures += 1
+                logger.warning(
+                    "[ldproxy] reload: trigger failed for %s (job_id=%s): %s",
+                    url,
+                    job_id,
+                    reload_error,
+                )
+
+        if failures and failures == len(ips):
+            logger.warning(
+                "[ldproxy] reload: all %d pod(s) behind %s unreachable for "
+                "job_id=%s; falling back to store-watcher/re-touch",
+                len(ips),
+                host,
+                job_id,
+            )
 
     async def _rollback(
         self, job_id: str, gpkg_path: Path, registered: list[str]
