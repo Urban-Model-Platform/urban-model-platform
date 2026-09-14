@@ -185,12 +185,6 @@ class LdproxyResultStorage(ResultStoragePort):
             await self._rollback(job_id, gpkg_path, registered)
             raise
 
-        # Actively trigger a reload on every ldproxy replica before falling
-        # back to the re-touch/probe dance below. Best-effort: a failure here
-        # must not fail the store, since _confirm_publication is still the
-        # authority on whether publication actually succeeded.
-        await self._trigger_reload(job_id)
-
         # Confirm ldproxy actually published each collection before reporting
         # success. ldproxy hot-reloads provider and service entities
         # independently, so a collection can be transiently disabled until the
@@ -400,6 +394,15 @@ class LdproxyResultStorage(ResultStoragePort):
         observer, not the client request path, so the bounded wait is free to
         the client and yields a link that works on first use.
 
+        The active reload trigger (``UMP_RESULTSTORE_LDPROXY_RELOAD_URL``, see
+        ``_trigger_reload``) fires on every attempt of this same loop rather
+        than once upfront: the very first call can race with the shared
+        filesystem propagating the just-written entity files to the ldproxy
+        pod (observed on SMB/CIFS-backed volumes), in which case ldproxy
+        reloads before there is anything new to see. Reusing this loop's
+        backoff gives it further, later chances instead of firing once and
+        never again.
+
         Honest fallback
         ---------------
         Any collection still not confirmed live when the budget is exhausted is
@@ -424,10 +427,12 @@ class LdproxyResultStorage(ResultStoragePort):
         pairs = list(zip(collection_ids, output_ids))
 
         if self._internal_url is None:
+            await self._trigger_reload(job_id)
             await asyncio.sleep(self._confirm_base_wait)
             await self._retouch(job_id, pairs)
             return set()
 
+        await self._trigger_reload(job_id)
         pending = await self._probe_pending(pairs)
         for attempt in range(1, self._confirm_max_attempts + 1):
             if not pending:
@@ -439,7 +444,8 @@ class LdproxyResultStorage(ResultStoragePort):
             )
             logger.debug(
                 "[ldproxy] confirming job_id=%s: %d collection(s) not yet live, "
-                "re-touching service (attempt %d/%d, next check in %.1fs)",
+                "re-touching service and re-triggering reload (attempt %d/%d, "
+                "next check in %.1fs)",
                 job_id,
                 len(pending),
                 attempt,
@@ -447,6 +453,7 @@ class LdproxyResultStorage(ResultStoragePort):
                 wait,
             )
             await self._retouch(job_id, [pair for pair in pairs if pair[0] in pending])
+            await self._trigger_reload(job_id)
             await asyncio.sleep(wait)
             pending = await self._probe_pending(pairs)
 
