@@ -1098,3 +1098,81 @@ band, before scaling to more than one replica, so that branch is never taken
 concurrently. Switching to NFS/ANF (removing the need for `nobrl` entirely)
 remains the more robust option for a future revisit; not pursued for now
 given the added infrastructure cost and setup complexity.
+
+## 🔲 Gap + plan (2026-09-14) — UMP must actively trigger ldproxy reload; inotify does not fire on SMB shares
+
+
+**The gap.** ldproxy's store watcher (`EventStoreDriverFs`) registers a Java
+`WatchService` (inotify on Linux) recursively over the store directory once,
+at watch startup, and only reacts to `.yml`/`.yaml`/`.json` events. inotify
+does not propagate reliably over network-backed volumes — NFS, CIFS/SMB
+(Azure Files), many CSI drivers. Since the shared store lives on an
+`azurefile-csi` (SMB) share (see the operational note above), file changes
+UMP writes are frequently invisible to ldproxy's watcher even though the
+files are correctly updated on disk. Today `LdproxyResultStorage` only works
+around this indirectly: `_confirm_publication` (`ldproxy_result_storage.py`)
+re-touches the *service* entity, hoping that re-write itself produces a watch
+event — which is exactly the mechanism that is unreliable on SMB in the
+first place, so it is not a real fix, only a partial mitigation that happens
+to work often enough in practice.
+
+**What is already deployed (ldproxy side, done by the user).** An
+`xtractl`-based sidecar container in the ldproxy pod, wrapping the one-shot
+`xtractl entity reload "*" -h localhost -p 7081` CLI call behind a tiny HTTP
+listener on port `7082` (localhost works here because sidecar and ldproxy
+share the Pod's network namespace — see the earlier Kubernetes-vs-Compose
+clarification). A **headless Service** (`ClusterIP: None`) fronts it, so DNS
+resolves to every backing Pod IP instead of load-balancing to one — required
+because a reload is per-ldproxy-instance in-memory state; hitting only one
+replica behind a normal Service would leave the others stale.
+
+**What UMP needs to do, concretely:**
+
+1. **New setting** — `UMP_RESULTSTORE_LDPROXY_RELOAD_URL: str | None = None`
+   (`ump/core/settings.py`), the headless service's base URL, e.g.
+   `http://<release>-reload-headless.<namespace>.svc.cluster.local:7082`.
+   Optional: when unset, behaviour is unchanged (today's re-touch-only
+   mitigation stays as the fallback for filesystem-backend/local-dev setups
+   where inotify does work).
+2. **DNS fan-out, not a single HTTP call.** A headless Service's DNS name
+   resolves to *all* backing Pod IPs (one A record per replica) rather than
+   load-balancing — the same reason the user's shell snippet loops over
+   `dig +short A ...` / `getent hosts ...` and calls each IP individually.
+   UMP must reproduce that fan-out in Python (`socket.getaddrinfo` resolving
+   the configured host to every A record) and `POST /` to **each** resolved
+   IP on port `7082`, not just the hostname once — a plain `httpx`/`aiohttp`
+   request to the DNS name would only ever reach whichever IP the resolver
+   happened to return first.
+3. **Where to call it** — `LdproxyResultStorage.store()`
+   (`ldproxy_result_storage.py`), right after stage 3 (all collections
+   registered), before `_confirm_publication`'s probe loop. The reload call
+   becomes the actual trigger; `_confirm_publication` keeps its existing role
+   as the *verification* step (did the collection actually become queryable),
+   not the trigger — its re-touch side-effect can be dropped once the reload
+   call exists, since re-touching only ever existed to *approximate* what
+   this new explicit call now does directly.
+4. **Best-effort, never fatal.** A failed reload call (network hiccup,
+   headless Service not yet resolvable) must not fail the store or the job —
+   log a warning and fall through to `_confirm_publication`'s probe/backoff,
+   which is still the authority on whether publication actually succeeded.
+   This mirrors the existing best-effort philosophy used for
+   `ensure_ldproxy_bootstrapped` and V-9 cleanup.
+5. **Not `k8s`-config-backend-specific.** Unlike the ConfigMap-vs-filesystem
+   distinction elsewhere in this document, this gap is about the *underlying
+   volume* (SMB), not the entity config backend — it applies equally whether
+   `UMP_RESULTSTORE_CONFIG_BACKEND` is `filesystem` or `k8s`, since both
+   ultimately write onto the same SMB-backed store in this deployment.
+6. **Chart wiring** — a new `resultStore.reloadUrl` value, rendered as
+   `UMP_RESULTSTORE_LDPROXY_RELOAD_URL` in `configmap-settings.yaml`, analogous
+   to how `internalUrl`/`baseUrl` are already wired. No RBAC change needed
+   (this is a plain HTTP call, not a k8s API call).
+
+**Not yet decided / left open for the implementation step:** whether DNS
+fan-out failures for *some* (not all) resolved IPs should still count as an
+overall success (partial reload), and whether the resolved-IP list should be
+cached briefly (to avoid a full DNS lookup on every single stored result) or
+re-resolved every time (simplest, safest against replica churn — favoured
+unless it proves too slow in practice).
+
+- [x] partial reload success: yes
+- [x] resolved-IP list should be cached briefly
