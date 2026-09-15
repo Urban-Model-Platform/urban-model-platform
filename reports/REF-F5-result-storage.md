@@ -1176,3 +1176,130 @@ unless it proves too slow in practice).
 
 - [x] partial reload success: yes
 - [x] resolved-IP list should be cached briefly
+
+## 🔲 Gap + plan (2026-09-15) — the service-entity skeleton is only ever generated once
+
+Not yet implemented — plan only.
+
+**The gap.** `ServiceRegistry._read_modify_write` (`service_registry.py`) calls
+`build_service_skeleton(service_id)` (`ldproxy_entities.py`) exactly once: the
+branch taken when `read_service_entity` returns `None`, i.e. the very first
+time the shared service entity is bootstrapped. Every later read-modify-write
+— `register_collection`, `deregister_collection`, `ensure_bootstrapped` — only
+ever loads whatever is already stored and edits the `collections` map; nothing
+ever re-derives the rest of the document from the current code. Confirmed in
+practice: after `build_service_skeleton` was changed (a code deploy), every
+already-bootstrapped environment kept serving the *old* skeleton fields
+indefinitely — the new code only affects environments bootstrapped from
+scratch after the deploy. There is no reconciliation step that would ever
+bring a long-running service entity back in line with a newer
+`build_service_skeleton`.
+
+**Plan:**
+
+1. Give the skeleton a **version marker** (e.g. a `x-ump-skeleton-version`
+   key alongside `collections` in the generated YAML) so a reconciliation
+   pass can cheaply tell "was this entity built by an older code version"
+   without diffing the whole document.
+2. Add a **sporadic reconciliation** step — not on every request (that would
+   re-fight the same read-modify-write contention `ServiceRegistry` already
+   exists to serialise), but on a low-frequency periodic task, analogous to
+   `JobCleanupService`/V-9's `PeriodicTaskRunner` wiring in `asgi.py`. On each
+   run: read the current entity, compare its skeleton version against the
+   running code's, and if older, re-merge the current `build_service_skeleton`
+   output underneath the *existing* `collections` map (collections must never
+   be dropped or rebuilt by this pass — only the surrounding skeleton fields).
+3. This directly intersects with the next gap below (admin-authored service
+   YAML): once operators can customize the skeleton, reconciliation must
+   merge in a way that never silently overwrites an intentional admin
+   customization — the version marker is what lets it distinguish "outdated,
+   safe to refresh" from "customized, must not be touched" once that lands.
+4. Until this exists, a skeleton change must be treated as *not
+   retroactive*: existing deployments only pick it up by having their service
+   entity deleted (filesystem: remove the file; k8s: delete the ConfigMap key)
+   so the next `ensure_bootstrapped`/`register_collection` regenerates it from
+   scratch — acceptable only because `collections` would then need
+   re-registering too, which nothing currently automates either (another
+   argument for the reconciliation pass above).
+
+## 🔲 Gap + plan (2026-09-15) — admin-authored/customizable ldproxy service entity
+
+Not yet implemented — plan only.
+
+**The gap.** `build_service_skeleton` hardcodes the entire shape of the shared
+`ump-results` service entity in Python (`ldproxy_entities.py`) — title, API
+extensions, CRS list, whatever else ldproxy's `OGC_API` service type accepts.
+An operator who wants to change something in there today (add a description,
+enable/disable an API module, tune a CRS list) has no supported way to do it:
+any manual edit is indistinguishable from "stale skeleton" to
+`ServiceRegistry` and would be silently overwritten the next time the
+reconciliation pass above (once it exists) runs its merge — and today, more
+subtly, a manual edit already risks being clobbered by any in-process
+`register_collection`/`deregister_collection` call, since those load-modify
+the *live* document rather than re-deriving it, so a hand-edit only survives
+until the next collection change if that change's read-modify-write happens
+to preserve the edited field (it will, since it round-trips the parsed YAML —
+but this is incidental, not a guarantee UMP makes).
+
+**Plan:**
+
+1. Add an optional **skeleton override** input — e.g. a mounted file/ConfigMap
+   key (`UMP_RESULTSTORE_SERVICE_TEMPLATE_PATH`, following the existing
+   `UMP_RESULTSTORE_*` naming) containing a YAML fragment merged over
+   `build_service_skeleton`'s output the first time the entity is
+   bootstrapped, instead of (or layered under) the hardcoded default.
+2. Support picking this up **mid-operation**, not just at first bootstrap:
+   the reconciliation pass from the previous gap is the natural place to
+   also re-check "has the override file/ConfigMap changed since the entity
+   was last synced" and re-merge — the same version-marker mechanism
+   generalizes to "skeleton version OR override checksum changed".
+3. `collections` stays exactly as untouchable by this mechanism as it is by
+   the reconciliation pass above — an admin overriding the service template
+   customizes everything *except* what UMP itself owns (the published
+   collections), never replaces it.
+4. Validation: a malformed override must fail loudly at startup/reconcile
+   time (clear log + skip the merge, keep serving the last-known-good
+   entity) rather than corrupt the shared service entity that every stored
+   result depends on — the same "fail loudly, don't silently degrade a
+   shared resource" principle already applied to `_guard_size` in
+   `entity_config_k8s.py`.
+5. Depends on the reconciliation gap above landing first: without a
+   periodic re-check mechanism, "mid-operation" admin changes would only
+   ever take effect the next time some unrelated collection registration
+   happens to trigger a rewrite — an accidental side channel, not a real
+   feature.
+
+## 🔲 Gap + plan (2026-09-15) — no way to retry a job whose result fetch failed
+
+Not yet implemented — notes only, no plan yet.
+
+**The gap.** `_fetch_results_with_retry` (`result_storage_coordinator.py`)
+already retries transient upstream failures (404/408/425/429/500/502/503/504)
+up to `_FETCH_MAX_ATTEMPTS` (8) times with exponential backoff, for the
+"remote says successful a moment before `/results` is queryable" race. But
+this budget is a poor fit for a remote that is deterministically failing to
+serve a specific result — e.g. observed in production: the remote model
+server gets OOMKilled while assembling/serving a result that is too large for
+its memory limit, so it returns 500 on every attempt (job message: "Result
+reference could not be published: Failed to fetch results for storage from
+`http://pluvial-flood-risk.model-flood-risk.svc.cluster.local:8000/jobs/<id>/results`:
+upstream status=500"). All 8 attempts fail the same way, and the observer then
+marks the **UMP job terminally `failed`** with the `Job.RESULT_STORAGE_FAILED_MARKER`
+diagnostic (`observers.py`, `_finalize_publication`).
+
+Once that terminal state is written there is currently no way back:
+`JobManager.get_results()` only serves results for jobs with
+`status == successful`, and there is no existing endpoint or internal
+operation that re-attempts the fetch/store for an already-`failed` job. The
+only recourse today is resubmitting/re-running the whole remote job, which for
+an expensive model run may be costly — and may not even be necessary, since
+the remote's result could still become fetchable later (e.g. after an
+operator raises the remote's memory limit, or the remote finishes an
+OOM-restart and can now stream the result rather than buffering it).
+
+The retry mechanism itself is also the wrong shape for this failure mode: a
+remote that is deterministically failing (crash-looping on OOM) just gets
+hit with the same request 8 times in a row, which does not help and may keep
+re-triggering the OOM. A **circuit breaker** per remote/provider (or per job)
+was raised as a better fit than tuning the retry budget further — see
+`REF-IDEAS.md` for both this and the admin-retry-endpoint idea.
