@@ -252,8 +252,23 @@ class LdproxyResultStorage(ResultStoragePort):
                 job_id,
             )
 
-        await asyncio.to_thread(self._gpkg_path(job_id).unlink, True)  # missing_ok
-        await asyncio.to_thread(self._manifest_path(job_id).unlink, True)  # missing_ok
+        try:
+            await asyncio.to_thread(self._gpkg_path(job_id).unlink, True)  # missing_ok
+        except OSError:
+            logger.warning(
+                "[ldproxy] delete: could not remove GeoPackage for job_id=%s",
+                job_id,
+            )
+
+        try:
+            await asyncio.to_thread(
+                self._manifest_path(job_id).unlink, True
+            )  # missing_ok
+        except OSError:
+            logger.warning(
+                "[ldproxy] delete: could not remove manifest for job_id=%s",
+                job_id,
+            )
 
     async def exists(self, job_id: str) -> bool:
         """Return True if this job is fully stored.
