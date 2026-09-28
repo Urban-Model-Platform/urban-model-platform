@@ -7,15 +7,13 @@ This module provides production-ready observers that handle:
 - Eager result storage on completion
 """
 
-import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Set
+from typing import Any, Callable, Optional
 
 from ump.core.exceptions import OptimisticLockError
 from ump.core.interfaces.http_client import HttpClientPort
 from ump.core.interfaces.job_repository import JobRepositoryPort
-from ump.core.interfaces.observers import JobStateObserver
 from ump.core.interfaces.providers import ProvidersPort
 from ump.core.interfaces.result_storage import ResultStorageError
 from ump.core.managers.steps.execution_steps import (
@@ -85,7 +83,7 @@ class PollingSchedulerObserver:
     testable without duplicating complex polling logic.
     """
 
-    def __init__(self, schedule_callback):
+    def __init__(self, schedule_callback: Callable[[str], None]):
         """Initialize with callback to JobManager._schedule_poll method.
 
         Args:
@@ -287,8 +285,9 @@ class ResultStorageObserver:
 
         logger.info(f"[observer:storage] storing result job_id={job.id}")
         try:
-            references = await self._coordinator.coordinate(
-                job, process_config, self._repo
+            references = (
+                await self._coordinator.coordinate(job, process_config, self._repo)
+                or []
             )
         except ResultStorageError as exc:
             # _finalize_publication sets both the diagnostic marker and the
@@ -303,7 +302,7 @@ class ResultStorageObserver:
             )
             return
 
-        unconfirmed = [ref for ref in (references or []) if ref.publication_pending]
+        unconfirmed = [ref for ref in references if ref.publication_pending]
         if unconfirmed:
             logger.info(
                 f"[observer:storage] {len(unconfirmed)} of {len(references)} "
@@ -357,7 +356,7 @@ class ResultStorageObserver:
                 )
                 _ensure_self_link(job.id, new_status_info)
                 _ensure_results_link(job.id, new_status_info)
-                updates: dict = {"status_info": new_status_info}
+                updates: dict[str, Any] = {"status_info": new_status_info}
             else:
                 reason_text = reason or "Result publication failed."
                 message = f"Result reference could not be published: {reason_text}"
