@@ -162,6 +162,21 @@ class UmpSettings(BaseSettings):
     # baked into result references and is usually NOT reachable from within the
     # UMP container (e.g. it points at localhost for a browser). When unset,
     # the post-store settle degrades to a single best-effort re-touch.
+    #
+    # IMPORTANT: like UMP_RESULTSTORE_LDPROXY_BASE_URL, this must include the
+    # ldproxy service-id path segment (UMP_RESULTSTORE_LDPROXY_SERVICE_ID,
+    # default "ump-results") — the probe appends only "/collections/{id}" to
+    # this value. A bare cluster-DNS host with no path (e.g.
+    # "http://ldproxy-ump-results.geodata.svc.cluster.local:7080", easy to
+    # write since the k8s Service name itself often contains "ump-results")
+    # will make every probe 404 even though the base_url the result really
+    # lives at (".../ump-results/collections/...") is fine — the job then gets
+    # marked failed after exhausting the confirmation budget despite the
+    # result having published successfully. Use e.g.
+    # "http://ldproxy-ump-results.geodata.svc.cluster.local:7080/ump-results".
+    # A systematic 404 across every collection logged by
+    # "[ldproxy] job_id=...: N collection(s) not confirmed live" is the symptom
+    # to look for.
     UMP_RESULTSTORE_LDPROXY_INTERNAL_URL: str | None = None
 
     # Base URL of the headless Kubernetes Service fronting the xtractl reload

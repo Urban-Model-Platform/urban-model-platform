@@ -448,7 +448,7 @@ class LdproxyResultStorage(ResultStoragePort):
             return set()
 
         await self._trigger_reload(job_id)
-        pending = await self._probe_pending(pairs)
+        pending, last_detail = await self._probe_pending(pairs)
         for attempt in range(1, self._confirm_max_attempts + 1):
             if not pending:
                 return set()
@@ -460,26 +460,28 @@ class LdproxyResultStorage(ResultStoragePort):
             logger.debug(
                 "[ldproxy] confirming job_id=%s: %d collection(s) not yet live, "
                 "re-touching service and re-triggering reload (attempt %d/%d, "
-                "next check in %.1fs)",
+                "next check in %.1fs); last probe result: %s",
                 job_id,
                 len(pending),
                 attempt,
                 self._confirm_max_attempts,
                 wait,
+                last_detail,
             )
             await self._retouch(job_id, [pair for pair in pairs if pair[0] in pending])
             await self._trigger_reload(job_id)
             await asyncio.sleep(wait)
-            pending = await self._probe_pending(pairs)
+            pending, last_detail = await self._probe_pending(pairs)
 
         if pending:
             logger.warning(
                 "[ldproxy] job_id=%s: %d collection(s) not confirmed live after "
                 "%d attempt(s); flagged publication_pending, will self-heal on "
-                "the next reload",
+                "the next reload; last probe result per collection: %s",
                 job_id,
                 len(pending),
                 self._confirm_max_attempts,
+                {cid: last_detail[cid] for cid in pending if cid in last_detail},
             )
         return pending
 
@@ -496,28 +498,50 @@ class LdproxyResultStorage(ResultStoragePort):
                     collection_id,
                 )
 
-    async def _probe_pending(self, pairs: list[tuple[str, str]]) -> set[str]:
-        """Return the collection_ids not currently published by ldproxy."""
+    async def _probe_pending(
+        self, pairs: list[tuple[str, str]]
+    ) -> tuple[set[str], dict[str, str]]:
+        """Return (collection_ids not currently published, detail per collection).
+
+        ``detail`` carries the probe URL and outcome (status or exception) for
+        every collection so the caller can log exactly what was tried and what
+        came back — telling a genuine not-yet-published collection apart from
+        e.g. a misconfigured ``internal_url`` (wrong host, or missing the
+        service-id path segment ``base_url`` already carries).
+        """
         pending: set[str] = set()
+        detail: dict[str, str] = {}
         for collection_id, _output_id in pairs:
-            live = await asyncio.to_thread(self._probe_collection_live, collection_id)
+            live, outcome = await asyncio.to_thread(
+                self._probe_collection_live, collection_id
+            )
+            detail[collection_id] = outcome
             if not live:
                 pending.add(collection_id)
-        return pending
+        return pending, detail
 
-    def _probe_collection_live(self, collection_id: str) -> bool:
-        """Return True if ldproxy currently publishes *collection_id*.
+    def _probe_collection_live(self, collection_id: str) -> tuple[bool, str]:
+        """Return (is_live, detail) for *collection_id*.
 
         Blocking; always called via ``asyncio.to_thread``. Uses the internal
         (container-network) ldproxy URL. Any error or non-2xx response is
-        treated as "not live yet" so the caller keeps re-touching.
+        treated as "not live yet" so the caller keeps re-touching. ``detail``
+        always includes the exact URL probed and the status/exception, so a
+        systematic failure (e.g. every collection 404ing because
+        ``internal_url`` is missing the service-id path segment) is visible in
+        the logs instead of looking identical to a normal not-yet-published
+        collection.
         """
         url = f"{self._internal_url}/collections/{collection_id}?f=json"
         try:
             with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310
-                return 200 <= resp.status < 300
-        except (urllib.error.URLError, OSError, ValueError):
-            return False
+                if 200 <= resp.status < 300:
+                    return True, f"HTTP {resp.status} for {url}"
+                return False, f"HTTP {resp.status} for {url}"
+        except urllib.error.HTTPError as exc:
+            return False, f"HTTP {exc.code} for {url}"
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return False, f"{type(exc).__name__}: {exc} for {url}"
 
     async def _trigger_reload(self, job_id: str) -> None:
         """POST to every pod behind the reload headless Service, best-effort.

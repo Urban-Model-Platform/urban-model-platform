@@ -255,15 +255,18 @@ class ResultStorageCoordinator:
         resolved: dict[str, StoredReference] = {
             ref.collection_id: ref for ref in references
         }
+        last_detail: dict[str, str] = {}
         for attempt in range(1, _LIVENESS_RECHECK_MAX_ATTEMPTS + 1):
             still_pending = []
             for ref in pending:
                 probe_url = ref.liveness_url or ref.items_url
-                if await self._probe_liveness(probe_url):
+                ok, detail = await self._probe_liveness(probe_url)
+                if ok:
                     resolved[ref.collection_id] = replace(
                         ref, publication_pending=False
                     )
                 else:
+                    last_detail[ref.collection_id] = detail
                     still_pending.append(ref)
             pending = still_pending
             if not pending:
@@ -284,20 +287,37 @@ class ResultStorageCoordinator:
             )
             await asyncio.sleep(wait)
 
+        if pending:
+            # Surface the exact probe outcome (URL + status/exception) so an
+            # operator can tell a real publication failure apart from a
+            # misconfigured liveness_url/items_url (e.g. wrong internal host
+            # or a missing path segment) instead of just "still pending".
+            for ref in pending:
+                logger.warning(
+                    "[storage] job_id=%s: collection %s still not confirmed "
+                    "live after recheck; last probe result: %s",
+                    job_id,
+                    ref.collection_id,
+                    last_detail.get(ref.collection_id, "unknown"),
+                )
+
         return list(resolved.values())
 
-    async def _probe_liveness(self, url: str) -> bool:
-        """Return True if *url* answers with a successful response.
+    async def _probe_liveness(self, url: str) -> tuple[bool, str]:
+        """Return (is_live, detail) for a generic "is this reachable" probe.
 
         Generic by design (V-11 rule): no adapter-specific path or body
-        assumption, just "is this reachable". Any error or non-2xx response
-        means "not live yet".
+        assumption, just "is this reachable". ``detail`` describes the outcome
+        (status or exception) for diagnostic logging by the caller — a
+        misconfigured URL and a genuinely-not-yet-published collection both
+        come back as "not live", but only the logged detail lets an operator
+        tell them apart.
         """
         try:
             await self._http.get(url, timeout=5.0)
-            return True
-        except Exception:
-            return False
+            return True, "reachable"
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc} (url={url})"
 
     # ------------------------------------------------------------------
     # Fetch and payload extraction
@@ -409,7 +429,7 @@ class ResultStorageCoordinator:
 
         try:
             document = json.loads(body_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+        except json.JSONDecodeError, UnicodeDecodeError:
             return
         if not isinstance(document, dict) or _is_geojson_document(document):
             return
