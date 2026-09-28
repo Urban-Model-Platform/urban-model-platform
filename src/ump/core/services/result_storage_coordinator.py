@@ -35,6 +35,7 @@ import asyncio
 import base64
 import json
 import logging
+from dataclasses import replace
 from typing import Optional
 
 from ump.core.exceptions import OGCProcessException, OptimisticLockError
@@ -90,6 +91,19 @@ _TRANSIENT_FETCH_STATUSES = frozenset({404, 408, 425, 429, 500, 502, 503, 504})
 # Message set when publication verification is complete
 # (Note: during verification, job_manager sets _PUBLICATION_IN_PROGRESS_MESSAGE)
 _PUBLICATION_COMPLETE_MESSAGE = "Result available and published"
+
+# Second, adapter-agnostic chance for a reference still flagged
+# ``publication_pending`` after ``ResultStoragePort.store()`` already
+# exhausted its own backend-specific confirmation budget. That budget is a
+# bounded wait *inside one call*, not proof the reference will never become
+# reachable — ldproxy's own reload is eventually consistent, so a reference
+# can go live moments after ``store()`` gave up. Rather than the observer
+# treating that one timeout as a permanent verdict, ``confirm_pending`` polls
+# the generic ``liveness_url``/``items_url`` (the same URL V-11 already probes)
+# a further bounded number of times before a failure is reported.
+_LIVENESS_RECHECK_MAX_ATTEMPTS = 5
+_LIVENESS_RECHECK_BASE_WAIT = 3.0
+_LIVENESS_RECHECK_MAX_WAIT = 20.0
 
 
 class ResultStorageCoordinator:
@@ -217,6 +231,73 @@ class ResultStorageCoordinator:
                 job.id,
             )
         return references
+
+    async def confirm_pending(
+        self, job_id: str, references: list[StoredReference]
+    ) -> list[StoredReference]:
+        """Give any ``publication_pending`` reference one more chance to go live.
+
+        Called by ``ResultStorageObserver`` before it finalizes a job failed
+        due to unconfirmed references. Returns *references* unchanged if none
+        are pending (cheap no-op). Otherwise probes each pending reference's
+        ``liveness_url`` (falling back to ``items_url`` when the adapter did
+        not supply one, matching V-11's generic-probe fallback rule) with
+        exponential backoff, and returns a new list with any reference that
+        became reachable updated to ``publication_pending=False``.
+
+        Never raises: a probe failure just leaves that reference pending for
+        the caller to decide what to do with.
+        """
+        pending = [ref for ref in references if ref.publication_pending]
+        if not pending:
+            return references
+
+        resolved: dict[str, StoredReference] = {
+            ref.collection_id: ref for ref in references
+        }
+        for attempt in range(1, _LIVENESS_RECHECK_MAX_ATTEMPTS + 1):
+            still_pending = []
+            for ref in pending:
+                probe_url = ref.liveness_url or ref.items_url
+                if await self._probe_liveness(probe_url):
+                    resolved[ref.collection_id] = replace(
+                        ref, publication_pending=False
+                    )
+                else:
+                    still_pending.append(ref)
+            pending = still_pending
+            if not pending:
+                break
+
+            wait = min(
+                _LIVENESS_RECHECK_BASE_WAIT * (2 ** (attempt - 1)),
+                _LIVENESS_RECHECK_MAX_WAIT,
+            )
+            logger.debug(
+                "[storage] confirm_pending job_id=%s: %d reference(s) still not "
+                "live, recheck %d/%d in %.1fs",
+                job_id,
+                len(pending),
+                attempt,
+                _LIVENESS_RECHECK_MAX_ATTEMPTS,
+                wait,
+            )
+            await asyncio.sleep(wait)
+
+        return list(resolved.values())
+
+    async def _probe_liveness(self, url: str) -> bool:
+        """Return True if *url* answers with a successful response.
+
+        Generic by design (V-11 rule): no adapter-specific path or body
+        assumption, just "is this reachable". Any error or non-2xx response
+        means "not live yet".
+        """
+        try:
+            await self._http.get(url, timeout=5.0)
+            return True
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------
     # Fetch and payload extraction

@@ -305,6 +305,15 @@ class ResultStorageObserver:
 
         unconfirmed = [ref for ref in (references or []) if ref.publication_pending]
         if unconfirmed:
+            logger.info(
+                f"[observer:storage] {len(unconfirmed)} of {len(references)} "
+                f"reference(s) not confirmed live yet, rechecking before giving "
+                f"up job_id={job.id}"
+            )
+            references = await self._coordinator.confirm_pending(job.id, references)
+            unconfirmed = [ref for ref in references if ref.publication_pending]
+
+        if unconfirmed:
             reason = (
                 f"{len(unconfirmed)} of {len(references)} stored reference(s) "
                 "could not be confirmed reachable within the allotted time."
