@@ -39,7 +39,9 @@ def _payload(output_id: str, n: int = 2) -> ResultPayload:
 
 
 def _make_storage(tmp_path, backend=None, **kwargs) -> LdproxyResultStorage:
-    backend = backend or FilesystemEntityConfigBackend(tmp_path / "entities" / "instances")
+    backend = backend or FilesystemEntityConfigBackend(
+        tmp_path / "entities" / "instances"
+    )
     registry = ServiceRegistry(backend, service_id="ump-results")
     # Default the post-store publication-confirmation to a no-op in tests: no
     # ldproxy is running, so there is nothing to probe or wait for. Individual
@@ -321,7 +323,9 @@ class TestConfirmPublication:
             confirm_max_wait=0.0,
         )
         # Live on the very first probe.
-        monkeypatch.setattr(storage, "_probe_collection_live", lambda cid: True)
+        monkeypatch.setattr(
+            storage, "_probe_collection_live", lambda cid: (True, "HTTP 200")
+        )
         refs = await storage.store(JOB_ID, [_payload("voronoi")])
         assert refs[0].publication_pending is False
 
@@ -336,7 +340,9 @@ class TestConfirmPublication:
             confirm_base_wait=0.0,
             confirm_max_wait=0.0,
         )
-        monkeypatch.setattr(storage, "_probe_collection_live", lambda cid: False)
+        monkeypatch.setattr(
+            storage, "_probe_collection_live", lambda cid: (False, "HTTP 404")
+        )
         refs = await storage.store(JOB_ID, [_payload("voronoi")])
         assert refs[0].publication_pending is True
         # The data + entities are still fully written — a pending publication is
@@ -356,8 +362,9 @@ class TestConfirmPublication:
             confirm_max_wait=0.0,
         )
 
-        def probe(collection_id: str) -> bool:
-            return collection_id.endswith("voronoi")  # buffer never confirms
+        def probe(collection_id: str) -> tuple[bool, str]:
+            live = collection_id.endswith("voronoi")  # buffer never confirms
+            return live, "HTTP 200" if live else "HTTP 404"
 
         monkeypatch.setattr(storage, "_probe_collection_live", probe)
         refs = await storage.store(JOB_ID, [_payload("voronoi"), _payload("buffer")])
