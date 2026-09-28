@@ -391,6 +391,7 @@ def _make_storage_observer(
     process_config=Mock(transmission_mode_policy="emulate-ref"),
     coordinate_return_value=None,
     coordinate_side_effect=None,
+    confirm_pending_side_effect=None,
     repo=None,
 ):
     """Build a ResultStorageObserver with fully mocked collaborators.
@@ -398,6 +399,10 @@ def _make_storage_observer(
     The observer now also owns the deferred successful/failed transition
     (V-11), so ``coordinate`` must return a list of ``StoredReference``-like
     mocks (default: empty list, meaning "nothing new to store" -> success).
+
+    ``confirm_pending`` defaults to returning its input references unchanged
+    (i.e. still pending) — the recheck found nothing new, matching the
+    pre-existing "still fails" test expectations unless a test overrides it.
     """
     coordinator = Mock()
     coordinator.should_store = Mock(return_value=should_store)
@@ -406,6 +411,10 @@ def _make_storage_observer(
         if coordinate_return_value is not None
         else [],
         side_effect=coordinate_side_effect,
+    )
+    coordinator.confirm_pending = AsyncMock(
+        side_effect=confirm_pending_side_effect
+        or (lambda job_id, references: references)
     )
 
     providers = Mock()
@@ -479,22 +488,53 @@ class TestResultStorageObserver:
     async def test_gated_job_finalizes_failed_when_reference_unconfirmed(
         self, test_job, success_status
     ):
-        """V-11: an unconfirmed reference is a hard failure, not a retry."""
+        """V-11: still unconfirmed after the recheck is a hard failure, not a retry."""
         repo = InMemoryJobRepository()
         gated_job = _make_gated_job(test_job)
         await repo.create(gated_job)
 
         pending_ref = Mock(publication_pending=True)
-        observer, _, _, _ = _make_storage_observer(
+        observer, coordinator, _, _ = _make_storage_observer(
             coordinate_return_value=[pending_ref], repo=repo
         )
 
         await observer.on_job_completed(gated_job, success_status)
 
+        coordinator.confirm_pending.assert_awaited_once_with(
+            gated_job.id, [pending_ref]
+        )
         stored = await repo.get(gated_job.id)
         assert stored.status_info.status == StatusCode.failed
         assert stored.diagnostic is not None
         assert Job.RESULT_STORAGE_FAILED_MARKER in stored.diagnostic
+
+    @pytest.mark.asyncio
+    async def test_gated_job_finalizes_successful_when_recheck_confirms_pending(
+        self, test_job, success_status
+    ):
+        """A reference still pending right after store() may go live moments
+        later — confirm_pending's recheck must get a chance before the job is
+        given up on as failed."""
+        repo = InMemoryJobRepository()
+        gated_job = _make_gated_job(test_job)
+        await repo.create(gated_job)
+
+        pending_ref = Mock(publication_pending=True)
+        confirmed_ref = Mock(publication_pending=False)
+        observer, coordinator, _, _ = _make_storage_observer(
+            coordinate_return_value=[pending_ref],
+            confirm_pending_side_effect=lambda job_id, references: [confirmed_ref],
+            repo=repo,
+        )
+
+        await observer.on_job_completed(gated_job, success_status)
+
+        coordinator.confirm_pending.assert_awaited_once_with(
+            gated_job.id, [pending_ref]
+        )
+        stored = await repo.get(gated_job.id)
+        assert stored.status_info.status == StatusCode.successful
+        assert stored.status_info.message == "Result available and published"
 
     @pytest.mark.asyncio
     async def test_skips_failed_job(self, test_job, failed_status):
