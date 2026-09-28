@@ -170,10 +170,10 @@ cython_debug/
 # secrets
 #secrets/*
 
+# misc
 geoserver_data
 postgresql_data
 scratch/*
-.github/workflows/copilot-instructions.md
-# Local throwaway minikube test setup (not part of the product)
-/minikube-test/
-*.tgz
+
+# graphify
+graphify-out/cache
