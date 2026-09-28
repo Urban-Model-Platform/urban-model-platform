@@ -1303,3 +1303,55 @@ hit with the same request 8 times in a row, which does not help and may keep
 re-triggering the OOM. A **circuit breaker** per remote/provider (or per job)
 was raised as a better fit than tuning the retry budget further — see
 `REF-IDEAS.md` for both this and the admin-retry-endpoint idea.
+
+## 🔲 Gap + plan (2026-09-16) — UMP always declares a hardcoded native CRS, never the data's actual CRS
+
+Not yet implemented — notes only, no plan yet.
+
+**The gap.** `write_to_gpkg`/`write_layers_to_gpkg` (`gpkg_writer.py`) reproject
+every layer to a single global `target_crs_epsg`, sourced from
+`UMP_RESULTSTORE_LDPROXY_NATIVE_CRS` (default `4326`) — the same value is then
+declared verbatim as `nativeCrs.code` in the generated ldproxy provider entity
+(`ldproxy_entities.py`). Neither step ever inspects what CRS the remote
+process actually produced its output in.
+
+`_ensure_crs` only reprojects when the source `GeoDataFrame` carries CRS
+metadata geopandas/pyogrio can read (e.g. an explicit CRS in FlatGeobuf) *and*
+that CRS differs from the target. When `gdf.crs is None` — which is the
+normal case for GeoJSON, since RFC 7946 defines GeoJSON as always WGS84 and
+provides no standard way to assert otherwise — the code does not reproject at
+all; it just labels the data `set_crs(epsg=target_epsg)` and moves on.
+
+Confirmed in practice: a remote process exposes a single `target_crs`
+parameter that controls *both* input and output CRS (e.g. `EPSG:25832`) and
+returns GeoJSON with raw projected coordinates, without asserting any CRS
+(GeoJSON has no normative mechanism to do so — `target_crs` is a
+process-specific, non-normative parameter UMP has no built-in knowledge of).
+UMP silently mislabels that data as `EPSG:4326` — no transform happens, the
+provider entity claims WGS84, and every downstream consumer of the ldproxy
+API receives geometries under the wrong CRS with no error or warning anywhere
+in the pipeline. This is likely a common pattern (one parameter driving both
+input and output CRS for a process), not a one-off.
+
+**Why this can't be fixed by guessing the CRS from the coordinate values
+alone:** a coordinate-range heuristic (e.g. "all values within
+[-180,180]/[-90,90] ⇒ plausibly lon/lat") can only ever detect that data is
+*not* WGS84 — it cannot recover which exact projected CRS it *is*, since many
+CRSs (UTM zones, national grids, etc.) share similar-magnitude coordinate
+ranges. Useful as a safety net (fail loudly instead of mislabeling when
+values are clearly out of lon/lat range), not as a source of truth.
+
+**The actual source of truth already exists:** the job's own submitted
+execution inputs. If a process' CRS-controlling input parameter value were
+known to UMP at store time, no guessing would be needed at all — UMP already
+has the job's `inputs` in hand when it stores the result.
+
+**Idea raised (not yet planned):** a new per-process `providers.yaml` field,
+**`result-crs-input-field`**, naming which of that process' execution input
+parameters holds the CRS that its output is/was produced in. When configured,
+the coordinator would read that parameter's value out of the job's submitted
+inputs and pass it through as the authoritative source CRS for
+`write_to_gpkg`/`write_layers_to_gpkg`, overriding/bypassing `_ensure_crs`'s
+data-absent guesswork entirely for that process. Naming follows the existing
+`result-path`/`result-storage`/`graph-properties` process-level field
+convention in `providers.yaml.example`.
