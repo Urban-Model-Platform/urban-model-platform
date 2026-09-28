@@ -23,10 +23,10 @@ from ump.utils import fetch_json, fetch_response_content
 logger = logging.getLogger(__name__)
 
 metadata_request_timeout = aiohttp.ClientTimeout(
-    total=5,
-    connect=2,
-    sock_connect=2,
-    sock_read=5,
+    total=30,
+    connect=5,
+    sock_connect=5,
+    sock_read=30,
 )
 
 # Submission requests can carry very large payloads, so do not cap total duration.
@@ -606,13 +606,32 @@ class Process:
         )
 
     def _wait_for_results_async(self, job: Job):
-        asyncio.run(self._wait_for_results(job))
+        try:
+            asyncio.run(self._wait_for_results(job))
+        except Exception as e:
+            logger.error(
+                "Unhandled exception in background results thread for job %s: %s",
+                job.job_id,
+                e,
+            )
 
     async def _wait_for_results(self, job: Job):
         logger.info("Thread started to wait for results.")
-        provider_config: ProviderConfig = providers.get_providers()[
-            self.provider_prefix
-        ]
+        try:
+            provider_config: ProviderConfig = providers.get_providers()[
+                self.provider_prefix
+            ]
+        except KeyError:
+            logger.error(
+                "Provider '%s' not found in configuration. Cannot wait for results of job %s.",
+                self.provider_prefix,
+                job.job_id,
+            )
+            self._set_job_failed(
+                job,
+                f"Provider '{self.provider_prefix}' is no longer available.",
+            )
+            return
         timeout_seconds = provider_config.timeout
 
         try:
@@ -621,6 +640,11 @@ class Process:
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
+            logger.error(
+                "Timed out waiting for remote job %s to finish (limit: %s sec.).",
+                job.job_id,
+                provider_config.timeout,
+            )
             self._set_job_failed(
                 job,
                 (
@@ -633,19 +657,26 @@ class Process:
         # setting job to "failed" even if remote job was successfull!
         except Exception as e:
             logger.error("Error while waiting for job results: %s", e)
-            self._set_job_failed(
-                job,
-                (
-                    "An unexpected error occurred while waiting for job results."
-                    "See the logs for details"
-                ),
-            )
-        else:
+            self._set_job_failed(job, str(e))
+            return
+
+        try:
             await self._store_results_if_needed(job)
+        except Exception as e:
+            logger.error(
+                "Unexpected error during post-processing of results for job %s: %s",
+                job.job_id,
+                e,
+            )
 
     async def _poll_job_until_finished(
         self, job: Job, provider_config: ProviderConfig
     ) -> dict:
+        logger.info(
+            "Polling remote job status for job %s (remote: %s).",
+            job.job_id,
+            job.remote_job_id,
+        )
 
         headers = {
             "Content-type": "application/json",
@@ -668,12 +699,25 @@ class Process:
                 )
                 self._update_job_from_status(job, status_info)
                 if self.is_finished(status_info):
+                    logger.info(
+                        "Remote job %s finished with status '%s'.",
+                        job.job_id,
+                        status_info.get("status"),
+                    )
                     break
                 await asyncio.sleep(config.UMP_REMOTE_JOB_STATUS_REQUEST_INTERVAL)
 
         return status_info
 
     def _update_job_from_status(self, job: Job, status_info):
+        new_status = status_info.get("status", "")
+        if new_status != job.status:
+            logger.debug(
+                "Job %s status: %s -> %s",
+                job.job_id,
+                job.status,
+                new_status,
+            )
         job.started = status_info.get("started")
         job.created = status_info.get("created")
         job.updated = status_info.get("updated")
@@ -686,6 +730,7 @@ class Process:
         job.update()
 
     def _set_job_failed(self, job: Job, message: str):
+        logger.error("Setting job %s to failed: %s", job.job_id, message)
         job.status = JobStatus.failed.value
         job.message = message
 
@@ -711,7 +756,13 @@ class Process:
                 providers.check_result_storage(self.provider_prefix, self.process_id)
                 == "geoserver"
             ):
+                logger.debug("Storing results for job %s to geoserver.", job.job_id)
                 await job.results_to_geoserver()
+            else:
+                logger.debug(
+                    "No geoserver result storage configured for job %s, skipping.",
+                    job.job_id,
+                )
         except Exception as e:
             logger.error("Could not store results for job %s: %s", job.job_id, e)
 
