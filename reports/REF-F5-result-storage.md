@@ -1355,3 +1355,52 @@ inputs and pass it through as the authoritative source CRS for
 data-absent guesswork entirely for that process. Naming follows the existing
 `result-path`/`result-storage`/`graph-properties` process-level field
 convention in `providers.yaml.example`.
+
+## ✅ Fixed (2026-09-28) — publication-confirmation false negative silently failed jobs whose result had actually published
+
+**Symptom.** Jobs got stuck in "Result publication in progress" and eventually
+transitioned to a permanently `failed` status with message "1 of 1 stored
+reference(s) could not be confirmed reachable within the allotted time,"
+despite the result being genuinely available in the ldproxy result store
+moments later.
+
+**Root cause #1 (code): no second chance before permanent failure.**
+`LdproxyResultStorage._confirm_publication()` runs a bounded, one-shot
+retouch+probe loop entirely inside `store()`; when its budget is exhausted it
+flags the collection `publication_pending=True` — explicitly documented as
+self-healing on the next service change, i.e. a soft/transient state.
+`ResultStorageObserver.on_job_completed()` nonetheless treated
+`publication_pending=True` as an immediate, unconditional, permanent failure
+verdict. **Fix:** added `ResultStorageCoordinator.confirm_pending()`, a
+generic adapter-agnostic recheck (bounded backoff, using the already-injected
+`HttpClientPort` against `StoredReference.liveness_url`/`items_url` — the
+generic probe V-11 always intended but never wired up). The observer now
+calls it before giving up. See `result_storage_coordinator.py` and
+`observers.py`.
+
+**Root cause #2 (deployment): `UMP_RESULTSTORE_LDPROXY_INTERNAL_URL` missing
+the service-id path segment.** In a real production setup: `base_url =
+"https://geodata.germanywestcentral.cloudapp.azure.com/ump-results"` (service
+id `ump-results` baked into the path, as required), but `internal_url =
+"http://ldproxy-ump-results.geodata.svc.cluster.local:7080"` — no
+`/ump-results` path segment, even though the k8s Service name itself contains
+"ump-results", inviting the mistake. `_probe_collection_live` and
+`_reference_for`'s `liveness_url` both append only `/collections/{id}` to
+`internal_url`, so every probe 404s — a total, systematic failure that looks
+identical, from the job's perspective, to a genuine publication problem, even
+though the result actually published correctly at `base_url`. This is a
+config/admin issue, not a code bug — `internal_url` must carry the same
+service-id path segment `base_url` does.
+
+**Fix (diagnosability, not auto-correction):** rather than guessing at the
+right internal URL, every probe now records and logs the exact URL and
+outcome (HTTP status or exception) it saw, both in
+`LdproxyResultStorage._probe_collection_live`/`_probe_pending` (adapter-level
+probe) and `ResultStorageCoordinator._probe_liveness`/`confirm_pending`
+(core-level recheck). A systematic 404 across every collection, always for
+the same URL shape, is now visible in the warning log at give-up time instead
+of a bare "still pending" — letting an operator immediately recognize a
+config mismatch instead of suspecting a code regression. Also clarified
+`UMP_RESULTSTORE_LDPROXY_INTERNAL_URL`'s docstring in `settings.py` with an
+explicit example and the exact symptom to grep logs for.
+
