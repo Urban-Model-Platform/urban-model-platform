@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -155,6 +155,24 @@ class ProcessConfig(BaseModel):
             "'emulate-ref-only'; ignored otherwise."
         ),
     )
+    result_crs_input_field: str | None = Field(
+        default=None,
+        alias="result-crs-input-field",
+        description=(
+            "Id of the top-level execution input whose value is the CRS the "
+            "remote produces its outputs in (e.g. 'target_crs'). Plain values "
+            "and qualified values ({'value': ...}) are accepted. The result "
+            "store uses it to label and reproject stored geometries."
+        ),
+    )
+    result_crs_default: str | None = Field(
+        default=None,
+        alias="result-crs-default",
+        description=(
+            "CRS of the remote's outputs when result-crs-input-field is not "
+            "set or the client omitted that input (e.g. 'EPSG:25832')."
+        ),
+    )
     result_path: str | None = Field(
         default=None,
         alias="result-path",
@@ -278,7 +296,34 @@ class ProcessConfig(BaseModel):
                 f"activate the result store, so store-outputs will be ignored."
             )
 
+        crs_fields = {
+            "result-crs-input-field": self.result_crs_input_field,
+            "result-crs-default": self.result_crs_default,
+        }
+        for name, value in crs_fields.items():
+            if value is not None and not store_activating:
+                found.append(
+                    f"Process '{self.id}': {name}={value!r} is configured but "
+                    f"transmission-mode-policy={policy!r} does not activate the "
+                    f"result store, so {name} will be ignored."
+                )
+
         return found
+
+    def resolve_result_crs(self, inputs: dict[str, Any] | None) -> str | None:
+        """Return the CRS the remote produces outputs in for these *inputs*.
+
+        The configured input's value wins over ``result-crs-default``; ``None``
+        means unknown. The value stays an opaque string — parsing it is the
+        result store's job.
+        """
+        if self.result_crs_input_field and inputs:
+            value = inputs.get(self.result_crs_input_field)
+            if isinstance(value, dict):
+                value = value.get("value")
+            if value is not None:
+                return str(value)
+        return self.result_crs_default
 
 
 class BasicAuthConfig(BaseModel):
