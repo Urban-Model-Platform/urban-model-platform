@@ -1099,7 +1099,7 @@ concurrently. Switching to NFS/ANF (removing the need for `nobrl` entirely)
 remains the more robust option for a future revisit; not pursued for now
 given the added infrastructure cost and setup complexity.
 
-## 🔲 Gap + plan (2026-09-14) — UMP must actively trigger ldproxy reload; inotify does not fire on SMB shares
+## ✅ Gap + plan (2026-09-14) — UMP must actively trigger ldproxy reload; inotify does not fire on SMB shares
 
 
 **The gap.** ldproxy's store watcher (`EventStoreDriverFs`) registers a Java
@@ -1167,7 +1167,7 @@ replica behind a normal Service would leave the others stale.
    to how `internalUrl`/`baseUrl` are already wired. No RBAC change needed
    (this is a plain HTTP call, not a k8s API call).
 
-**Not yet decided / left open for the implementation step:** whether DNS
+**decided, implementation step:** whether DNS
 fan-out failures for *some* (not all) resolved IPs should still count as an
 overall success (partial reload), and whether the resolved-IP list should be
 cached briefly (to avoid a full DNS lookup on every single stored result) or
@@ -1176,6 +1176,22 @@ unless it proves too slow in practice).
 
 - [x] partial reload success: yes
 - [x] resolved-IP list should be cached briefly
+
+**As built (verified 2026-09-30).** Points 1, 2, 4, 5, 6 as planned
+(`_trigger_reload` / `_trigger_reload_blocking` in `ldproxy_result_storage.py`,
+setting in `settings.py`, chart in `configmap-settings.yaml`). Deviations:
+
+- **Point 3:** the reload fires before the first probe *and* on every
+  confirmation retry, not once — the first call can race SMB propagating the
+  just-written entity files. The re-touch was **kept** alongside it, as a
+  fallback when `RELOAD_URL` is unset or unreachable.
+- **DNS cache** (added 2026-09-30): resolved IPs are reused for
+  `reload_dns_ttl` (30 s, constructor-injected with a clock); any failed POST
+  drops the cache so replica churn is picked up on the next trigger.
+- **Tests** (added 2026-09-30): `tests/test_result_storage_reload.py` —
+  fan-out to every distinct IP, no-op when unset, unreachable pods / DNS
+  failure never fail the store, TTL reuse vs. re-resolve, failure-driven
+  re-resolve.
 
 ## 🔲 Gap + plan (2026-09-15) — the service-entity skeleton is only ever generated once
 
@@ -1304,7 +1320,7 @@ re-triggering the OOM. A **circuit breaker** per remote/provider (or per job)
 was raised as a better fit than tuning the retry budget further — see
 `REF-IDEAS.md` for both this and the admin-retry-endpoint idea.
 
-## 🔲 Gap + plan (2026-09-16) — UMP always declares a hardcoded native CRS, never the data's actual CRS
+## ✅ Gap + plan (2026-09-16) — UMP always declares a hardcoded native CRS, never the data's actual CRS (resolved 2026-09-30, see plan below)
 
 Not yet implemented — notes only, no plan yet.
 
@@ -1403,4 +1419,424 @@ of a bare "still pending" — letting an operator immediately recognize a
 config mismatch instead of suspecting a code regression. Also clarified
 `UMP_RESULTSTORE_LDPROXY_INTERNAL_URL`'s docstring in `settings.py` with an
 explicit example and the exact symptom to grep logs for.
+
+## 🔲 Gap + plan (2026-09-29) — architecture review of the ldproxy result store (hexagonal fit + soundness)
+
+**Status: Not yet implemented.** Review only; no code changed. Source of
+truth was the code: `graphify-out/` (built 2026-09-28) contains only doc-level
+concept nodes for Feature V (`doc_concept_ldproxy_result_adapter`, …) and no
+code nodes for `ResultStorageCoordinator`, `LdproxyResultStorage`,
+`ServiceRegistry` or `ResultStorageObserver` — re-run `/graphify` before
+using the graph for Feature V questions.
+
+### Verdict
+
+The *dependency direction* is correct: nothing under `src/ump/core/` imports
+`ump.adapters.*`; `LdproxyResultStorage` receives every value (URLs, paths,
+CRS, budgets) by constructor injection from `src/ump/composition/result_storage.py`
+and never reads settings itself; ldproxy YAML knowledge is isolated in
+`ldproxy_entities.py`, persistence in `EntityConfigBackendPort` backends.
+The problems are (A) **responsibility split** between core and adapter for
+publication confirmation, (B) **technology names/capabilities in core
+models and docs**, and (C) several **soundness bugs** where a job can reach
+`successful` without a stored reference — exactly the state V-11 claims is
+unreachable.
+
+### A. Adapter ↔ core responsibility split
+
+**A1 — Publication confirmation has two owners (policy leaked into the adapter,
+mechanism duplicated in core).** `LdproxyResultStorage._confirm_publication`
+owns *mechanism* (retouch service entity, trigger xtractl reload, probe) **and
+policy** (how long to wait; budget from `_CONFIRM_BUDGETS`). Since 2026-09-28
+`ResultStorageCoordinator.confirm_pending` adds a *second* policy loop
+(module constants `_LIVENESS_RECHECK_*`, not injectable). Consequences:
+- The core recheck is **passive** (GET only). The documented ldproxy failure
+  mode ("collection disabled, not re-evaluated until the service entity
+  changes again") cannot heal without a retouch/reload, which only the
+  adapter can do. The core recheck therefore helps only for "ldproxy is merely
+  slow" — equivalent to a larger adapter budget. The 2026-09-28 fix is correct
+  but largely redundant with raising `_CONFIRM_BUDGETS`.
+- Two probe URLs for one concept: adapter probes
+  `{internal_url}/collections/{id}?f=json` (urllib, `asyncio.to_thread`);
+  the `liveness_url` it hands to core is
+  `{internal_url}/collections/{id}/items?limit=1` (no `f=json`, probed via
+  `HttpClientPort.get`). Different content negotiation → possible
+  disagreement between the two verdicts.
+- Worst-case wait is the *sum* of two budgets (k8s: ~240 s + ~61 s), neither
+  aware of the other.
+
+*Plan:* one owner for policy, one for mechanism. Add
+`ResultStoragePort.confirm(job_id, refs) -> list[StoredReference]` (one
+nudge + probe round, adapter-specific); `store()` returns immediately with
+`publication_pending`; the core owns the loop/budget (injected, via
+`RetryPort`) and calls `confirm` per round. Drop `liveness_url` and
+`_probe_liveness` from core, or keep `liveness_url` as the *only* probe
+URL and have the adapter use it too.
+
+**A2 — `HttpClientPort.get()` is misused as a liveness probe.** The port
+contract is "fetch and parse JSON"; `AioHttpClientAdapter._fetch_json` parses
+JSON *before* `raise_for_status`, so a live endpoint answering HTML (or any
+non-JSON) is reported "not live" as `502 Invalid Response Content`. The
+`StoredReference.liveness_url` docstring promises "success is simply HTTP
+status < 400", which no port method delivers. `_probe_liveness` also catches
+bare `Exception`, hiding programming errors (e.g. uninitialised session
+`RuntimeError`) as "not live". *Plan:* add `HttpClientPort.head_status(url) -> int`
+(or `status(url)`), or move probing into the adapter per A1.
+
+**A3 — Hand-rolled retry loops instead of `RetryPort`.** Three backoff loops
+(`_fetch_results_with_retry`, `confirm_pending`, adapter
+`_confirm_publication`) plus `_persist_with_retry`, each with its own
+`asyncio.sleep` (real clock, not injectable). `JobManager` already fetches
+results through `RetryPort` with `JobManagerConfig` budgets. The coordinator
+also re-implements `results_url` construction + auth-header resolution that
+`JobManager.get_results` has. *Plan:* inject `RetryPort` into the
+coordinator; extract one "fetch remote results" use case shared by
+`JobManager` and the coordinator.
+
+**A4 — Observer coupled to internals of other modules.**
+`ResultStorageObserver` depends on concrete `ResultStorageCoordinator` (no
+port), imports private `_ensure_self_link` / `_ensure_results_link` from
+`execution_steps`, and lazily imports `_PUBLICATION_COMPLETE_MESSAGE` from
+`job_manager` inside `_finalize_publication` (circular-import workaround).
+The same constant is duplicated, unused, in the coordinator. *Plan:* move
+link helpers and status messages to a shared core module (e.g.
+`core/models/status_links.py`); delete the coordinator copy.
+
+### B. Technology leaked into core
+
+**B1 — Adapter names in the domain model.** `ProcessConfig.result_storage:
+Literal["geoserver", "ldproxy", "remote"]` names concrete technologies; its
+docstring and validator hard-code the ldproxy format whitelist
+(geo+json, flatgeobuf). Adding a store means editing a core model. *Plan:*
+core should express intent only (`result-storage: ump | remote`, or an opaque
+adapter id validated at composition); the format whitelist is an adapter
+capability (e.g. `ResultStoragePort.supported_media_types`).
+
+**B2 — `geoserver` is accepted but does nothing.** Composition treats
+`geoserver` as `remote` (→ `NullResultStorage`), yet
+`_validate_transmission_storage_combo` accepts it and its own error message
+recommends it ("Set result-storage to 'ldproxy' (or 'geoserver')").
+`emulate-ref-only` + `geoserver` passes validation and silently yields no
+reference (see C1). Related to the 2026-09-07 `NullResultStorage` gap.
+*Plan:* reject `geoserver` until implemented; fix the message.
+
+**B3 — Adapter settings in `core/settings.py`.** ~15
+`UMP_RESULTSTORE_LDPROXY_*` / `UMP_RESULTSTORE_K8S_*` settings live in the
+core settings module, whose own docstring says the core must not depend on
+concrete adapters. Only composition reads them, so this is a placement issue,
+not a runtime dependency. *Plan:* move to `composition/` (e.g. a
+`ResultStoreSettings` sub-model).
+
+**B4 — Port docstrings describe the adapter.** `core/interfaces/result_storage.py`
+documents ldproxy's format whitelist on `UnsupportedResultError`, references
+`UMP_RESULTSTORE_LDPROXY_INTERNAL_URL` in `StoredReference`, and still states
+the obsolete "emulate-ref falls back to inline value" rule on
+`ResultStorageError` (also in the coordinator module docstring and the
+observer docstring's "we deliberately do not mark the job failed", both
+superseded by V-11). `Optional` is used but not imported (masked by
+`from __future__ import annotations`; a type checker flags it).
+
+**Acceptable (not leaks):** OGC document parsing, qualified-value unwrapping
+and base64 decoding (`_unwrap_output_value`) are OGC API Processes semantics
+and belong in core. GeoJSON detection (`_is_geojson_document`) is borderline
+but needed to tell a raw GeoJSON response from an OGC document.
+
+### C. Soundness
+
+**C1 — `successful` without a stored reference ⇒ `/results` proxies the inline
+value the client refused.** `JobManager.get_results` assumes (comment:
+"`stored_outputs` is always populated by the time a client can observe
+`successful`") and otherwise falls back to the transparent proxy. But
+`coordinate()` returns `None`/`[]` and the observer then finalizes
+`successful` in these paths:
+1. `exists()` is true on re-entry (restart/poll recovery) but `stored_outputs`
+   was never persisted (crash after stage 1, see C2).
+2. No storable payloads found (only a warning is logged), even under
+   `emulate-ref-only`.
+3. `_persist_with_retry` exhausts `_PERSIST_MAX_ATTEMPTS` and only logs
+   "gave up" — data is stored, job row has no reference, the next attempt is
+   skipped by `exists()`.
+4. `NullResultStorage.store` returns `[]` (B2 / 2026-09-07 gap).
+
+*Plan:* when storage is required, the observer must treat "no references
+persisted" as failure (`_finalize_publication(success=False)`); on the
+`exists()` skip, re-read the job and verify `stored_outputs` instead of
+assuming success; make `_persist_with_retry` raise on give-up. Harden
+`get_results`: if the process policy requires storage and `stored_outputs`
+is empty, return 502 rather than proxying.
+
+**C2 — `exists()` (gpkg present) is not a "fully stored" signal.** The
+manifest write sits *between* stage 1 and the `try`, so a manifest failure
+leaves an orphan `.gpkg` without rollback. A process kill between stages
+also leaves the `.gpkg`. Either way `exists()` is permanently true and every
+later attempt is skipped — contradicting the module docstring's "exists
+stays honest". *Plan:* move the manifest write inside the `try`; base
+`exists()` on a completion marker written last (e.g. manifest with
+`"complete": true`), not on the first artifact.
+
+**C3 — Persisted `publication_pending` is write-only and goes stale.**
+`_apply_stored_references` stores `publication_pending` per output in
+`stored_outputs`, nothing reads it, and `confirm_pending`'s updated refs are
+never persisted back. `any_pending` is computed and unused, and the adjacent
+comment claims this function sets `_PUBLICATION_COMPLETE_MESSAGE` (it does
+not). *Plan:* drop the field (V-11 made it redundant) or persist the
+confirmed state.
+
+**C4 — Dead code in the coordinator.** `_handle_storage_failure` always
+raises, so the `return None` after both call sites is unreachable;
+`_record_downgrade` has no callers since the no-fallback decision.
+
+**C5 — No overall deadline while the job sits in `running`.** Worst case =
+8 fetch attempts × 300 s timeout + ~120 s backoff, then the adapter confirm
+budget, then the core recheck — tens of minutes of a job reported `running`
+with no progress signal and no single configured ceiling. *Plan:* one
+injected end-to-end publication deadline owned by the core (fits A1/A3).
+
+### Priority
+
+1. C1 + C2 (client can receive the value it explicitly refused; permanent
+   skip) — correctness.
+2. B2 (validator recommends a no-op value) — cheap, prevents silent misconfig.
+3. A1 + A2 (single owner for confirmation; proper status probe) — also
+   resolves C5.
+4. A3, A4, B1, B3, B4, C3, C4 — structural cleanup.
+
+Suggested acceptance tests (unit, fakes only): observer finalizes `failed`
+when `coordinate` persisted no references under a required policy; observer
+re-entry with `exists()` true and empty `stored_outputs` does not report
+`successful`; manifest write failure leaves `exists()` false; `get_results`
+returns 502 for a required-storage job with empty `stored_outputs`;
+`_validate_transmission_storage_combo` rejects `geoserver`.
+
+## 🔲 Gap + plan (2026-09-29) — package structure: composition root split by feature, inconsistent layering
+
+**Status: Not yet implemented.** Review only; no code changed. Scope: `src/ump/`.
+
+### S1 — `composition/` was deliberate, but applied to one feature only
+
+`src/ump/composition/` (one module, `result_storage.py`) was introduced in V-8
+(commit `a40d570`, 2026-08-06) with a stated reason (V-8 design note (1),
+package docstring): `ump.asgi` has import-time side effects (file watcher,
+DB engine, ASGI app), so wiring placed there cannot be unit-tested. The
+reason is sound; the execution is partial:
+- **Two composition roots, split by feature, not by concern.** Result-storage
+  wiring is in `composition/`; everything else (providers, HTTP client, auth,
+  poll lock, repository, cleanup runner, `_process_manager_factory`,
+  `_job_manager_factory`, `_validate_resultstore_settings`,
+  `construct_database_url`) is module-level code in `asgi.py`. Even Feature V
+  is split: the port is built in `composition/`, the
+  `ResultStorageCoordinator` and `ResultStorageObserver` in `asgi.py`.
+- **Docs disagree about where the root is.** `main.py` says "`ump.asgi` (the
+  single composition root)"; REF-00 and REF-Refactoring-status say `main.py`;
+  `composition/__init__.py` introduces a third place. No ADR records the
+  convention.
+
+*Plan (pick one, record it as a decision):*
+(a) **Complete it** — move all wiring into `composition/` as pure factories
+(`build_http_client(settings)`, `build_job_manager(...)`, …, and one
+`build_app(settings) -> FastAPI`); `asgi.py` shrinks to `app = build_app(UmpSettings())`.
+This makes the whole graph testable and removes import-time side effects.
+(b) **Fold it back** — move `composition/result_storage.py` into `asgi.py`
+and accept that wiring is untested. (a) is recommended; it is what the V-8
+rationale implies for every feature, not just Feature V.
+
+### S2 — `core/managers/` vs `core/services/` has no rule
+
+`JobManager`, `ProcessManager`, the status-derivation orchestrator and the
+observers are "managers"; `ResultStorageCoordinator`, `JobCleanupService`,
+`authorization` are "services". Both hold application use cases; none is a
+domain service. `ResultStorageObserver` (Feature V) lives in
+`managers/observers.py` next to polling/history observers, away from its
+coordinator. Name clash: `core/interfaces/observers.py` vs
+`core/managers/observers.py`. *Plan:* one application layer
+(e.g. `core/application/`) with sub-packages per capability (`jobs/`,
+`processes/`, `result_storage/` — coordinator + observer + pure helpers).
+
+### S3 — Oversized modules
+
+`job_manager.py` 1424 lines, `result_storage_coordinator.py` 1015,
+`execution_steps.py` 902. The coordinator's ~400 lines of pure OGC-document
+helpers (`_extract_payloads`, `_unwrap_output_value`, `_navigate_dot_path`,
+`_resolve_store_output_ids`, `_apply_stored_references`) are domain logic
+and can move to a module of their own without behaviour change. Private
+helpers shared across modules (`_ensure_self_link`, `_ensure_results_link`,
+`_PUBLICATION_COMPLETE_MESSAGE`; see A4) show the missing module.
+
+### S4 — Configuration spread over four places, two globals
+
+`core/settings.py` (env, incl. adapter settings — B3), `core/config.py`
+(`JobManagerConfig`), `core/models/providers_config.py` (per-process YAML),
+`core/logging_config.py`. `settings.py` also exposes module globals
+`app_settings` and `logger` (a service locator); core modules
+(`process_manager.py`, `utils/link_rewriter.py`) read `app_settings`
+directly instead of receiving values by injection. *Plan:* core receives
+config objects via constructors only; `UmpSettings` lives at the edge
+(composition) and is mapped to core config models there.
+
+### S5 — Two logging conventions in core
+
+`JobManager`, `ProcessManager`, the steps and strategies use the injected
+`LoggingPort` (`from ump.core.settings import logger`); Feature V's
+`ResultStorageCoordinator`, `ResultStorageObserver` and `JobCleanupService`
+use stdlib `logging.getLogger(__name__)`. Either is defensible, but mixing
+them means `set_logger` does not govern all core output. *Plan:* pick one
+(stdlib `logging` is simpler; then drop `LoggingPort`/`DelegatingLogger`).
+
+### S6 — Null objects and ports placed inconsistently
+
+`NullResultStorage` and `NullResultValueCache` (implementations) live in
+`core/interfaces/`; `NoOpPollLock` lives in `adapters/`. `EntityConfigBackendPort`
+is an adapter-internal abstraction but is named `*Port` and sits in
+`adapters/result_storage/`, which blurs what "port" means in this codebase.
+*Plan:* null adapters in `adapters/`; rename adapter-internal abstractions
+(e.g. `EntityConfigBackend`) and reserve `*Port` for `core/interfaces/`.
+
+### S7 — `adapters/result_storage/` is ldproxy-specific under a generic name
+
+Everything except `inmemory_value_cache.py` (a different port) and
+`atomic_fs.py` is ldproxy-specific (`ldproxy_entities`, `service_registry`,
+`entity_config_*`, `gpkg_writer`). A second store would mix into the same
+package. `__init__.py` is stale: lists a non-existent `ldproxy_adapter`
+module and says `entity_config_backend` contains the factory (moved to
+`composition/`). *Plan:* `adapters/result_storage/ldproxy/…`;
+`adapters/result_value_cache/inmemory.py`; fix the package docstring.
+
+### S8 — Dead / orphan modules
+
+`core/utils/retry.py` (empty), `core/interfaces/job_polling.py`
+(`PollingService`, no implementations or users). The top-level `old_src/`
+tree is outside the package but still in the repo. Adapter file naming is
+mixed (`*_adapter.py`, `poll_lock_pg.py`, `retry_tenacity.py`,
+`job_repository_sql.py`). *Plan:* delete the orphans after confirmation;
+adopt `<port>_<technology>.py` for new adapters.
+
+### Priority
+
+1. S1 — decide and record the composition-root convention (blocks nothing, but
+   every new feature currently has to guess).
+2. S4 + S5 — injection instead of globals; one logging convention.
+3. S2, S3, S6, S7 — moves/renames, test-covered, no behaviour change.
+4. S8 — cleanup.
+
+Verification for all of the above: `./.venv/bin/python -m pytest tests/ -q`
+unchanged (moves only), plus, for S1(a), one test that builds the app via
+`build_app(settings)` with in-memory adapters and no network/DB.
+
+## ✅ Plan (2026-09-30) — declare the result's actual source CRS (fixes 2026-09-16 gap)
+
+**Status: Implemented 2026-09-30 — see "As built" at the end of this section.**
+
+### Decisions (user, 2026-09-30)
+
+| # | Question | Decision |
+|---|---|---|
+| D1 | What does the store hold once the source CRS is known? | **Reproject to `UMP_RESULTSTORE_LDPROXY_NATIVE_CRS`** (default 4326). `nativeCrs` in the provider entity stays unchanged — the fix is "label correctly, then reproject", not "per-job native CRS". |
+| D2 | Data embeds a CRS (FlatGeobuf) *and* the input field yields one, and they differ | **Embedded CRS wins**, log a warning naming both. |
+| D3 | Field configured, client omitted the input | Use new per-process **`result-crs-default`** (e.g. `EPSG:25832`). |
+| D4 | Value is not a parseable CRS | **Fail the store** → V-11 `failed` with a message naming the value and the input field. |
+| D5 | Coordinate-range safety net | **Included**: data about to be labelled with a geographic CRS whose bounds exceed lon/lat range fails instead of being mislabelled. |
+
+### Assumptions (confirm or correct before coding)
+
+- **A1** — Neither input nor `result-crs-default` present → today's behaviour
+  (assume the target CRS, RFC 7946), now guarded by the D5 safety net.
+- **A2** — `result-crs-default` is usable on its own (process that always
+  emits e.g. 25832 and has no CRS parameter).
+- **A3** — `result-crs-input-field` names a **top-level** input id. The value
+  may be a plain string/int or an OGC qualified value `{"value": ...}`. No
+  dot-paths.
+- **A4** — The value is resolved **at job creation**, not at store time:
+  (a) `job.inputs` is only persisted below `inline_inputs_size_limit`, so
+  large requests (the typical geo case) would lose it; (b) it records what
+  the remote was actually asked to do, immune to a later `providers.yaml`
+  hot-reload.
+
+### Placement (hexagonal)
+
+The core treats the CRS as an **opaque string** — it only knows "this process
+input tells us the output CRS". Parsing, reprojection and the range check need
+`pyproj`/geopandas and stay in the adapter.
+
+| Layer | Change |
+|---|---|
+| Core model `ProcessConfig` | `result_crs_input_field: str \| None` (alias `result-crs-input-field`), `result_crs_default: str \| None` (alias `result-crs-default`). Added to `policy_warnings()` exactly like `store-outputs`: warn when set but the policy does not activate the store. |
+| Core model `Job` | `result_crs: str \| None` — the resolved source CRS string. |
+| Core step `CreateLocalJobStep` | Resolve from `context.execute_payload["inputs"]` + `context.process_config` (unwrap qualified value; fall back to default); set `Job(result_crs=...)`. Independent of the inline-inputs limit (A4). |
+| Core port `ResultPayload` | `source_crs: str \| None = None` — "CRS the remote produced this output in, as supplied/configured; `None` = unknown". Adapter-agnostic, additive, default keeps all callers valid. |
+| Core `ResultStorageCoordinator._extract_payloads*` | Pass `job.result_crs` into every `ResultPayload`. |
+| Adapter `job_repository_sql` + migration `0006_add_result_crs_to_jobs` | Nullable `VARCHAR` column; map in `from_domain`/`to_domain`. In-memory repo needs nothing (stores the domain object). |
+| Adapter `gpkg_writer` | Layer tuple gains `source_crs`. `_ensure_crs(gdf, target_epsg, source_crs, layer)` becomes: parse `source_crs` once via `pyproj.CRS.from_user_input` (failure → `ResultStorageError`, D4) → embedded CRS if present (warn on mismatch, D2) else `set_crs(source_crs)` else `set_crs(target)` (A1) → **range check** (D5, `UnsupportedResultError`) → `to_crs(target)` if different. geopandas transforms with `always_xy`, so GeoJSON's x/y order is preserved regardless of EPSG axis order. |
+| Adapter `LdproxyResultStorage.store` | Pass `p.source_crs` through in the layer tuples. Nothing else — `nativeCrs` unchanged (D1). |
+| Composition (startup) | When ldproxy is active, validate every configured `result-crs-default` with the adapter's parser so a typo fails at startup, not on the first job. |
+| Docs | `providers.yaml.example` (both fields, with the "one parameter drives input and output CRS" example), CHANGELOG. |
+
+Failure flow needs no new wiring: `ResultStorageError` / `UnsupportedResultError`
+from `store()` already become a V-11 `failed` with the reason in the message.
+
+### Acceptance criteria → tests (unit, fakes only, no network/DB)
+
+| AC | Criterion | Test (planned) |
+|---|---|---|
+| AC1 | Projected GeoJSON + `source_crs="EPSG:25832"` is reprojected; stored coordinates are valid lon/lat at the expected location | `tests/test_result_storage_gpkg_writer.py::TestSourceCrs::test_reprojects_declared_source_crs_to_target` |
+| AC2 | Accepted value formats: `EPSG:25832`, `25832` (int), OGC URI `http://www.opengis.net/def/crs/EPSG/0/25832`, URN `urn:ogc:def:crs:EPSG::25832` | same class, `parametrize` |
+| AC3 | Embedded CRS wins over a conflicting `source_crs`, warning logged | `test_embedded_crs_wins_over_declared` |
+| AC4 | Unparseable `source_crs` → `ResultStorageError` naming the value | `test_rejects_unparseable_source_crs` |
+| AC5 | No CRS info + coordinates outside lon/lat → `UnsupportedResultError` | `test_rejects_projected_coordinates_labelled_geographic` |
+| AC6 | No CRS info + valid lon/lat → unchanged behaviour (regression) | `test_unknown_crs_with_lonlat_is_labelled_target` |
+| AC7 | Job creation: input value wins over default; default used when input omitted; qualified value unwrapped; neither → `None` | `tests/test_execution_steps_result_crs.py::TestResolveResultCrs` (parametrize) |
+| AC8 | `result_crs` captured even when inputs exceed the inline limit | `test_captured_when_inputs_not_persisted_inline` |
+| AC9 | Coordinator passes `job.result_crs` into every `ResultPayload` | `tests/test_result_storage_coordinator*.py::test_payloads_carry_job_result_crs` |
+| AC10 | `result_crs` round-trips through the SQL record mapping | `tests/test_job_repository_sql_mapping.py::test_result_crs_round_trip` |
+| AC11 | Config aliases parse; warning when set on a non-store-activating policy | `tests/test_providers_config*.py::TestResultCrsConfig` |
+| AC12 | Invalid `result-crs-default` fails startup validation when ldproxy is active | `tests/test_result_storage_composition.py::test_rejects_invalid_result_crs_default` |
+| AC13 | Store failure from AC4/AC5 ends the job `failed` with the reason in `message` | already covered by `TestResultStorageObserver` failure path — no new test |
+
+### Steps
+
+1. Core config + model fields (AC11) → verify: config tests.
+2. Resolution in `CreateLocalJobStep` (AC7, AC8).
+3. Migration `0006` + SQL mapping (AC10) → verify: `flask db upgrade` on the dev DB.
+4. `ResultPayload.source_crs` + coordinator pass-through (AC9).
+5. `gpkg_writer._ensure_crs` rewrite + adapter pass-through (AC1–AC6).
+6. Startup validation of `result-crs-default` (AC12).
+7. Docs; full suite green: `./.venv/bin/python -m pytest tests/ -q`.
+
+Out of scope: per-job `nativeCrs` (rejected in D1), inferring the CRS from
+the remote process description's input default, dot-path input fields.
+
+### As built (2026-09-30)
+
+All steps done; A1–A3 confirmed. Deviations from the plan above:
+
+- **GeoJSON never has `gdf.crs is None`.** GDAL labels every GeoJSON without
+  a `crs` member as EPSG:4326 (verified with pyogrio), so the 2026-09-16 gap
+  text is slightly off: the mislabel happens in the "already target EPSG"
+  branch, not the `None` branch. Consequently, for GeoJSON only an explicit
+  top-level `crs` member counts as "embedded" (D2); detecting it costs one
+  `json.loads`, paid only when a source CRS is configured.
+- **Split instead of one rewritten `_ensure_crs`:** `_label_source_crs`
+  (parse, D2, label) runs before the unchanged-signature `_ensure_crs`, which
+  gained the D5 range check for every geographic CRS — including the
+  unconfigured case, so existing processes emitting projected GeoJSON now
+  fail the store instead of publishing garbage.
+- **Layer tuple:** the 4th element `source_crs` is optional, so existing
+  3-tuple callers stay valid.
+- **Parser shared with startup:** public `gpkg_writer.parse_crs`;
+  `composition.validate_result_crs_defaults` runs inside
+  `build_result_storage_port` (AC12). Not re-run on `providers.yaml`
+  hot-reload — a bad default there fails at store time (AC4).
+- **D4 message** names the value, not the input field (the adapter does not
+  know which field supplied it; the job's config does).
+- Resolution lives on `ProcessConfig.resolve_result_crs` (pure domain);
+  the coordinator applies `job.result_crs` to all payloads with
+  `dataclasses.replace` at one site.
+
+All AC tests are in `tests/test_result_crs.py` (one file instead of the
+planned per-layer files; docstrings name the AC): `TestSourceCrs` +
+`TestLdproxyStoreUsesSourceCrs` (AC1–AC6), `TestResolveResultCrs` (AC7),
+`TestCreateLocalJobCapturesResultCrs` (AC8), `TestCoordinatorPassesSourceCrs`
+(AC9), `TestJobRecordResultCrs` (AC10), `TestResultCrsConfig` (AC11),
+`TestValidateResultCrsDefaults` (AC12). AC13 is covered by the existing tests.
+Suite: 435 passed, 1 pre-existing failure (`test_k8s_backend`, `kubernetes`
+not installed). Migration `0006` has not yet been applied to a real DB.
 
