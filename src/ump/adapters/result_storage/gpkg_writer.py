@@ -28,15 +28,21 @@ ldproxy URL.  Tests can run it over a temp directory with no ldproxy installed.
 from __future__ import annotations
 
 import io
+import json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import geopandas as gpd
+from pyproj import CRS
+from pyproj.exceptions import CRSError
 
 from ump.adapters.result_storage.atomic_fs import atomic_write_path
-from ump.core.interfaces.result_storage import UnsupportedResultError
+from ump.core.interfaces.result_storage import (
+    ResultStorageError,
+    UnsupportedResultError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +156,7 @@ def write_to_gpkg(
     layer_name: str,
     output_path: Path,
     target_crs_epsg: int = 4326,
+    source_crs: str | None = None,
 ) -> GpkgLayerSchema:
     """Convert *body_bytes* to a GeoPackage file and return the layer schema.
 
@@ -171,6 +178,8 @@ def write_to_gpkg(
         target_crs_epsg: EPSG code to reproject to if necessary.
                          Defaults to 4326 (WGS84) because OGC GeoJSON is WGS84
                          by RFC 7946 and the ldproxy provider defaults to 4326.
+        source_crs:      CRS the coordinates are in when the data does not
+                         declare one itself (see ``_label_source_crs``).
 
     Returns:
         A ``GpkgLayerSchema`` describing the written layer.
@@ -192,6 +201,7 @@ def write_to_gpkg(
             "An empty GeoPackage cannot be registered with ldproxy."
         )
 
+    gdf = _label_source_crs(gdf, body_bytes, driver, source_crs, layer_name)
     gdf = _ensure_crs(gdf, target_crs_epsg, layer_name)
 
     gdf, id_source_path, id_type, promoted_id = _sanitize_and_resolve_id(
@@ -212,7 +222,7 @@ def write_to_gpkg(
 
 
 def write_layers_to_gpkg(
-    layers: list[tuple[str, bytes, str]],
+    layers: list[tuple[str, bytes, str] | tuple[str, bytes, str, str | None]],
     output_path: Path,
     target_crs_epsg: int = 4326,
 ) -> dict[str, GpkgLayerSchema]:
@@ -225,9 +235,10 @@ def write_layers_to_gpkg(
     file each. This is the multi-output counterpart to ``write_to_gpkg``.
 
     Args:
-        layers:          One ``(output_id, body_bytes, media_type)`` tuple per
-                         output to store. ``output_id`` becomes the GeoPackage
-                         layer name — see ``validate_output_id``.
+        layers:          One ``(output_id, body_bytes, media_type[, source_crs])``
+                         tuple per output to store. ``output_id`` becomes the
+                         GeoPackage layer name — see ``validate_output_id``;
+                         ``source_crs`` as in ``write_to_gpkg``.
         output_path:     Destination ``.gpkg`` file path. The parent directory
                          must already exist. Written atomically: either every
                          layer ends up in the file, or none does.
@@ -257,7 +268,8 @@ def write_layers_to_gpkg(
     schemas: dict[str, GpkgLayerSchema] = {}
     prepared: list[tuple[str, gpd.GeoDataFrame]] = []
 
-    for output_id, body_bytes, media_type in layers:
+    for output_id, body_bytes, media_type, *rest in layers:
+        source_crs = rest[0] if rest else None
         validate_output_id(output_id)
         normalised_type = _normalise_media_type(media_type)
         driver = _require_supported_type(normalised_type)
@@ -268,6 +280,7 @@ def write_layers_to_gpkg(
                 f"Layer '{output_id}': FeatureCollection contains no features. "
                 "An empty GeoPackage cannot be registered with ldproxy."
             )
+        gdf = _label_source_crs(gdf, body_bytes, driver, source_crs, output_id)
         gdf = _ensure_crs(gdf, target_crs_epsg, output_id)
         gdf, id_source_path, id_type, promoted_id = _sanitize_and_resolve_id(
             gdf, output_id
@@ -321,12 +334,68 @@ def _read_geodataframe(
     try:
         gdf = gpd.read_file(io.BytesIO(body_bytes), engine="pyogrio")
     except Exception as exc:
-        from ump.core.interfaces.result_storage import ResultStorageError
-
         raise ResultStorageError(
             f"Layer '{layer_name}': could not parse {driver} bytes: {exc}"
         ) from exc
     return gdf
+
+
+def _label_source_crs(
+    gdf: gpd.GeoDataFrame,
+    body_bytes: bytes,
+    driver: str,
+    source_crs: str | None,
+    layer_name: str,
+) -> gpd.GeoDataFrame:
+    """Label *gdf* with *source_crs* unless the data declares its own CRS.
+
+    GDAL reports every GeoJSON without a ``crs`` member as EPSG:4326 (RFC
+    7946), so for GeoJSON only an explicit ``crs`` member counts as declared.
+    """
+    if source_crs is None:
+        return gdf
+    declared = parse_crs(source_crs)
+    embedded = (
+        gdf.crs
+        if driver != "GeoJSON" or _geojson_has_crs_member(body_bytes)
+        else None
+    )
+    if embedded is None:
+        return gdf.set_crs(declared, allow_override=True)
+    if not embedded.equals(declared, ignore_axis_order=True):
+        logger.warning(
+            "[gpkg] layer '%s' declares %s, configured source CRS is %s — "
+            "using the CRS declared in the data",
+            layer_name,
+            embedded.to_string(),
+            source_crs,
+        )
+    return gdf
+
+
+def parse_crs(value: str) -> CRS:
+    """Parse any notation pyproj accepts (EPSG:n, n, OGC URI/URN)."""
+    try:
+        return CRS.from_user_input(value)
+    except CRSError as exc:
+        raise ResultStorageError(f"{value!r} is not a valid CRS: {exc}") from exc
+
+
+def _geojson_has_crs_member(body_bytes: bytes) -> bool:
+    document = json.loads(body_bytes)
+    return isinstance(document, dict) and document.get("crs") is not None
+
+
+def _require_lonlat_range(gdf: gpd.GeoDataFrame, layer_name: str) -> None:
+    """Refuse projected coordinates labelled with a geographic CRS."""
+    minx, miny, maxx, maxy = gdf.total_bounds
+    if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+        raise UnsupportedResultError(
+            f"Layer '{layer_name}': coordinates (bounds {minx:.1f}, {miny:.1f}, "
+            f"{maxx:.1f}, {maxy:.1f}) are outside the lon/lat range of "
+            f"{gdf.crs.to_string()}; the data is probably projected. Configure "
+            "result-crs-input-field or result-crs-default for this process."
+        )
 
 
 def _ensure_crs(
@@ -346,7 +415,10 @@ def _ensure_crs(
             layer_name,
             target_epsg,
         )
-        return gdf.set_crs(epsg=target_epsg)
+        gdf = gdf.set_crs(epsg=target_epsg)
+
+    if gdf.crs.is_geographic:
+        _require_lonlat_range(gdf, layer_name)
 
     if gdf.crs.to_epsg() == target_epsg:
         return gdf  # already correct
