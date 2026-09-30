@@ -37,10 +37,15 @@ from typing import NamedTuple, Optional
 
 from ump.adapters.result_storage.entity_config_backend import EntityConfigBackendPort
 from ump.adapters.result_storage.entity_config_fs import FilesystemEntityConfigBackend
+from ump.adapters.result_storage.gpkg_writer import parse_crs
 from ump.adapters.result_storage.ldproxy_result_storage import LdproxyResultStorage
 from ump.adapters.result_storage.service_registry import ServiceRegistry
 from ump.core.interfaces.providers import ProvidersPort
-from ump.core.interfaces.result_storage import NullResultStorage, ResultStoragePort
+from ump.core.interfaces.result_storage import (
+    NullResultStorage,
+    ResultStorageError,
+    ResultStoragePort,
+)
 from ump.core.settings import UmpSettings
 
 logger = logging.getLogger(__name__)
@@ -119,6 +124,25 @@ def ldproxy_required(providers: ProvidersPort) -> bool:
     )
 
 
+def validate_result_crs_defaults(providers: ProvidersPort) -> None:
+    """Fail startup if an ldproxy process has an unparseable result-crs-default.
+
+    Uses the same parser as the store step, so a default that passes here
+    cannot fail every job of that process later.
+    """
+    for provider in providers.get_providers():
+        for process in provider.processes:
+            if process.result_storage != "ldproxy" or not process.result_crs_default:
+                continue
+            try:
+                parse_crs(process.result_crs_default)
+            except ResultStorageError as exc:
+                raise ValueError(
+                    f"Process '{process.id}' of provider '{provider.name}': "
+                    f"result-crs-default {exc}"
+                ) from exc
+
+
 def build_entity_config_backend(settings: UmpSettings) -> EntityConfigBackendPort:
     """Select and construct the entity-config backend named by settings.
 
@@ -195,6 +219,7 @@ def build_result_storage_port(
     if not ldproxy_required(providers):
         return NullResultStorage(), None
 
+    validate_result_crs_defaults(providers)
     backend = build_entity_config_backend(settings)
     registry = ServiceRegistry(
         backend=backend,
