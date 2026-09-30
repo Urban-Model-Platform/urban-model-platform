@@ -456,6 +456,11 @@ class CreateLocalJobStep(PipelineStep):
             # at job-completion time without re-parsing the original request.
             response_mode=context.response_mode or "raw",
             outputs_spec=context.output_specs or None,
+            result_crs=(
+                context.process_config.resolve_result_crs(inputs)
+                if context.process_config is not None
+                else None
+            ),
         )
         logger.debug(
             f"[step:create] job_id={context.job.id} inline_inputs={'yes' if inline else 'no'}"
