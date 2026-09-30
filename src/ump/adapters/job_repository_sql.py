@@ -79,6 +79,7 @@ class JobRecord(SQLModel, table=True):
     # Stored as plain TEXT and JSONB so they survive without a schema migration
     # when the underlying Pydantic models evolve.
     response_mode: Optional[str] = Field(default=None)
+    result_crs: Optional[str] = Field(default=None)
     outputs_spec: Optional[dict] = Field(
         default=None, sa_column=Column(JSONB, nullable=True)
     )
@@ -128,6 +129,7 @@ class JobRecord(SQLModel, table=True):
             version=job.version,
             response_mode=job.response_mode,
             outputs_spec=job.outputs_spec,
+            result_crs=job.result_crs,
             stored_outputs=job.stored_outputs,
         )
 
@@ -155,6 +157,7 @@ class JobRecord(SQLModel, table=True):
             version=self.version,
             response_mode=self.response_mode,
             outputs_spec=self.outputs_spec,
+            result_crs=self.result_crs,
             stored_outputs=self.stored_outputs,
         )
 
