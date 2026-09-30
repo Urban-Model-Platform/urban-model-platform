@@ -129,6 +129,9 @@ class Job(BaseModel):
     # created by a different UMP instance or a previous process run.
     response_mode: Optional[str] = None  # "raw" | "document" — client's response field
     outputs_spec: Optional[dict] = None  # verbatim execute-body "outputs" map
+    # CRS the remote produces outputs in (ProcessConfig.resolve_result_crs);
+    # captured here because large inputs are not persisted inline.
+    result_crs: Optional[str] = None
 
     def touch(self) -> None:
         """Update the `updated` timestamp (manager should call after mutations)."""
