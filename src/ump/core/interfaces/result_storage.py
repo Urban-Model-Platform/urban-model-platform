@@ -56,11 +56,15 @@ class ResultPayload:
         media_type: IANA media type string (e.g. ``"application/geo+json"``).
                     The store adapter uses this to decide whether it can process
                     the payload and which parser to use.
+        source_crs: CRS the remote produced this output in, as configured or
+                    supplied by the client (opaque, e.g. ``"EPSG:25832"``).
+                    ``None`` means unknown.
     """
 
     output_id: str
     body_bytes: bytes
     media_type: str
+    source_crs: str | None = None
 
 
 @dataclass(frozen=True)
