@@ -29,6 +29,7 @@ from ump.core.settings import UmpSettings
 def _process(result_storage: str) -> Mock:
     process = Mock()
     process.result_storage = result_storage
+    process.result_crs_default = None
     return process
 
 
