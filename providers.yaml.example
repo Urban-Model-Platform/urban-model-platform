@@ -23,6 +23,15 @@
 #                   (default: remote)
 #   result-path     Dot-separated path to the feature collection inside the
 #                   result object, e.g. "result.features". Used with ldproxy.
+#   result-crs-input-field  Id of the top-level execute input whose value is
+#                   the CRS the remote writes its outputs in (EPSG:n, n, OGC
+#                   URI or URN). Stored results are labelled with it and
+#                   reprojected to UMP_RESULTSTORE_LDPROXY_NATIVE_CRS.
+#                   Only used with transmission-mode-policy emulate-ref(-only).
+#   result-crs-default  Output CRS when the input above is not configured or
+#                   the client omitted it. Validated at startup. Without
+#                   either, outputs are assumed to be lon/lat (RFC 7946) and
+#                   projected coordinates are refused.
 #   graph-properties  Coordinate paths for graph-based visualisation (ldproxy).
 #     root-path     Dot-separated path to the feature collection.
 #     x-path        Dot-separated path to the x-coordinate field.
@@ -80,6 +89,11 @@ providers:
           y-path: "properties.y"
       - id: legacy-process
         exclude: true          # configured but not exposed
+      - id: noise-simulation   # one input drives both input and output CRS
+        transmission-mode-policy: "emulate-ref"
+        result-storage: "ldproxy"
+        result-crs-input-field: "crs"
+        result-crs-default: "EPSG:25832"
 
   # ── API key header ──────────────────────────────────────────────────────────
   - name: another-server
