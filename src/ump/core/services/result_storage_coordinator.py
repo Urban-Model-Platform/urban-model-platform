@@ -370,12 +370,13 @@ class ResultStorageCoordinator:
             store_output_ids=store_output_ids,
         )
 
-        return _extract_payloads(
+        payloads = _extract_payloads(
             body_bytes=body_bytes,
             content_type=content_type,
             outputs_spec=job.outputs_spec,
             store_outputs_config=store_output_ids,
         )
+        return [replace(p, source_crs=job.result_crs) for p in payloads]
 
     async def _cache_value_outputs(
         self,
