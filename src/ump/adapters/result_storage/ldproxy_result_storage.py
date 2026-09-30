@@ -46,9 +46,11 @@ import asyncio
 import json
 import logging
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 from ump.adapters.result_storage.atomic_fs import atomic_write_text
@@ -90,6 +92,8 @@ class LdproxyResultStorage(ResultStoragePort):
         confirm_max_attempts: int = 6,
         confirm_base_wait: float = 1.5,
         confirm_max_wait: float = 8.0,
+        reload_dns_ttl: float = 30.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._backend = backend
         self._registry = service_registry
@@ -118,6 +122,12 @@ class LdproxyResultStorage(ResultStoragePort):
         # service used for read-only probing, this one is a headless Service
         # whose whole point is resolving to *every* pod, not one.
         self._reload_url = reload_url.rstrip("/") if reload_url else None
+        # Resolved pod IPs are reused for ``reload_dns_ttl`` seconds; any
+        # failed POST drops the cache so replica churn is picked up next time.
+        self._reload_dns_ttl = reload_dns_ttl
+        self._clock = clock
+        self._reload_ips: set[str] = set()
+        self._reload_ips_expiry = 0.0
         # Post-store publication-confirmation budget. ldproxy watches the store
         # and reloads the *service* and *provider* entities independently.
         # Because ``store`` writes the provider a few milliseconds before the
@@ -149,7 +159,9 @@ class LdproxyResultStorage(ResultStoragePort):
         gpkg_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Stage 1: one GeoPackage with one layer per output (atomic in itself).
-        layers = [(p.output_id, p.body_bytes, p.media_type) for p in payloads]
+        layers = [
+            (p.output_id, p.body_bytes, p.media_type, p.source_crs) for p in payloads
+        ]
         schemas = await asyncio.to_thread(
             write_layers_to_gpkg, layers, gpkg_path, self._native_crs
         )
@@ -578,31 +590,9 @@ class LdproxyResultStorage(ResultStoragePort):
             )
             return
 
-        try:
-            addrinfo = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
-        except OSError as dns_error:
-            logger.warning(
-                "[ldproxy] reload: could not resolve %s for job_id=%s: %s",
-                host,
-                job_id,
-                dns_error,
-            )
+        ips = self._resolve_reload_ips(host, port, job_id)
+        if not ips:
             return
-
-        # One A/AAAA record per backing pod for a headless Service; dedupe
-        # since getaddrinfo can repeat the same address across families/socktypes.
-        # A normal ClusterIP Service also resolves here (to its one virtual
-        # IP), so this degrades to "reload one pod, picked by kube-proxy" —
-        # correct only when ldproxy runs a single replica. Logged at debug
-        # rather than warning since a single-IP result is the expected,
-        # non-misconfigured case for most deployments.
-        ips = {info[4][0] for info in addrinfo}
-        logger.debug(
-            "[ldproxy] reload: resolved %s to %d address(es) for job_id=%s",
-            host,
-            len(ips),
-            job_id,
-        )
 
         failures = 0
         for ip in ips:
@@ -620,6 +610,8 @@ class LdproxyResultStorage(ResultStoragePort):
                     reload_error,
                 )
 
+        if failures:
+            self._reload_ips_expiry = 0.0
         if failures and failures == len(ips):
             logger.warning(
                 "[ldproxy] reload: all %d pod(s) behind %s unreachable for "
@@ -628,6 +620,37 @@ class LdproxyResultStorage(ResultStoragePort):
                 host,
                 job_id,
             )
+
+    def _resolve_reload_ips(self, host: str, port: int, job_id: str) -> set[str]:
+        """Return every address *host* resolves to, cached for ``reload_dns_ttl``."""
+        now = self._clock()
+        if self._reload_ips and now < self._reload_ips_expiry:
+            return self._reload_ips
+        try:
+            addrinfo = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        except OSError as dns_error:
+            logger.warning(
+                "[ldproxy] reload: could not resolve %s for job_id=%s: %s",
+                host,
+                job_id,
+                dns_error,
+            )
+            return set()
+
+        # One A/AAAA record per backing pod for a headless Service; dedupe
+        # since getaddrinfo can repeat the same address across families/socktypes.
+        # A normal ClusterIP Service also resolves here (to its one virtual
+        # IP), so this degrades to "reload one pod, picked by kube-proxy" —
+        # correct only when ldproxy runs a single replica.
+        self._reload_ips = {info[4][0] for info in addrinfo}
+        self._reload_ips_expiry = now + self._reload_dns_ttl
+        logger.debug(
+            "[ldproxy] reload: resolved %s to %d address(es) for job_id=%s",
+            host,
+            len(self._reload_ips),
+            job_id,
+        )
+        return self._reload_ips
 
     async def _rollback(
         self, job_id: str, gpkg_path: Path, registered: list[str]
