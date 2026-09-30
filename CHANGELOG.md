@@ -5,6 +5,11 @@ The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.html).
 # [3.x]
 - complete refactoring 
+- result store: per-process `result-crs-input-field` / `result-crs-default`
+  declare the CRS a remote writes its outputs in; stored results are labelled
+  with it and reprojected. Projected coordinates without a declared CRS are
+  refused instead of being published as lon/lat. New migration `0006`.
+- result store: ldproxy reload POSTs reuse resolved pod IPs for 30 s
 
 # [2.x]
 ## [2.1.0] - 2025-07-31
