@@ -351,18 +351,27 @@ def _label_source_crs(
 
     GDAL reports every GeoJSON without a ``crs`` member as EPSG:4326 (RFC
     7946), so for GeoJSON only an explicit ``crs`` member counts as declared.
+    A declared geographic CRS whose coordinates are not lon/lat is a wrong
+    label (remotes often emit 4326 for projected data) and loses to *source_crs*.
     """
     if source_crs is None:
         return gdf
     declared = parse_crs(source_crs)
     embedded = (
-        gdf.crs
-        if driver != "GeoJSON" or _geojson_has_crs_member(body_bytes)
-        else None
+        gdf.crs if driver != "GeoJSON" or _geojson_has_crs_member(body_bytes) else None
     )
     if embedded is None:
         return gdf.set_crs(declared, allow_override=True)
     if not embedded.equals(declared, ignore_axis_order=True):
+        if embedded.is_geographic and _outside_lonlat(gdf):
+            logger.warning(
+                "[gpkg] layer '%s' declares %s but its coordinates are not "
+                "lon/lat — using configured source CRS %s",
+                layer_name,
+                embedded.to_string(),
+                source_crs,
+            )
+            return gdf.set_crs(declared, allow_override=True)
         logger.warning(
             "[gpkg] layer '%s' declares %s, configured source CRS is %s — "
             "using the CRS declared in the data",
@@ -386,10 +395,15 @@ def _geojson_has_crs_member(body_bytes: bytes) -> bool:
     return isinstance(document, dict) and document.get("crs") is not None
 
 
+def _outside_lonlat(gdf: gpd.GeoDataFrame) -> bool:
+    minx, miny, maxx, maxy = gdf.total_bounds
+    return minx < -180 or maxx > 180 or miny < -90 or maxy > 90
+
+
 def _require_lonlat_range(gdf: gpd.GeoDataFrame, layer_name: str) -> None:
     """Refuse projected coordinates labelled with a geographic CRS."""
-    minx, miny, maxx, maxy = gdf.total_bounds
-    if minx < -180 or maxx > 180 or miny < -90 or maxy > 90:
+    if _outside_lonlat(gdf):
+        minx, miny, maxx, maxy = gdf.total_bounds
         raise UnsupportedResultError(
             f"Layer '{layer_name}': coordinates (bounds {minx:.1f}, {miny:.1f}, "
             f"{maxx:.1f}, {maxy:.1f}) are outside the lon/lat range of "

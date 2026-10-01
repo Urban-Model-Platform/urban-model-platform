@@ -123,6 +123,14 @@ class TestSourceCrs:
 
         assert "EPSG:3857" in caplog.text
 
+    def test_wrong_geographic_label_in_data_loses_to_configured_crs(self, tmp_path):
+        """AC3 (remote labels projected data as 4326)"""
+        body = _point_geojson(UTM32_XY, crs="urn:ogc:def:crs:OGC:1.3:CRS84")
+
+        gdf = _write(tmp_path, body, "http://www.opengis.net/def/crs/EPSG/0/25832")
+
+        assert _lonlat(gdf) == HAMBURG_LONLAT
+
     def test_unparseable_source_crs_names_the_value(self, tmp_path):
         """AC4"""
         with pytest.raises(ResultStorageError, match="EPSG:999999"):
@@ -212,9 +220,7 @@ class TestResolveResultCrs:
                 id="numeric-value-stringified",
             ),
             pytest.param({}, {"crs": "EPSG:25832"}, None, id="neither-configured"),
-            pytest.param(
-                {"result-crs-input-field": "crs"}, None, None, id="no-inputs"
-            ),
+            pytest.param({"result-crs-input-field": "crs"}, None, None, id="no-inputs"),
         ],
     )
     def test_resolves_crs(self, config, inputs, expected):
@@ -249,7 +255,9 @@ class TestCreateLocalJobCapturesResultCrs:
     async def test_job_carries_resolved_crs(self, inline_limit):
         """AC8"""
         ctx = _create_context({"crs": "EPSG:25832", "big": "x" * 100})
-        step = CreateLocalJobStep(JobManagerConfig(inline_inputs_size_limit=inline_limit))
+        step = CreateLocalJobStep(
+            JobManagerConfig(inline_inputs_size_limit=inline_limit)
+        )
 
         await step.process(ctx)
 
