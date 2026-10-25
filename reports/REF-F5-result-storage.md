@@ -1840,3 +1840,72 @@ planned per-layer files; docstrings name the AC): `TestSourceCrs` +
 Suite: 435 passed, 1 pre-existing failure (`test_k8s_backend`, `kubernetes`
 not installed). Migration `0006` has not yet been applied to a real DB.
 
+---
+
+## 🔲 Gap + plan (2026-10-21) — publishing a large result is a black box
+
+**Status: Not yet implemented — options agreed, decisions open (see below).**
+
+### The problem
+
+Observed on a job with a large result: it sat in `running` / "Result
+publication in progress" for 10+ minutes. The only visible change was
+`status_info.updated`; `progress: 100` and `finished` (copied from the
+remote's final status) claimed completion, and the log held a single line
+(`[observer:storage] storing result job_id=…`). Neither a client nor an
+operator can tell "working" from "stuck".
+
+### Why (from the code, not measured)
+
+`_process_status_update` persists the gated `running` snapshot, then awaits
+`ResultStorageObserver.on_job_completed` → `coordinator.coordinate(...)`
+inside the poll loop. Nothing is written to the job or logged until it
+returns. Stages inside:
+
+| Stage | Where | Large-result cost | Visible today |
+|---|---|---|---|
+| Fetch whole remote document into memory | `_fetch_results_with_retry` | up to per-attempt timeout, retried with backoff | only on retry (INFO) |
+| Parse JSON, extract payloads | `_extract_payloads` | CPU + a second copy in memory | no |
+| Read / label / reproject / write GeoPackage | `write_layers_to_gpkg` via `to_thread` | likely dominant | no |
+| Provider entity + collection registration | `ServiceRegistry.register_collection` | moderate | no |
+| Confirm publication (probe, re-touch, reload, backoff) | `_confirm_publication` | up to confirm budget (k8s ≈ 2+ min) | DEBUG only |
+| Liveness recheck | `confirm_pending` (5 × 3–20 s) | up to ≈ 1.5 min | INFO once |
+
+Open observation: `updated` changes while the job is `running`, so something
+writes it during publication. The code does not show what; `job_status_history`
+rows / logs for the window would. The options below do not depend on it.
+
+### Options
+
+1. **Phase + size logging at INFO (operator-facing).** Log each stage with
+   sizes and durations (fetched N MB in s, N features, layer i/n → gpkg size
+   and time, registered, confirm attempt i/n + last probe). A heartbeat task
+   around the blocking `to_thread` write logs elapsed time every ~30 s. Local
+   to coordinator + ldproxy adapter; no model/port/API change; clients still
+   see nothing new.
+2. **Phase reported on the job (client-facing).** New core port, e.g.
+   `PublicationProgressPort.report(phase, detail)`, implemented by the
+   observer by persisting a refreshed `status_info.message` through
+   `_repo.update` (reusing `_finalize_publication`'s optimistic-lock retry).
+   Passed into `coordinate`/`store`; throttled (≈ 1 write / 5 s), written at
+   phase boundaries. `progress: 100` stays misleading unless unset while
+   gated. Costs: port change, extra jobs-table writes, tests for phases and
+   throttling.
+3. **Structured sub-state next to the message.** Machine-readable
+   `publication: {phase, outputIndex, outputTotal, since, lastHeartbeat}` on
+   the job and in `GET /jobs/{id}` (OGC statusInfo allows extension members);
+   "stalled" becomes detectable from a stale `lastHeartbeat`. Needs a
+   migration, model field, API shape. Natural follow-up to option 2.
+4. **Make the slow part cheaper (orthogonal).** Stream the fetch to a temp
+   file instead of memory; write layers in chunks instead of holding the full
+   frame. Shortens publication; does not answer "is it alive?".
+
+**Recommendation:** 1 + 2 together; 3 as a possible follow-up; 4 separately.
+
+### Open decisions (before implementing)
+
+- Keep `progress: 100` during publication, or stop copying it until the job
+  is truly done?
+- Is one extra jobs-table write every few seconds acceptable, or only at
+  phase boundaries?
+
