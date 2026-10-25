@@ -72,6 +72,7 @@ from ump.core.interfaces.result_storage import (
     ResultStoragePort,
     StoredReference,
 )
+from ump.core.utils.heartbeat import heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -162,8 +163,17 @@ class LdproxyResultStorage(ResultStoragePort):
         layers = [
             (p.output_id, p.body_bytes, p.media_type, p.source_crs) for p in payloads
         ]
-        schemas = await asyncio.to_thread(
-            write_layers_to_gpkg, layers, gpkg_path, self._native_crs
+        started = time.monotonic()
+        async with heartbeat(logger, f"[ldproxy] writing GeoPackage job_id={job_id}"):
+            schemas = await asyncio.to_thread(
+                write_layers_to_gpkg, layers, gpkg_path, self._native_crs
+            )
+        logger.info(
+            "[ldproxy] wrote GeoPackage job_id=%s layers=%d size=%.1fMB in %.1fs",
+            job_id,
+            len(schemas),
+            gpkg_path.stat().st_size / 1e6,
+            time.monotonic() - started,
         )
 
         # Record which output ids this job stored, so `delete` can later
@@ -191,6 +201,11 @@ class LdproxyResultStorage(ResultStoragePort):
                 )
                 registered.append(collection_id)
                 ordered_collection_ids.append(collection_id)
+            logger.info(
+                "[ldproxy] registered %d collection(s) job_id=%s",
+                len(registered),
+                job_id,
+            )
         except BaseException:
             # Roll back everything this call created so `exists` stays honest
             # and no orphan survives for a later retry to trip over.
@@ -469,7 +484,7 @@ class LdproxyResultStorage(ResultStoragePort):
                 self._confirm_base_wait * (2 ** (attempt - 1)),
                 self._confirm_max_wait,
             )
-            logger.debug(
+            logger.info(
                 "[ldproxy] confirming job_id=%s: %d collection(s) not yet live, "
                 "re-touching service and re-triggering reload (attempt %d/%d, "
                 "next check in %.1fs); last probe result: %s",

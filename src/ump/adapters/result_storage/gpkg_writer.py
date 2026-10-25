@@ -31,6 +31,7 @@ import io
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -268,12 +269,13 @@ def write_layers_to_gpkg(
     schemas: dict[str, GpkgLayerSchema] = {}
     prepared: list[tuple[str, gpd.GeoDataFrame]] = []
 
-    for output_id, body_bytes, media_type, *rest in layers:
+    for index, (output_id, body_bytes, media_type, *rest) in enumerate(layers, 1):
         source_crs = rest[0] if rest else None
         validate_output_id(output_id)
         normalised_type = _normalise_media_type(media_type)
         driver = _require_supported_type(normalised_type)
 
+        started = time.monotonic()
         gdf = _read_geodataframe(body_bytes, driver, output_id)
         if gdf.empty:
             raise UnsupportedResultError(
@@ -289,6 +291,14 @@ def write_layers_to_gpkg(
             gdf, target_crs_epsg, id_source_path, id_type, promoted_id
         )
         prepared.append((output_id, gdf))
+        logger.info(
+            "[gpkg] prepared layer %d/%d (%s): %d features in %.1fs",
+            index,
+            len(layers),
+            output_id,
+            len(gdf),
+            time.monotonic() - started,
+        )
 
     _write_gpkg_layers(prepared, output_path)
 

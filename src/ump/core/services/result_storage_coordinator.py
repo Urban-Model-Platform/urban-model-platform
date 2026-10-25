@@ -35,6 +35,7 @@ import asyncio
 import base64
 import json
 import logging
+import time
 from dataclasses import replace
 from typing import Optional
 
@@ -55,6 +56,7 @@ from ump.core.interfaces.result_value_cache import (
 )
 from ump.core.models.job import Job
 from ump.core.models.providers_config import ProcessConfig
+from ump.core.utils.heartbeat import heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -348,8 +350,16 @@ class ResultStorageCoordinator:
             else {}
         )
 
-        body_bytes, content_type = await self._fetch_results_with_retry(
-            results_url, auth_headers or None, job.id
+        started = time.monotonic()
+        async with heartbeat(logger, f"[storage] fetching results job_id={job.id}"):
+            body_bytes, content_type = await self._fetch_results_with_retry(
+                results_url, auth_headers or None, job.id
+            )
+        logger.info(
+            "[storage] fetched results job_id=%s size=%.1fMB in %.1fs",
+            job.id,
+            len(body_bytes) / 1e6,
+            time.monotonic() - started,
         )
 
         store_output_ids = _resolve_store_output_ids(
@@ -375,6 +385,14 @@ class ResultStorageCoordinator:
             content_type=content_type,
             outputs_spec=job.outputs_spec,
             store_outputs_config=store_output_ids,
+        )
+        logger.info(
+            "[storage] extracted %d payload(s) job_id=%s: %s",
+            len(payloads),
+            job.id,
+            ", ".join(
+                f"{p.output_id}={len(p.body_bytes) / 1e6:.1f}MB" for p in payloads
+            ),
         )
         return [replace(p, source_crs=job.result_crs) for p in payloads]
 
